@@ -4,6 +4,7 @@
 // (written by them, or on their list); the super admin manages everything.
 const { load, save } = require('../store');
 const { Say, norm, sim } = require('../util');
+const { embed, COLOR } = require('../format');
 
 const GENERAL = 'general';
 // Old format (plain strings) is read as unsigned items of the general list.
@@ -74,21 +75,17 @@ const touch = (fn) => edit((all, s) => {
 });
 
 const date = (iso) => (iso ? new Date(iso).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '?');
-const line = (it, i) => `${i + 1}. ${it.done ? `~~${it.text}~~ ✅` : it.text} — *${it.author?.name || '?'}, ${date(it.at)}*`;
+// A list as an embed: one field per item, with its done mark, author and date.
+function card(l, mine) {
+  const open = mine.filter((it) => !it.done).length, done = mine.length - open;
+  const fields = mine.map((it, i) => {
+    const long = it.text.length > 200;
+    return { name: `${it.done ? '✅' : '⬜'} ${i + 1}. ${long ? `${it.text.slice(0, 199)}…` : it.text}`, value: `${long ? `${it.text}\n` : ''}*${it.author?.name || '?'} · ${date(it.at)}*` };
+  });
+  return { embeds: embed({ title: `📝 ${l.id === GENERAL ? 'Liste générale' : `Liste de ${l.name}`}`, color: COLOR.todo, description: `**${open}** à faire · **${done}** fait${done > 1 ? 's' : ''}`, fields }) };
+}
 // ponytail: spoken items are cut to 10 words, the full text is posted in the text channel.
 const short = (t) => { const w = t.split(/\s+/); return w.length > 10 ? `${w.slice(0, 10).join(' ')}…` : t; };
-
-// Discord caps a message at 2000 characters.
-async function post(io, text) {
-  let where = null;
-  for (let rest = text; rest; ) {
-    let cut = rest.length <= 1900 ? rest.length : rest.lastIndexOf('\n', 1900);
-    if (cut <= 0) cut = 1900;
-    where = await io.post(rest.slice(0, cut));
-    rest = rest.slice(cut).replace(/^\n/, '');
-  }
-  return where;
-}
 
 // ---------- "Note ça" requests, recognized before the LLM (and before the "several requests" guard) ----------
 
@@ -168,7 +165,7 @@ module.exports = {
   ],
   early: note,
   quick: [
-    [/^(?:montre|montrer|affiche|afficher|lis|lire|donne|donner|dis|dire|liste)(?:-moi| moi)? (?:la liste de )?(?:tout )?ce que tu as (?:retenu|noté)$|^(?:montre|montrer|affiche|afficher|lis|lire|donne|donner)(?:-moi| moi)? (?:ta liste|la liste|la to-?do(?: list)?|ta to-?do(?: list)?)$|^qu'est-ce que tu as (?:retenu|noté)$|^(?:show|read)(?: me)? (?:the|your) (?:list|to-?do(?: list)?)$|^what did you (?:note|remember)$/, () => [{ type: 'todo_list', list: GENERAL }]],
+    [/^(?:montre|montrer|affiche|afficher|lis|lire|donne|donner|dis|dire|liste)(?:-moi| moi)? (?:la liste de )?(?:tout )?ce que tu as (?:retenu|noté)$|^(?:montre|montrer|affiche|afficher|lis|lire|donne|donner)(?:-moi| moi)? (?:ta liste|la liste|la to-?do(?: list)?|ta to-?do(?: list)?)$|^qu'est-ce que tu as (?:retenu|noté)$|^(?:show|read|give)(?: me)? (?:the|your) (?:list|to-?do(?: list)?)$|^what did you (?:note|remember)$/, () => [{ type: 'todo_list', list: GENERAL }]],
     [/^(?:montre|montrer|affiche|afficher|lis|lire|donne|donner)(?:-moi| moi)? ma (?:liste|to-?do(?: list)?)$|^(?:show|read)(?: me)? my (?:list|to-?do(?: list)?)$/, () => [{ type: 'todo_list', list: 'moi' }]],
   ],
   fields: { list: LIST_FIELD },
@@ -194,8 +191,7 @@ module.exports = {
         const l = s.list || { id: GENERAL };
         const mine = items().filter((it) => it.list === l.id);
         s.open = mine.filter((it) => !it.done);
-        const title = `📝 **${l.id === GENERAL ? 'Liste générale' : `Liste de ${l.name}`}** (${s.open.length} à faire, ${mine.length - s.open.length} fait${mine.length - s.open.length > 1 ? 's' : ''})`;
-        s.where = mine.length && io.post ? await post(io, [title, ...mine.map(line)].join('\n')) : null;
+        s.where = mine.length && io.post ? await io.post(card(l, mine)) : null;
       },
       say: say(
         (s, l) => {

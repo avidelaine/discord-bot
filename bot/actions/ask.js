@@ -21,12 +21,16 @@ function check() {
 }
 
 // No files, no shell, no MCP, no user settings; web search only.
-function ask(question, lang) {
+// written: the answer is posted, not spoken, so it may be longer and use Discord markdown.
+function ask(question, lang, written = false) {
   const dir = path.join(require('os').tmpdir(), 'bobby-claude'); // empty working folder: nothing to read
   fs.mkdirSync(dir, { recursive: true });
-  const style = lang === 'en'
-    ? 'Answer in English, in one or two short spoken sentences, no markdown, no lists.'
-    : 'Réponds en français, en une ou deux phrases courtes à dire à voix haute, sans markdown ni liste.';
+  const style = written
+    ? (lang === 'en' ? 'Answer in English, for a Discord message: complete but concise (under 1500 characters), Discord markdown allowed (bold, bullet lists).'
+      : 'Réponds en français, pour un message Discord : complet mais concis (moins de 1500 caractères), markdown Discord autorisé (gras, listes à puces).')
+    : lang === 'en'
+      ? 'Answer in English, in one or two short spoken sentences, no markdown, no lists.'
+      : 'Réponds en français, en une ou deux phrases courtes à dire à voix haute, sans markdown ni liste.';
   return new Promise((resolve, reject) => {
     const child = spawn('claude', [
       '-p', question, '--model', MODEL, '--append-system-prompt', `You answer for Bobby, a Discord voice assistant. ${style}`,
@@ -72,7 +76,7 @@ module.exports = {
       async run(s, io, lang) {
         if (!ready) { s.answer = OFF[lang] || OFF.fr; check(); return; } // re-check for next time, without waiting
         const t0 = performance.now();
-        try { s.answer = await ask(s.text, lang); s.voice = 'claude'; } catch (e) { console.error('[claude]', e.message); s.answer = DOWN[lang] || DOWN.fr; }
+        try { s.answer = await ask(s.text, lang, s.written); s.voice = 'claude'; if (s.written) s.card = `❓ **${s.text}**\n\n${s.answer}`; } catch (e) { console.error('[claude]', e.message); s.answer = DOWN[lang] || DOWN.fr; }
         console.log(`[claude] ${Math.round(performance.now() - t0)} ms: ${s.answer}`);
       },
       say: { fr: (s) => s.answer, en: (s) => s.answer },

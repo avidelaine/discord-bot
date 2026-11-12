@@ -183,7 +183,7 @@ console.log('PC shortcuts and rights: ok');
   save('aliases', { b: ['le Grec', 'Zo'], a: ['la Reine'], c: [] });
   const lst = plan('qui a quel surnom');
   await run(lst, nio);
-  assert.deepStrictEqual(posts, ['**Ana** : la Reine\n**Zoé** : le Grec, Zo']);
+  assert.match(posts[0].embeds[0].description, /^```\nPersonne  Surnoms\n-+  -+\nAna       la Reine\nZoé       le Grec, Zo\n```$/); // aligned table in an embed
   assert.strictEqual(describe(lst), "Je l'ai mis dans dev-bot-test.");
   assert.strictEqual(describe(lst, 'en'), 'I put it in dev-bot-test.');
   const rn = plan('renomme le surnom le grec en le Spartiate');
@@ -290,6 +290,7 @@ console.log('PC shortcuts and rights: ok');
 
   await batch2();
   await batch3();
+  await batch3Written();
 })().catch((e) => { console.error(e); process.exit(1); });
 
 // ---------- Batch 2 (journal of 2026-11-12, 22:12-22:24) ----------
@@ -319,8 +320,11 @@ async function batch2() {
   posts.length = 0;
   const said = await go([{ type: 'todo_list' }], wak);
   assert.match(said, /^La liste générale : 4 points\. Mettre des fondus dans la musique ; Une voix différente pour Claude ; Nettoyer dev-bot-test ; et la suite\. Tout est dans dev-bot-test\.$/);
-  assert.match(posts[0], /Liste générale\*\* \(4 à faire, 1 fait\)/);
-  assert.match(posts[0], /~~Ilias doit avoir.*~~ ✅ — \*Prime Ilias, \d\d\/\d\d/);
+  const [list] = posts[0].embeds;
+  assert.deepStrictEqual([list.title, list.description], ['📝 Liste générale', '**4** à faire · **1** fait']);
+  assert.match(list.fields[0].name, /^✅ 1. Ilias doit avoir/);
+  assert.match(list.fields[0].value, /^\*Prime Ilias · \d\d\/\d\d/);
+  assert.match(list.fields[1].name, /^⬜ 2. /);
   assert.match(await go([{ type: 'todo_list', list: 'moi' }], alex), /^Ta liste est vide\.$/); // only done items left
   assert.strictEqual(await go([{ type: 'todo_move', text: 'quatrième', to: 'moi' }], wak), 'Je déplace « Quatrième point » dans ta liste.');
   assert.strictEqual(load('todo', []).find((x) => x.text === 'Quatrième point').list, '261531632589078528');
@@ -541,4 +545,67 @@ async function batch3() {
   assert.match(journal, /"outcome":"interrupted"/);
   assert.match(journal, /"outcome":"stop_ignored"/);
   console.log('batch 3, interrupt: ok');
+}
+
+// ---------- Batch 3: written answers and Discord formatting ----------
+async function batch3Written() {
+  const { hear, writing } = require('./brain');
+  const fmt = require('./format');
+  const H = (query) => [{ at: Date.now(), query, reply: '' }];
+  const W = (q, h = []) => { const w = writing(q, ctx, h); return w && [w.query, w.channel?.name || null]; };
+  assert.deepStrictEqual(W('dis-moi par écrit ce que tu sais faire'), ['dis-moi ce que tu sais faire', null]);
+  assert.deepStrictEqual(W('écris-moi la liste'), ['donne-moi la liste', null]);
+  assert.deepStrictEqual(W('envoie-moi les surnoms dans memes'), ['donne-moi les surnoms', 'memes']);
+  assert.deepStrictEqual(W('écris-le dans général', H('quelle heure est-il')), ['quelle heure est-il', 'général']);
+  assert.deepStrictEqual(W('what can you do, in writing?'), ['what can you do', null]);
+  assert.deepStrictEqual(W('send me the list'), ['give me the list', null]);
+  assert.strictEqual(W('écris dans général que la réunion est à 21 h'), null); // the message action, not an answer in writing
+  assert.strictEqual(W("qu'est-ce que tu sais faire"), null);
+  for (const [q, type] of [['dis-moi ce que tu sais faire', 'help'], ['donne-moi la liste', 'todo_list'], ['donne-moi les surnoms', 'alias_list'], ['qui a quels droits', 'rights_list'], ['give me the list', 'todo_list'], ['donne-moi les droits de Lucas', 'perm_show']]) {
+    assert.strictEqual(quick(q)?.[0].type, type, q);
+  }
+
+  // Through hear(), as Bobby runs it: the content is posted, only a short line is spoken
+  const chans = new Map(['dev-bot-test', 'memes', 'général'].map((name) => [name, { type: 0, name, ref: null }]));
+  for (const c of chans.values()) c.ref = c;
+  const guild = { voiceStates: { cache: new Map() }, channels: { cache: chans } };
+  const who = (id, displayName, roleNames = []) => ({ id, displayName, roles: { cache: roleNames.map((name) => ({ name, id: `r-${name}` })) }, user: { bot: false, username: displayName } });
+  const PRIME = who('42', 'Marie', ['Team Prime']), SUPER = who('261531632589078528', 'WakandeX');
+  const go = async (m, text) => {
+    const io = { said: [], posts: [], speaking: () => null, hush() {}, beep() {}, say(t) { io.said.push(t); }, textChannel: chans.get('dev-bot-test'), memberName: async (id) => id,
+      post: async (c, ch = chans.get('dev-bot-test')) => { io.posts.push([c, ch.name]); return ch.name; } };
+    await hear({ text, member: m, guild, tEnd: performance.now(), io });
+    return io;
+  };
+  let io = await go(PRIME, 'Bobby, dis-moi par écrit ce que tu sais faire');
+  assert.deepStrictEqual(io.said, ["Je t'envoie ça dans dev-bot-test."]); // "par écrit" posts and does not read
+  assert.strictEqual(io.posts.length, 1);
+  const cap = io.posts[0][0].embeds[0];
+  assert.deepStrictEqual(cap.fields.map((f) => f.name), ['Prime (rôle Team Prime)', 'Admin (en plus)', 'Super admin (tout)']);
+  assert.match(cap.fields[0].value, /liste générale/);
+  assert.doesNotMatch(cap.fields[0].value, /couper ou rétablir/); // moderation stays admin
+  io = await go(PRIME, 'Bobby, écris-moi la liste dans memes');
+  assert.deepStrictEqual([io.said, io.posts.length], [["Tu n'as pas le droit de me demander ça."], 0]); // outside TEXT_CHANNEL: admin
+  io = await go(SUPER, 'Bobby, envoie-moi la liste des droits dans memes');
+  assert.deepStrictEqual(io.said, ["Je t'envoie ça dans memes."]);
+  assert.deepStrictEqual([io.posts[0][1], io.posts[0][0].embeds[0].title], ['memes', '🔐 Droits']);
+  io = await go(SUPER, 'Bobby, quelle heure est-il ?');
+  assert.match(io.said[0], /^Nous sommes/);
+  assert.strictEqual(io.posts.length, 0); // spoken answers are never echoed in text
+  console.log('batch 3, written answers: ok');
+
+  // Discord limits
+  const long = Array.from({ length: 300 }, (_, i) => `ligne ${i} ${'x'.repeat(20)}`).join('\n');
+  const parts = fmt.chunks(long);
+  assert(parts.length > 1 && parts.every((p) => p.length <= 2000) && parts.join('\n') === long);
+  const code = fmt.chunks(`\`\`\`\n${long}\n\`\`\``);
+  assert(code.every((p) => (p.match(/```/g) || []).length % 2 === 0)); // a cut code block is closed and reopened
+  const many = fmt.embed({ title: 'T', fields: Array.from({ length: 30 }, (_, i) => ({ name: `f${i}`, value: 'v' })) });
+  assert.deepStrictEqual(many.map((e) => e.fields.length), [25, 5]);
+  const big = fmt.embed({ title: 'T', fields: [{ name: 'gros', value: 'y'.repeat(3000) }] });
+  assert(big[0].fields.length === 3 && big[0].fields.every((f) => f.value.length <= 1024));
+  assert.strictEqual(fmt.table(['A', 'Nom'], [['1', 'Zoé'], ['22', 'x']]), '```\nA   Nom\n--  ---\n1   Zoé\n22  x\n```');
+  const msgs = fmt.messages([{ embeds: Array.from({ length: 12 }, () => ({ title: 't', fields: [] })) }, 'texte']);
+  assert.deepStrictEqual(msgs.map((m) => (m.embeds ? m.embeds.length : m.content)), [10, 2, 'texte']);
+  console.log('batch 3, discord formatting: ok');
 }

@@ -57,14 +57,13 @@ module.exports = {
     '- msg_delete : supprimer ton dernier message écrit ("channel" facultatif)',
     '- clean : supprimer tous tes propres messages d\'un salon texte ("channel" facultatif)',
     '- leave : Bobby quitte le salon vocal',
-    '- come : Bobby (toi) vient dans le salon vocal "channel" ("ici" = celui de celui qui parle)',
   ],
   rules: [
     '- "virer", "dégager" ou "kicker" une personne nommée du vocal, c\'est disconnect. Si on dit à Bobby lui-même de partir, c\'est leave.',
     '- "dé-mute", "démute" ou "des mute" (mal transcrit), c\'est unmute. "drag" ou "draguer" quelqu\'un, c\'est le déplacer (move) dans le salon de celui qui parle.',
     '- "couper" quelqu\'un sans préciser, c\'est mute (le micro seulement).',
     '- "nettoie" un salon ou "supprime les messages" d\'un salon : clean (tu ne supprimes que tes propres messages).',
-    '- Bobby, c\'est toi : tu ne peux ni te muter ni te déplacer ("actions" vide, dis-le dans "say").',
+    '- Bobby, c\'est toi : tu ne peux pas te muter ("actions" vide, dis-le dans "say").',
     '- "ici" désigne le salon vocal de celui qui parle : mets son nom exact dans "channel".',
   ],
   examples: [
@@ -78,8 +77,6 @@ module.exports = {
     '"c\'est bon tu peux y aller" -> {"actions":[{"type":"leave"}],"say":""}',
     '"move me and Zyklon to Gaming" -> {"actions":[{"type":"move","who":["moi","Zyklon"],"channel":"Gaming"}],"say":""}',
     '"you can leave now" -> {"actions":[{"type":"leave"}],"say":""}',
-    '"viens dans Gaming" -> {"actions":[{"type":"come","channel":"Gaming"}],"say":""}',
-    '"rejoins-nous" -> {"actions":[{"type":"come","channel":"Général"}],"say":""}',
     '"kick Lucas from voice" -> {"actions":[{"type":"disconnect","who":["Lucas"]}],"say":""}',
     '"fais un clean-up du salon memes" -> {"actions":[{"type":"clean","channel":"memes"}],"say":""}',
     '"corrige ton dernier message en : rendez-vous à 21 h" -> {"actions":[{"type":"msg_edit","text":"rendez-vous à 21 h"}],"say":""}',
@@ -99,8 +96,6 @@ module.exports = {
     [/^(?:drag|draguer|drague|ramène) (.+?)(?: ici| here)?$/, (m) => [{ type: 'move', who: who(m[1]), channel: 'ici' }]],
     [/^(?:pars|partir|va-t'en|vas-t'en|quitte le (?:salon|vocal)(?: vocal)?|tu peux partir|leave|go away|leave the (?:channel|voice channel))$/, () => [{ type: 'leave' }]],
     [/^(?:nettoie|clean(?: up)?|fais (?:le |un )?(?:clean-?up|ménage)(?: de| du| dans)?)(?: le salon| the channel| salon)? ?#?(.*)$/, (m) => [{ type: 'clean', ...(m[1] && { channel: m[1] }) }]],
-    [/^(?:viens|ram[eè]ne-toi|rejoins(?:[- ](?:nous|moi))?|come(?: over)?|join (?:us|me))(?: (?:ici|here|là|la))?$/, () => [{ type: 'come', channel: 'ici' }]],
-    [/^(?:viens|rejoins(?:[- ](?:nous|moi))?|déplace-toi|come|join(?: us| me)?) (?:dans|en|sur|to|in|into|over to) (?:le salon |la salle (?:de )?|the )?(.+?)(?: channel)?$/, (m) => [{ type: 'come', channel: m[1] }]],
     [/^(?:supprime|efface|delete) ton dernier message$/, () => [{ type: 'msg_delete' }]],
     [/^(?:kick|vire|dégage|déconnecte) (.+?)(?: du vocal| from voice| out of voice)?$/, (m) => [{ type: 'disconnect', who: who(m[1]) }]],
   ],
@@ -162,17 +157,6 @@ module.exports = {
         fr: (s) => (s.where ? (s.count ? `Je supprime mes ${s.count} messages dans ${s.where}.` : `Je n'ai aucun message dans ${s.where}.`) : `Je nettoie ${s.channel?.name || 'le salon'}.`),
         en: (s) => (s.where ? (s.count ? `Deleting my ${s.count} messages in ${s.where}.` : `I have no messages in ${s.where}.`) : `Cleaning ${s.channel?.name || 'the channel'}.`),
       },
-    },
-    // Bobby alone comes to a channel ("viens dans PRIME", "rejoins-nous"); moving other people stays admin.
-    come: {
-      role: 'prime',
-      channel: 'voice',
-      normalize: (a) => (a.channel ? null : { ...a, channel: 'ici' }),
-      run(s, io) {
-        const back = io.follow?.(s.channel.ref);
-        return back ? () => io.follow(back) : undefined;
-      },
-      say: { fr: (s) => `J'arrive dans ${s.channel.name}.`, en: (s) => `Coming to ${s.channel.name}.` },
     },
     leave: {
       role: 'admin',

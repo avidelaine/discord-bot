@@ -3,6 +3,7 @@
 const fs = require('fs');
 const roles = require('../roles');
 const { llm } = require('../util');
+const { embed, COLOR } = require('../format');
 
 const modules = () => fs.readdirSync(__dirname).filter((f) => f.endsWith('.js')).sort().map((f) => require(`./${f}`));
 
@@ -15,6 +16,14 @@ const moduleRole = (m) => Object.values(m.actions || {}).filter((a) => !a.info).
 // What a role may do, from the roles the action modules declare: "la musique, les listes de tâches, ..."
 const abilities = (role, lang = 'fr') => modules().filter((m) => m.short && moduleRole(m) && roles.LEVEL[moduleRole(m)] <= roles.LEVEL[role])
   .map((m) => m.short[lang]).join(', ');
+
+// "Ce que je sais faire" as an embed, one field per role (what each role adds).
+function capabilitiesCard(lang = 'fr') {
+  const en = lang === 'en';
+  const names = { prime: `Prime (${en ? 'role' : 'rôle'} ${roles.people().primeRole})`, admin: en ? 'Admin (in addition)' : 'Admin (en plus)', super: en ? 'Super admin (everything)' : 'Super admin (tout)' };
+  const fields = Object.keys(names).map((r) => ({ name: names[r], value: modules().filter((m) => m.help && moduleRole(m) === r).map((m) => `• ${m.help[lang] || m.help.fr}`).join('\n') || '-' }));
+  return { embeds: embed({ title: en ? '🤖 What I can do' : '🤖 Ce que je sais faire', color: COLOR.info, description: en ? 'Say « Bobby, … » in voice.' : 'Dis « Bobby, … » en vocal.', fields }) };
+}
 
 const ROLE_NAME = { super: 'super admin', admin: 'admin', prime: 'Prime', other: 'sans rôle' };
 
@@ -52,18 +61,21 @@ Réponds à la question ou à la remarque sur toi en une ou deux phrases courtes
 const now = (lang) => new Date().toLocaleString(lang === 'en' ? 'en-GB' : 'fr-FR', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
 
 module.exports = {
-  help: { fr: "dire l'heure et répondre aux questions sur moi", en: 'tell the time and answer questions about me' },
-  short: { fr: "l'heure et les questions sur moi", en: 'the time and questions about me' },
+  help: { fr: "dire l'heure, venir dans ton salon vocal et répondre aux questions sur moi", en: 'tell the time, come to your voice channel and answer questions about me' },
+  short: { fr: "l'heure, me faire venir et les questions sur moi", en: 'the time, calling me over and questions about me' },
   prompt: [
     '- time : dire la date et l\'heure',
     '- help : dire ce que tu sais faire (lister tes fonctionnalités, ce qu\'on t\'a implémenté)',
+    '- come : Bobby (toi) vient dans le salon vocal "channel" ("ici" = celui de celui qui parle)',
     '- about : question ou remarque sur Bobby (toi), tes réglages, ta voix, ton mot d\'activation, qui a quels droits, les gens du serveur, ou la conversation en cours ; "text" = la phrase complète',
   ],
-  rules: [],
+  rules: ['- "viens", "rejoins-nous", "come here", "déplace-toi dans X" : come (Bobby vient seul). Déplacer les autres : move.'],
   examples: [
     '"il est quelle heure" -> {"actions":[{"type":"time"}],"say":""}',
     '"qu\'est-ce que tu sais faire" -> {"actions":[{"type":"help"}],"say":""}',
     '"liste-moi tes fonctionnalités" -> {"actions":[{"type":"help"}],"say":""}',
+    '"viens dans Gaming" -> {"actions":[{"type":"come","channel":"Gaming"}],"say":""}',
+    '"rejoins-nous" -> {"actions":[{"type":"come","channel":"Général"}],"say":""}',
     '"how are you doing" -> {"actions":[],"say":"I\'m doing great, thanks!"}',
     '"t\'es qui toi" -> {"actions":[{"type":"about","text":"t\'es qui toi"}],"say":""}',
     '"est-ce que tu es meilleur que Siri" -> {"actions":[{"type":"about","text":"est-ce que tu es meilleur que Siri"}],"say":""}',
@@ -72,7 +84,9 @@ module.exports = {
   ],
   quick: [
     [/^(?:quelle heure (?:est-il|il est|est il)|il est quelle heure|what time is it|what's the time)$/, () => [{ type: 'time' }]],
-    [/\blist\w* (?:moi )?(?:tes |les |your )?(?:features|fonctionnalit|commandes|capacit|commands)|qu'est-ce que tu sais faire|que sais-tu faire|tu sais faire quoi|what can you do/, () => [{ type: 'help' }]],
+    [/^(?:viens|ram[eè]ne-toi|rejoins(?:[- ](?:nous|moi))?|come(?: over)?|join (?:us|me))(?: (?:ici|here|là|la))?$/, () => [{ type: 'come', channel: 'ici' }]],
+    [/^(?:viens|rejoins(?:[- ](?:nous|moi))?|déplace-toi|come|join(?: us| me)?) (?:dans|en|sur|to|in|into|over to) (?:le salon |la salle (?:de )?|the )?(.+?)(?: channel)?$/, (m) => [{ type: 'come', channel: m[1] }]],
+    [/\blist\w* (?:moi )?(?:tes |les |your )?(?:features|fonctionnalit|commandes|capacit|commands)|ce que tu sais faire|que sais-tu faire|tu sais faire quoi|what can you do/, () => [{ type: 'help' }]],
   ],
   actions: {
     time: {
@@ -82,8 +96,19 @@ module.exports = {
     },
     help: {
       role: 'prime',
-      run() {},
+      run(s, io, lang) { s.card = capabilitiesCard(lang); }, // posted only when asked in writing
       say: { fr: () => `Je sais ${capabilities('fr')}.`, en: () => `I can ${capabilities('en')}.` },
+    },
+    // Bobby alone comes to a channel ("viens dans PRIME", "rejoins-nous"); moving other people stays admin.
+    come: {
+      role: 'prime',
+      channel: 'voice',
+      normalize: (a) => (a.channel ? null : { ...a, channel: 'ici' }),
+      run(s, io) {
+        const back = io.follow?.(s.channel.ref);
+        return back ? () => io.follow(back) : undefined;
+      },
+      say: { fr: (s) => `J'arrive dans ${s.channel.name}.`, en: (s) => `Coming to ${s.channel.name}.` },
     },
     about: {
       role: 'prime', text: true,
@@ -92,6 +117,7 @@ module.exports = {
     },
   },
   capabilities,
+  capabilitiesCard,
   abilities,
   facts,
   ROLE_NAME,

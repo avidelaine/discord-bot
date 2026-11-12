@@ -4,6 +4,7 @@
 const roles = require('../roles');
 const { perms, savePerms, isSuper } = roles;
 const { Say } = require('../util');
+const { embed, COLOR } = require('../format');
 
 const without = (l, id) => l.filter((x) => x !== id);
 const SUPER_ONLY_BY_HAND = () => new Say(
@@ -38,6 +39,25 @@ function rightsOf(s, n, lang) {
   return `${n} est ${role === 'super' ? 'super admin, avec tous les droits' : role === 'admin' ? 'admin' : 'Prime'} : ${can}.`;
 }
 
+// Who has which rights, as an embed: one field per role with its people and what it can do.
+async function rightsCard(io, lang = 'fr') {
+  const info = require('./info');
+  const p = roles.people();
+  const en = lang === 'en';
+  const names = async (ids) => (await Promise.all(ids.map((id) => io.memberName(id)))).join(', ') || (en ? 'nobody' : 'personne');
+  return { embeds: embed({
+    title: en ? '🔐 Rights' : '🔐 Droits',
+    color: COLOR.rights,
+    fields: [
+      { name: '👑 Super admin', value: `${await names(p.supers)}\n*${info.abilities('super', lang)}*` },
+      { name: '🛡️ Admins', value: `${await names(p.admins)}\n*${info.abilities('admin', lang)}*` },
+      { name: `⭐ Prime (${en ? 'role' : 'rôle'} ${p.primeRole})`, value: `*${info.abilities('prime', lang)}*` },
+      { name: en ? '🚫 Blacklisted' : '🚫 Liste noire', value: await names(p.blacklist) },
+    ],
+    footer: en ? 'The super admin only changes by hand, in .env.' : 'Le super admin ne change qu\'à la main, dans le fichier .env.',
+  }) };
+}
+
 module.exports = {
   help: { fr: 'gérer les droits de chacun et dire qui a quels droits', en: "manage everyone's rights and tell who has which rights" },
   short: { fr: 'les droits', en: 'the rights' },
@@ -63,7 +83,8 @@ module.exports = {
     [/^(?:redonne|rends|remets) (?:les |ses )?(?:permissions|droits) (?:de|à|a|au) (.+)$/, (m) => [{ type: 'perm_restore', who: [m[1]] }]],
     [/^(?:passe|mets|nomme) (.+?) admin$/, (m) => [{ type: 'admin_add', who: [m[1]] }]],
     [/^(?:retire|enlève|enleve) (?:l'|le rôle )?admin (?:de|à|a|au) (.+)$/, (m) => [{ type: 'admin_remove', who: [m[1]] }]],
-    [/^(?:quels sont |c'est quoi )?(?:les )?(?:droits|permissions) (?:de |d'|du )(.+)$|^quels droits (?:a|as) (.+)$|^what are (.+?)'s (?:rights|permissions)$/, (m) => [{ type: 'perm_show', who: [m[1] || m[2] || m[3]] }]],
+    [/^(?:(?:dis|donne)[- ]moi )?(?:quels sont |c'est quoi )?(?:les )?(?:droits|permissions) (?:de |d'|du )(.+)$|^(?:(?:dis|donne)[- ]moi )?quels droits (?:a|as) (.+)$|^what are (.+?)'s (?:rights|permissions)$/, (m) => [{ type: 'perm_show', who: [m[1] || m[2] || m[3]] }]],
+    [/^(?:qui a quels droits|(?:liste|montre|affiche|donne)(?:-moi| moi)? (?:les|tous les) droits|(?:la )?liste des droits|who has which rights|(?:list|show|give)(?: me)?(?: all)?(?: the)? rights)$/, () => [{ type: 'rights_list' }]],
   ],
   actions: {
     perm_revoke: {
@@ -88,8 +109,17 @@ module.exports = {
     },
     perm_show: {
       role: 'prime', info: true, who: true, one: true,
-      run() {},
+      run(s, io, lang) { // the card is posted only when asked in writing
+        const n = s.targets[0].name;
+        s.card = { embeds: embed({ title: lang === 'en' ? `🔐 ${n}'s rights` : `🔐 Droits de ${n}`, color: COLOR.rights, description: rightsOf(s, n, lang) }) };
+      },
       say: { fr: (s, n) => rightsOf(s, n, 'fr'), en: (s, n) => rightsOf(s, n, 'en') },
+    },
+    // Not in the LLM prompt ("qui est admin" stays a spoken "about"): shortcut, or an "about" on rights asked in writing.
+    rights_list: {
+      role: 'prime', info: true,
+      async run(s, io, lang) { s.where = io.post ? await io.post(await rightsCard(io, lang)) : null; },
+      say: { fr: (s) => (s.where ? `Je l'ai mis dans ${s.where}.` : ''), en: (s) => (s.where ? `I put it in ${s.where}.` : '') },
     },
     super_admin: {
       role: 'prime', info: true, // whoever asks gets the same answer

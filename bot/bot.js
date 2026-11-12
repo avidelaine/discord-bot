@@ -28,6 +28,7 @@ const { decode } = require('./music/sources');
 const aliases = require('./actions/aliases');
 const roles = require('./roles');
 const { whenAlone } = require('./actions/discord');
+const { messages } = require('./format');
 
 const VOICE_URL = process.env.VOICE_URL || 'http://127.0.0.1:3000';
 // Silence that ends a sentence. Shorter is snappier, but cuts you off if you pause mid-sentence.
@@ -104,7 +105,8 @@ function makeIo(guild, textChannel) {
     memberName: memberName(guild),
     textChannel,
     follow,
-    post: async (text) => { await textChannel.send(text); return textChannel.name; },
+    // content: text, { embeds } or a list of those, split to Discord's limits. ch: another text channel ("écris-le dans général").
+    post: async (content, ch = textChannel) => { for (const m of messages(content)) await ch.send(m); return ch.name; },
     beep: () => { mixer.overlay(new PassThrough().end(BEEP)); },
     // voice 'claude': Claude's answers, spoken with the second pair of Piper voices.
     // forId: the person this answers, who may interrupt it with a plain "stop" (see brain.js).
@@ -198,8 +200,8 @@ async function onCommand(it) {
     return it.reply('À plus.');
   }
   if (it.commandName === 'surnoms') {
-    const list = (await aliases.listText({ memberName: memberName(it.guild) })) || "Personne n'a de surnom.";
-    return it.reply(list.slice(0, 2000)); // Discord message limit
+    const card = await aliases.listCard({ memberName: memberName(it.guild) });
+    return it.reply(card ? messages(card)[0] : "Personne n'a de surnom.");
   }
   const channel = it.member.voice.channel;
   if (!channel) return it.reply({ content: 'Rejoins un salon vocal d\'abord.', ephemeral: true });

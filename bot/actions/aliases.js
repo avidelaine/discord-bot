@@ -2,6 +2,7 @@
 // Everything here is super admin only.
 const { load, save } = require('../store');
 const { norm } = require('../util');
+const { embed, table, COLOR } = require('../format');
 
 const has = (list, text) => (list || []).findIndex((x) => norm(x) === norm(text));
 
@@ -21,11 +22,13 @@ const edit = (fn) => async (s, io) => {
 // Person who has nickname s.text: the one named in the sentence, else anyone.
 const owner = (all, s) => (s.targets ? [s.targets[0].id] : Object.keys(all)).find((id) => has(all[id], s.text) >= 0);
 
-// "**Name** : nick1, nick2", one line per person, sorted by name. People may have left voice: names come from io.
-async function listText(io) {
+// Nicknames as an embed holding an aligned table (person | nicknames), sorted by name; null when nobody has one.
+// People may have left voice: names come from io.
+async function listCard(io) {
   const all = load('aliases', {});
-  const rows = await Promise.all(Object.entries(all).filter(([, l]) => l.length).map(async ([id, l]) => [await io.memberName(id), l]));
-  return rows.sort((a, b) => a[0].localeCompare(b[0])).map(([n, l]) => `**${n}** : ${l.join(', ')}`).join('\n');
+  const rows = await Promise.all(Object.entries(all).filter(([, l]) => l.length).map(async ([id, l]) => [await io.memberName(id), l.join(', ')]));
+  if (!rows.length) return null;
+  return { embeds: embed({ title: '🏷️ Surnoms', color: COLOR.nicknames, description: table(['Personne', 'Surnoms'], rows.sort((a, b) => a[0].localeCompare(b[0]))) }) };
 }
 
 const who = (s, n) => n || s.owner;
@@ -63,7 +66,7 @@ module.exports = {
     [/^(?:delete|remove) (?:the )?nickname (.+)$/, (m) => [{ type: 'alias_remove', text: m[1] }]],
   ],
   fields: { to: { type: 'string' } }, // merged into the LLM schema: new nickname of alias_rename
-  listText,
+  listCard,
   actions: {
     alias_add: {
       role: 'super', who: true, one: true, text: true,
@@ -105,8 +108,8 @@ module.exports = {
     alias_list: {
       role: 'super',
       async run(s, io) {
-        const text = await listText(io);
-        s.where = text && (await io.post(text));
+        const card = await listCard(io);
+        s.where = card && (await io.post(card));
       },
       say: {
         fr: (s) => (s.where ? `Je l'ai mis dans ${s.where}.` : "Personne n'a de surnom."),

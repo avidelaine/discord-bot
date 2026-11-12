@@ -17,6 +17,7 @@ module.exports = {
   examples: [
     '"il est quelle heure" -> {"actions":[{"type":"time"}],"say":""}',
     '"qu\'est-ce que tu sais faire" -> {"actions":[{"type":"help"}],"say":""}',
+    '"liste-moi tes fonctionnalités" -> {"actions":[{"type":"help"}],"say":""}',
     '"how are you doing" -> {"actions":[],"say":"I\'m doing great, thanks!"}',
     '"t\'es qui toi" -> {"actions":[],"say":"Je suis Bobby, l\'assistant vocal du serveur."}',
   ],

@@ -65,3 +65,6 @@ build/
 
 # Wake word training workspace (third-party trainer, datasets)
 /_training/
+
+# Logs (conversation journal, launcher logs)
+/_logs/

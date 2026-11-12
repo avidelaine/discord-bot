@@ -1,7 +1,15 @@
 // Bobby's brain: transcribed sentence -> intent (local LLM) -> resolved names -> Discord actions.
 // Bobby understands French and English, and answers in the language it was spoken to in.
 const { findWake } = require('./wake');
+const fs = require('fs');
+const path = require('path');
 const { load, save } = require('./store');
+
+// One JSON line per exchange in _logs/conversations.jsonl (kept out of git), reviewed to improve Bobby.
+// Full text only for sentences addressed to Bobby; other speech is logged as metadata by bot.js.
+const JOURNAL = path.join(__dirname, '..', '_logs', 'conversations.jsonl');
+fs.mkdirSync(path.dirname(JOURNAL), { recursive: true });
+const journal = (rec) => fs.appendFile(JOURNAL, `${JSON.stringify(rec)}\n`, () => {});
 
 const LLM_URL = process.env.LLM_URL || 'http://127.0.0.1:8080';
 const ALLOWED = (process.env.ALLOWED_USERS || '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -54,6 +62,7 @@ Règles :
 - Les noms sont souvent mal transcrits : écris le nom du contexte qui ressemble le plus à ce qui a été dit.
 - Plusieurs demandes dans une phrase donnent plusieurs actions, dans l'ordre.
 - Question ou discussion sans action : "actions" vide, et réponds dans "say" en une phrase courte.
+- Tu connais la date et l'heure actuelles (dans le contexte) : utilise-les si on te les demande.
 - Demande impossible ou incompréhensible : "actions" vide, et "say" le dit en une phrase courte.
 - "say" est toujours dans la langue de la phrase : français si on te parle français, anglais si on te parle anglais.
 
@@ -95,7 +104,7 @@ function context(member, guild) {
 
 const hotwords = (ctx) => ['Bobby', ...ctx.members.flatMap((m) => [m.name, ...(m.nicknames || [])]), ...ctx.voiceChannels.map((c) => c.name)].join(' ').slice(0, 400);
 
-function prompt(ctx, query) {
+function prompt(ctx, query, lang) {
   const byChan = {};
   for (const m of ctx.members) (byChan[m.channel] ||= []).push(m.nicknames?.length ? `${m.name} [surnoms : ${m.nicknames.join(', ')}]` : m.name);
   return [
@@ -105,16 +114,17 @@ function prompt(ctx, query) {
     `Salons texte : ${ctx.textChannels.map((c) => c.name).join(', ')}.`,
     `Date : ${new Date().toLocaleString('fr-FR', { dateStyle: 'full', timeStyle: 'short' })}.`,
     '',
+    `Réponds dans "say" en ${lang === 'en' ? 'anglais' : 'français'}.`,
     `Phrase : "${query}"`,
   ].join('\n');
 }
 
-async function understand(query, ctx) {
+async function understand(query, ctx, lang = 'fr') {
   const res = await fetch(`${LLM_URL}/v1/chat/completions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: prompt(ctx, query) }],
+      messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: prompt(ctx, query, lang) }],
       temperature: 0,
       max_tokens: 200,
       response_format: { type: 'json_schema', json_schema: { name: 'plan', schema: SCHEMA } },
@@ -357,60 +367,74 @@ const expecting = (userId) => (pending.get(userId)?.until ?? 0) > Date.now();
 
 // The wake word model upstream is a cheap, lenient filter; the transcript must still contain "Bobby",
 // so a false trigger ("beau bilan") costs one transcription and never an action.
-async function hear({ text, lang = 'fr', member, guild, tEnd, sttMs, io }) {
+const planText = (plan) => plan.map((x) => `${x.type}${x.targets ? ` -> ${x.targets.map((m) => m.name).join(', ')}` : ''}${x.channel ? ` @ ${x.channel.name}` : ''}${x.text ? ` "${x.text}"` : ''}`).join(' | ');
+
+async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttMs, io }) {
   let p = pending.get(member.id);
   if (p && Date.now() > p.until) p = null;
   const wake = findWake(text);
-  if (!wake && !p) return console.log(`[ignored] no "Bobby" in "${text}"`);
+  const rec = { at: new Date().toISOString(), who: member.displayName, id: member.id, lang, wakeScore: score, heard: text };
+  if (!wake && !p) { journal({ ...rec, outcome: 'ignored' }); return console.log(`[ignored] no "Bobby" in "${text}"`); }
   if (!(ALLOWED.length ? ALLOWED.includes(member.id) : member.id === guild.ownerId)) {
+    journal({ ...rec, outcome: 'not_allowed' });
     return console.log(`[bobby] ${member.displayName} is not allowed to give commands. To allow them, add ${member.id} to ALLOWED_USERS in .env`);
   }
   pending.delete(member.id);
   const L = LINES[lang] || LINES.fr;
-  const say = (s) => io.say(s, lang);
+  const say = (s) => { rec.reply = s; return io.say(s, lang); };
   const t = { stt: sttMs };
   try {
     if (p?.plan) {
-      if (!YES.test(text)) return say(L.cancelled);
+      rec.plan = planText(p.plan);
+      if (!YES.test(text)) { rec.outcome = 'cancelled'; return say(L.cancelled); }
+      rec.outcome = 'confirmed';
       const t0 = performance.now();
       await run(p.plan, io);
       t.action = Math.round(performance.now() - t0);
       return say(describe(p.plan, lang));
     }
     const query = wake ? text.slice(text.indexOf(wake) + wake.length).replace(/^[\s,.:;!?]+/, '').trim() : text;
+    rec.query = query;
     console.log(`[query] "${query}" (${lang})`);
     io.beep();
-    if (query.replace(/[^\p{L}]/gu, '').length < 2) { pending.set(member.id, { until: Date.now() + 6000 }); return console.log('[waiting] "Bobby" alone: next sentence is the command (6 s)'); }
+    if (query.replace(/[^\p{L}]/gu, '').length < 2) { pending.set(member.id, { until: Date.now() + 6000 }); rec.outcome = 'waiting'; return console.log('[waiting] "Bobby" alone: next sentence is the command (6 s)'); }
 
     const ctx = context(member, guild);
     let t0 = performance.now();
     let plan = null;
     const fast = quick(query);
-    if (fast) try { plan = resolve(fast, ctx); t.shortcut = 0; console.log(`[intent] shortcut: ${JSON.stringify(fast)}`); } catch { /* name not found: let the LLM try */ }
+    if (fast) try { plan = resolve(fast, ctx); t.shortcut = 0; rec.intent = { via: 'shortcut', actions: fast }; console.log(`[intent] shortcut: ${JSON.stringify(fast)}`); } catch { /* name not found: let the LLM try */ }
     if (!plan) {
-      const out = await understand(query, ctx);
+      const out = await understand(query, ctx, lang);
       t.llm = Math.round(performance.now() - t0);
+      rec.intent = { via: 'llm', ...out };
       console.log(`[intent] LLM (${t.llm} ms): ${JSON.stringify(out)}`);
-      if (!out.actions.length) return say(out.say || L.notUnderstood);
+      if (!out.actions.length) { rec.outcome = 'answered'; return say(out.say || L.notUnderstood); }
       plan = resolve(out.actions, ctx);
     }
-    console.log(`[plan] ${plan.map((x) => `${x.type}${x.targets ? ` -> ${x.targets.map((m) => m.name).join(', ')}` : ''}${x.channel ? ` @ ${x.channel.name}` : ''}${x.text ? ` "${x.text}"` : ''}`).join(' | ')}`);
+    rec.plan = planText(plan);
+    console.log(`[plan] ${rec.plan}`);
     if (needsConfirm(plan)) {
       pending.set(member.id, { until: Date.now() + 10000, plan });
+      rec.outcome = 'confirm_asked';
       return say(`${describe(plan, lang)} ${L.confirm}`);
     }
     t0 = performance.now();
     await run(plan, io);
     t.action = Math.round(performance.now() - t0);
+    rec.outcome = 'done';
     say(describe(plan, lang));
   } catch (e) {
-    if (e instanceof Say) { console.log(`[resolve] ${e.message}`); return say(e.in(lang)); }
+    if (e instanceof Say) { rec.outcome = 'resolve_error'; rec.error = e.message; console.log(`[resolve] ${e.message}`); return say(e.in(lang)); }
+    rec.outcome = 'error'; rec.error = String(e.message || e);
     console.error('[bobby]', e);
     say(e.code === 50013 ? L.noRights : L.failed);
   } finally {
     t.total = Math.round(performance.now() - tEnd);
+    rec.timing = t;
+    journal(rec);
     console.log(`[timing] ${Object.entries(t).filter(([, v]) => v != null).map(([k, v]) => `${k} ${v} ms`).join(' · ')}  (total = from end of speech to reply)`);
   }
 }
 
-module.exports = { hear, expecting, hotwords, context, understand, resolve, quick, pick, sim, describe };
+module.exports = { hear, journal, expecting, hotwords, context, understand, resolve, quick, pick, sim, describe };

@@ -79,14 +79,14 @@ async def transcribe(request: Request):
     # ponytail: async endpoint + blocking Whisper = transcriptions run one at a time, no lock needed.
     audio = to_16k(await request.body())
     t = time.perf_counter()
-    heard = None
+    heard, score = None, None
     # x-force: Bobby is waiting for an answer from this person (a "yes", or the command after "Bobby" alone).
     if wake is not None and request.headers.get("x-force") != "1":
         score = bobby_score(audio)
         ms = round((time.perf_counter() - t) * 1000)
         if score < WAKE_THRESHOLD:
             print(f"[wake] no 'Bobby' (score {score:.2f}, {ms} ms): Whisper skipped", flush=True)
-            return {"text": "", "wake": False, "ms": ms}
+            return {"text": "", "wake": False, "score": round(score, 3), "seconds": round(len(audio) / 16000, 1), "ms": ms}
         print(f"[wake] 'Bobby' heard (score {score:.2f}, {ms} ms)", flush=True)
         heard = True
     opts = dict(
@@ -106,7 +106,7 @@ async def transcribe(request: Request):
     text = " ".join(s.text for s in segments if s.avg_logprob > -1.5).strip()
     ms = round((time.perf_counter() - t) * 1000)
     print(f"[stt] {ms} ms  {len(audio) / 16000:.1f} s of audio  {lang}  {text!r}", flush=True)
-    return {"text": text, "lang": lang, "wake": heard, "ms": ms}
+    return {"text": text, "lang": lang, "wake": heard, "score": None if score is None else round(score, 3), "ms": ms}
 
 
 @app.get("/tts")

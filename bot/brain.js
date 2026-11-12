@@ -1,10 +1,11 @@
 // Bobby's brain: transcribed sentence -> intent (local LLM) -> resolved names -> Discord actions.
+// Bobby understands French and English, and answers in the language it was spoken to in.
 const { findWake } = require('./wake');
 const { load, save } = require('./store');
 
 const LLM_URL = process.env.LLM_URL || 'http://127.0.0.1:8080';
 const ALLOWED = (process.env.ALLOWED_USERS || '').split(',').map((s) => s.trim()).filter(Boolean);
-const YES = /\b(oui|ouais|vas-y|confirme|ok|okay|d'accord|go)\b/i;
+const YES = /\b(oui|ouais|vas-y|confirme|ok|okay|d'accord|go|yes|yeah|yep|sure|confirm)\b/i;
 
 const SCHEMA = {
   type: 'object',
@@ -30,8 +31,8 @@ const SCHEMA = {
 };
 
 // Fixed and first: llama-server caches this prefix, so only the tail is processed for each sentence.
-// The prompt stays in French, the language Bobby is spoken to in.
-const SYSTEM = `Tu es Bobby, l'assistant vocal d'un serveur Discord. Tu reçois une phrase transcrite à l'oral (parfois avec des fautes) et le contexte du serveur. Tu réponds uniquement en JSON.
+// The prompt stays in French, the language it was tuned and tested in; the model handles English input fine.
+const SYSTEM = `Tu es Bobby, l'assistant vocal d'un serveur Discord. Tu reçois une phrase transcrite à l'oral (parfois avec des fautes), en français ou en anglais, et le contexte du serveur. Tu réponds uniquement en JSON.
 
 Actions possibles (champ "type") :
 - mute / unmute : couper ou rétablir le micro de "who"
@@ -45,13 +46,14 @@ Actions possibles (champ "type") :
 - leave : Bobby quitte le salon vocal
 
 Règles :
-- "who" contient des noms de personnes, "moi" pour celui qui parle, ou "tous" pour tout le monde dans son salon. "except" liste les personnes exclues.
+- "who" contient des noms de personnes, "moi" pour celui qui parle, ou "tous" pour tout le monde dans son salon, même si la phrase est en anglais. "except" liste les personnes exclues.
 - "virer", "dégager" ou "kicker" une personne nommée du vocal, c'est disconnect. Si on dit à Bobby lui-même de partir, c'est leave.
 - "ici" désigne le salon vocal de celui qui parle : mets son nom exact dans "channel".
 - Les noms sont souvent mal transcrits : écris le nom du contexte qui ressemble le plus à ce qui a été dit.
 - Plusieurs demandes dans une phrase donnent plusieurs actions, dans l'ordre.
 - Question ou discussion sans action : "actions" vide, et réponds dans "say" en une phrase courte.
 - Demande impossible ou incompréhensible : "actions" vide, et "say" le dit en une phrase courte.
+- "say" est toujours dans la langue de la phrase : français si on te parle français, anglais si on te parle anglais.
 
 Exemples :
 "coupe le micro de Kevin" -> {"actions":[{"type":"mute","who":["Kévin"]}],"say":""}
@@ -61,7 +63,10 @@ Exemples :
 "retire les courses de ma liste" -> {"actions":[{"type":"todo_remove","text":"les courses"}],"say":""}
 "non annule ça" -> {"actions":[{"type":"undo"}],"say":""}
 "c'est bon tu peux y aller" -> {"actions":[{"type":"leave"}],"say":""}
-"t'es qui toi" -> {"actions":[],"say":"Je suis Bobby, l'assistant vocal du serveur."}`;
+"t'es qui toi" -> {"actions":[],"say":"Je suis Bobby, l'assistant vocal du serveur."}
+"move me and Zyklon to Gaming" -> {"actions":[{"type":"move","who":["moi","Zyklon"],"channel":"Gaming"}],"say":""}
+"kick Lucas from voice" -> {"actions":[{"type":"disconnect","who":["Lucas"]}],"say":""}
+"what can you do" -> {"actions":[],"say":"I can mute, move or disconnect people, post messages and keep your to-do list."}`;
 
 // ---------- Context ----------
 
@@ -114,28 +119,30 @@ async function understand(query, ctx) {
 }
 
 // LLM-free shortcut for simple commands (saves ~1 s). Anything more complex returns null and goes to the LLM.
-// ponytail: a handful of phrasings; add the ones that keep showing up in the logs.
+// ponytail: a handful of phrasings per language; add the ones that keep showing up in the logs.
 const QUICK = [
   [/^(?:coupe|ferme|mute)(?: le)? micro (?:de|à|a) (.+)$/, 'mute'],
   [/^mute (.+)$/, 'mute'],
   [/^(?:rends|remets|rétablis|redonne|rallume)(?: le)? micro (?:de|à|a) (.+)$/, 'unmute'],
   [/^unmute (.+)$/, 'unmute'],
-  [/^coupe le son (?:de|à|a) (.+)$/, 'deafen'],
-  [/^(?:rends|remets|rétablis|redonne) le son (?:de|à|a) (.+)$/, 'undeafen'],
+  [/^(?:coupe le son (?:de|à|a)|deafen) (.+)$/, 'deafen'],
+  [/^(?:(?:rends|remets|rétablis|redonne) le son (?:de|à|a)|undeafen) (.+)$/, 'undeafen'],
   [/^(?:déplace|mets|envoie|bouge) (.+?) (?:dans|en|sur|vers) (?:le salon |la salle (?:de )?)?(.+)$/, 'move'],
   [/^mets[- ]moi (?:dans|en) (?:le salon |la salle (?:de )?)?(.+)$/, 'move-me'],
-  [/^annule(?: ça)?$/, 'undo'],
+  [/^(?:move|put|send|drag) (.+?) (?:to|in|into) (?:the )?(.+?)(?: channel)?$/, 'move'],
+  [/^(?:annule(?: ça)?|undo(?: that)?)$/, 'undo'],
 ];
 
 function quick(query) {
   const q = query.toLowerCase().replace(/[.!?,]+$/, '').trim();
-  if (/ et | puis |sauf|,/.test(q)) return null; // several requests, people or exclusions: leave it to the LLM
+  // several requests, people or exclusions: leave it to the LLM
+  if (/ et | puis |sauf| and | then |except|,/.test(q)) return null;
   for (const [re, type] of QUICK) {
     const m = q.match(re);
     if (!m) continue;
     if (type === 'undo') return [{ type }];
     if (type === 'move-me') return [{ type: 'move', who: ['moi'], channel: m[1] }];
-    const who = [/^tout le monde$/.test(m[1]) ? 'tous' : m[1]];
+    const who = [/^(?:tout le monde|everyone|everybody)$/.test(m[1]) ? 'tous' : m[1]];
     return [{ type, who, channel: m[2] }];
   }
   return null;
@@ -143,7 +150,17 @@ function quick(query) {
 
 // ---------- Name resolution ----------
 
-class Say extends Error {} // error spoken to the user as is
+// Error spoken to the user as is, in their language.
+class Say extends Error {
+  constructor(fr, en) { super(fr); this.en = en; }
+  in(lang) { return lang === 'en' ? this.en : this.message; }
+}
+
+const WHAT = {
+  person: ['la personne', 'anyone called'],
+  voice: ['le salon vocal', 'a voice channel called'],
+  text: ['le salon texte', 'a text channel called'],
+};
 
 const norm = (s) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
@@ -171,13 +188,17 @@ function pick(q, items, what) {
     .map((it) => ({ it, s: Math.max(...[it.name, ...(it.aliases || [])].map((c) => sim(q, c))) }))
     .sort((x, y) => y.s - x.s);
   const [a, b] = ranked;
-  if (!a || a.s < 0.6) throw new Say(`Je ne trouve pas ${what} « ${q} ».`);
-  if (b && b.s >= 0.6 && a.s < 1 && a.s - b.s < 0.1) throw new Say(`« ${q} » : tu veux dire ${a.it.name} ou ${b.it.name} ?`);
+  const [fr, en] = WHAT[what];
+  if (!a || a.s < 0.6) throw new Say(`Je ne trouve pas ${fr} « ${q} ».`, `I can't find ${en} "${q}".`);
+  if (b && b.s >= 0.6 && a.s < 1 && a.s - b.s < 0.1) {
+    throw new Say(`« ${q} » : tu veux dire ${a.it.name} ou ${b.it.name} ?`, `"${q}": do you mean ${a.it.name} or ${b.it.name}?`);
+  }
   return a.it;
 }
 
-const ME = new Set(['moi', 'me', 'je']);
-const ALL = new Set(['tous', 'toutlemonde', 'everyone', 'toutes']);
+const ME = new Set(['moi', 'me', 'je', 'myself', 'i']);
+const ALL = new Set(['tous', 'toutlemonde', 'toutes', 'everyone', 'everybody', 'all']);
+const HERE = new Set(['ici', 'here']);
 
 function targets(step, ctx) {
   const out = [];
@@ -186,11 +207,11 @@ function targets(step, ctx) {
     if (ME.has(n)) out.push(ctx.speaker);
     // "tous" (everyone): for a move, everyone in voice on the server; otherwise, the other people in the speaker's channel.
     else if (ALL.has(n)) out.push(...ctx.members.filter((m) => (step.type === 'move' ? true : m.channel === ctx.speaker.channel && m.id !== ctx.speaker.id)));
-    else out.push(pick(w, ctx.members, 'la personne'));
+    else out.push(pick(w, ctx.members, 'person'));
   }
-  const ex = (step.except || []).map((w) => (ME.has(norm(w)) ? ctx.speaker : pick(w, ctx.members, 'la personne')));
+  const ex = (step.except || []).map((w) => (ME.has(norm(w)) ? ctx.speaker : pick(w, ctx.members, 'person')));
   const res = [...new Set(out)].filter((m) => !ex.includes(m));
-  if (!res.length) throw new Say('Je ne sais pas sur qui agir.');
+  if (!res.length) throw new Say('Je ne sais pas sur qui agir.', "I don't know who you mean.");
   return res;
 }
 
@@ -202,40 +223,73 @@ function resolve(actions, ctx) {
     if (NEEDS_WHO.has(a.type)) step.targets = targets(a, ctx);
     if (a.type === 'move') {
       const q = a.channel || '';
-      step.channel = norm(q) === 'ici' ? ctx.voiceChannels.find((c) => c.name === ctx.speaker.channel) : pick(q, ctx.voiceChannels, 'le salon vocal');
+      step.channel = HERE.has(norm(q)) ? ctx.voiceChannels.find((c) => c.name === ctx.speaker.channel) : pick(q, ctx.voiceChannels, 'voice');
     }
-    if (a.type === 'message') step.channel = pick(a.channel || '', ctx.textChannels, 'le salon texte');
-    if (['message', 'todo_add', 'todo_remove'].includes(a.type) && !step.text) throw new Say('Il me manque le texte.');
+    if (a.type === 'message') step.channel = pick(a.channel || '', ctx.textChannels, 'text');
+    if (['message', 'todo_add', 'todo_remove'].includes(a.type) && !step.text) throw new Say('Il me manque le texte.', "I'm missing the text.");
     return step;
   });
 }
 
 const needsConfirm = (plan) => plan.some((s) => s.type === 'disconnect') || plan.reduce((n, s) => n + (s.targets?.length || 0), 0) >= 3;
 
-// ---------- Execution ----------
+// ---------- What Bobby says ----------
 
-const names = (ts) => ts.map((t) => t.name).join(', ').replace(/, ([^,]*)$/, ' et $1');
+const names = (ts, lang) => ts.map((t) => t.name).join(', ').replace(/, ([^,]*)$/, lang === 'en' ? ' and $1' : ' et $1');
+
+const LINES = {
+  fr: {
+    mute: (n) => `Je coupe le micro de ${n}.`,
+    unmute: (n) => `Je rétablis le micro de ${n}.`,
+    deafen: (n) => `Je coupe le son de ${n}.`,
+    undeafen: (n) => `Je rétablis le son de ${n}.`,
+    move: (n, c) => `Je déplace ${n} dans ${c}.`,
+    disconnect: (n) => `Je déconnecte ${n}.`,
+    message: (n, c) => `J'envoie le message dans ${c}.`,
+    todo_add: (n, c, t) => `J'ajoute « ${t} » à ta liste.`,
+    todo_remove: (n, c, t, missing) => (missing ? `Je ne trouve pas « ${t} » dans ta liste.` : `Je retire « ${t} » de ta liste.`),
+    todo_list: (l) => (l.length ? `Ta liste : ${l.join(', ')}.` : 'Ta liste est vide.'),
+    undo: (done) => (done ? "J'annule." : "Il n'y a rien à annuler."),
+    leave: () => 'À plus.',
+    confirm: 'Tu confirmes ?',
+    cancelled: "D'accord, j'annule.",
+    notUnderstood: "Je n'ai pas compris.",
+    noRights: "Je n'ai pas les droits Discord pour ça.",
+    failed: "Ça n'a pas marché.",
+  },
+  en: {
+    mute: (n) => `Muting ${n}.`,
+    unmute: (n) => `Unmuting ${n}.`,
+    deafen: (n) => `Deafening ${n}.`,
+    undeafen: (n) => `Undeafening ${n}.`,
+    move: (n, c) => `Moving ${n} to ${c}.`,
+    disconnect: (n) => `Disconnecting ${n}.`,
+    message: (n, c) => `Message sent to ${c}.`,
+    todo_add: (n, c, t) => `Added "${t}" to your list.`,
+    todo_remove: (n, c, t, missing) => (missing ? `I can't find "${t}" in your list.` : `Removed "${t}" from your list.`),
+    todo_list: (l) => (l.length ? `Your list: ${l.join(', ')}.` : 'Your list is empty.'),
+    undo: (done) => (done ? 'Undone.' : 'Nothing to undo.'),
+    leave: () => 'See you.',
+    confirm: 'Confirm?',
+    cancelled: 'Okay, cancelled.',
+    notUnderstood: "Sorry, I didn't get that.",
+    noRights: "I don't have the Discord permissions for that.",
+    failed: "That didn't work.",
+  },
+};
+
 let lastUndo = null;
 
-function describe(plan) {
+function describe(plan, lang = 'fr') {
+  const L = LINES[lang] || LINES.fr;
   return plan.map((s) => {
-    switch (s.type) {
-      case 'mute': return `Je coupe le micro de ${names(s.targets)}.`;
-      case 'unmute': return `Je rétablis le micro de ${names(s.targets)}.`;
-      case 'deafen': return `Je coupe le son de ${names(s.targets)}.`;
-      case 'undeafen': return `Je rétablis le son de ${names(s.targets)}.`;
-      case 'move': return `Je déplace ${names(s.targets)} dans ${s.channel.name}.`;
-      case 'disconnect': return `Je déconnecte ${names(s.targets)}.`;
-      case 'message': return `J'envoie le message dans ${s.channel.name}.`;
-      case 'todo_add': return `J'ajoute « ${s.text} » à ta liste.`;
-      case 'todo_remove': return s.missing ? `Je ne trouve pas « ${s.text} » dans ta liste.` : `Je retire « ${s.text} » de ta liste.`;
-      case 'todo_list': { const l = load('todo', []); return l.length ? `Ta liste : ${l.join(', ')}.` : 'Ta liste est vide.'; }
-      case 'undo': return lastUndo ? "J'annule." : "Il n'y a rien à annuler.";
-      case 'leave': return 'À plus.';
-      default: return '';
-    }
+    if (s.type === 'todo_list') return L.todo_list(load('todo', []));
+    if (s.type === 'undo') return L.undo(Boolean(lastUndo));
+    return L[s.type](s.targets && names(s.targets, lang), s.channel?.name, s.text, s.missing);
   }).join(' ');
 }
+
+// ---------- Execution ----------
 
 async function run(plan, io) {
   const undos = [];
@@ -278,7 +332,7 @@ async function run(plan, io) {
 
 const pending = new Map(); // userId -> { until, plan? }: "Bobby" said alone, or a pending confirmation
 
-async function hear({ text, member, guild, tEnd, sttMs, io }) {
+async function hear({ text, lang = 'fr', member, guild, tEnd, sttMs, io }) {
   let p = pending.get(member.id);
   if (p && Date.now() > p.until) p = null;
   const wake = findWake(text);
@@ -287,14 +341,16 @@ async function hear({ text, member, guild, tEnd, sttMs, io }) {
     return console.log(`[bobby] ${member.displayName} is not allowed to give commands`);
   }
   pending.delete(member.id);
+  const L = LINES[lang] || LINES.fr;
+  const say = (s) => io.say(s, lang);
   const t = { stt: sttMs };
   try {
     if (p?.plan) {
-      if (!YES.test(text)) return io.say("D'accord, j'annule.");
+      if (!YES.test(text)) return say(L.cancelled);
       const t0 = performance.now();
       await run(p.plan, io);
       t.action = Math.round(performance.now() - t0);
-      return io.say(describe(p.plan));
+      return say(describe(p.plan, lang));
     }
     const query = wake ? text.slice(text.indexOf(wake) + wake.length).replace(/^[\s,.:;!?]+/, '').trim() : text;
     io.beep();
@@ -309,21 +365,21 @@ async function hear({ text, member, guild, tEnd, sttMs, io }) {
       const out = await understand(query, ctx);
       t.llm = Math.round(performance.now() - t0);
       console.log(`[bobby] "${query}" -> ${JSON.stringify(out)}`);
-      if (!out.actions.length) return io.say(out.say || "Je n'ai pas compris.");
+      if (!out.actions.length) return say(out.say || L.notUnderstood);
       plan = resolve(out.actions, ctx);
     }
     if (needsConfirm(plan)) {
       pending.set(member.id, { until: Date.now() + 10000, plan });
-      return io.say(`${describe(plan)} Tu confirmes ?`);
+      return say(`${describe(plan, lang)} ${L.confirm}`);
     }
     t0 = performance.now();
     await run(plan, io);
     t.action = Math.round(performance.now() - t0);
-    io.say(describe(plan));
+    say(describe(plan, lang));
   } catch (e) {
-    if (e instanceof Say) return io.say(e.message);
+    if (e instanceof Say) return say(e.in(lang));
     console.error('[bobby]', e);
-    io.say(e.code === 50013 ? "Je n'ai pas les droits Discord pour ça." : "Ça n'a pas marché.");
+    say(e.code === 50013 ? L.noRights : L.failed);
   } finally {
     t.total = Math.round(performance.now() - tEnd);
     console.log(`[timing] ${Object.entries(t).filter(([, v]) => v != null).map(([k, v]) => `${k} ${v} ms`).join(' · ')}  (total = from end of speech to reply)`);

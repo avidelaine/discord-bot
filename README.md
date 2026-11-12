@@ -1,18 +1,18 @@
 # Bobby, assistant vocal Discord
 
-Say "Bobby, move Zyklon to Gaming" in a voice channel: Bobby understands it, does it, and confirms out loud. Everything runs locally on Windows and costs nothing.
+Say "Bobby, move Zyklon to Gaming" (or "Bobby, déplace Zyklon dans Gaming") in a voice channel: Bobby understands it, does it, and confirms out loud in the language you spoke. French and English both work. Everything runs locally on Windows and costs nothing.
 
 ```
 Discord voice ──► bot/ (Node, discord.js, @discordjs/voice 0.19 with DAVE)
                     │  one PCM stream per speaker, cut after 600 ms of silence
                     ▼
-                  voice/ (Python) ── Whisper large-v3-turbo on the GPU, server names as hotwords
+                  voice/ (Python) ── Whisper large-v3-turbo on the GPU, French/English auto-detected, server names as hotwords
                     │  text
                     ▼
                   bot/brain.js ── "Bobby" found? ── llama-server (Qwen3-4B-Instruct, JSON constrained to the action list)
                     │  names matched against the real server roster, guardrails
                     ▼
-                  Discord action + spoken confirmation (Piper, French voice)
+                  Discord action + spoken confirmation in the same language (Piper, French and English voices)
 ```
 
 ## Install (once)
@@ -21,7 +21,7 @@ Requirements: Windows, an NVIDIA GPU, Node 22+, Python 3.11, ffmpeg on the PATH.
 
 - `_bin/llama/`: llama.cpp Windows CUDA 12.4 build (`llama-bXXXX-bin-win-cuda-12.4-x64.zip` + `cudart-…zip`, from the llama.cpp GitHub releases).
 - `models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf`: from `unsloth/Qwen3-4B-Instruct-2507-GGUF` on Hugging Face.
-- `models/piper/fr_FR-siwis-medium.onnx` and `.onnx.json`: from `rhasspy/piper-voices`.
+- `models/piper/fr_FR-siwis-medium.onnx`, `models/piper/en_US-lessac-medium.onnx` and their `.onnx.json`: from `rhasspy/piper-voices`.
 - Python: `py -3.11 -m venv voice/.venv`, then `voice/.venv/Scripts/pip install faster-whisper fastapi "uvicorn[standard]" scipy piper-tts nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"`.
 - Node: `cd bot && npm install`.
 
@@ -54,4 +54,4 @@ Disconnecting someone, or acting on three people or more, waits for a "oui". If 
 ## Tests
 
 - `node bot/wake.test.js`: detection of "Bobby" in the transcript.
-- `node bot/intent.test.js` (llama-server running): sentence comprehension score and LLM latency. Add every sentence Bobby gets wrong in real use.
+- `node bot/intent.test.js` (llama-server running): comprehension score on French and English sentences, and LLM latency. Add every sentence Bobby gets wrong in real use.

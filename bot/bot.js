@@ -31,10 +31,10 @@ const play = (stream, inputType) => player.play(createAudioResource(stream, { in
 function makeIo(guild, textChannel) {
   return {
     beep: () => play(Readable.from([BEEP]), StreamType.Raw),
-    async say(text) {
+    async say(text, lang = 'fr') {
       console.log(`[bobby] ${text}`);
       textChannel.send(`🗣️ ${text}`).catch(() => {});
-      const res = await fetch(`${VOICE_URL}/tts?text=${encodeURIComponent(text)}`);
+      const res = await fetch(`${VOICE_URL}/tts?lang=${lang}&text=${encodeURIComponent(text)}`);
       play(Readable.fromWeb(res.body), StreamType.Arbitrary);
     },
     leave: () => getVoiceConnection(guild.id)?.destroy(),
@@ -57,8 +57,8 @@ function listen(connection, guild, io) {
         method: 'POST', body: pcm, duplex: 'half',
         headers: { 'x-hotwords': encodeURIComponent(brain.hotwords(brain.context(member, guild))) },
       });
-      const { text, ms } = await res.json();
-      if (text) await brain.hear({ text, member, guild, tEnd, sttMs: ms, io });
+      const { text, lang, ms } = await res.json();
+      if (text) await brain.hear({ text, lang, member, guild, tEnd, sttMs: ms, io });
     } catch (e) {
       console.error('[voice]', e.message);
     } finally {

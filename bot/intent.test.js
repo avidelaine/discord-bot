@@ -5,11 +5,11 @@ const { understand, resolve, quick, pick, sim } = require('./brain');
 
 // Name resolution: pure, tested without the LLM.
 const roster = [{ name: 'Zyklon' }, { name: 'Kévin', aliases: ['kev_du_93'] }, { name: 'Marie' }, { name: 'Mario' }];
-assert.strictEqual(pick('ziklone', roster, 'x').name, 'Zyklon');
-assert.strictEqual(pick('kevin', roster, 'x').name, 'Kévin');
-assert.strictEqual(pick('kev du 93', roster, 'x').name, 'Kévin');
-assert.throws(() => pick('Mari', roster, 'x'), /tu veux dire/);
-assert.throws(() => pick('Bernard', roster, 'x'), /Je ne trouve pas/);
+assert.strictEqual(pick('ziklone', roster, 'person').name, 'Zyklon');
+assert.strictEqual(pick('kevin', roster, 'person').name, 'Kévin');
+assert.strictEqual(pick('kev du 93', roster, 'person').name, 'Kévin');
+assert.throws(() => pick('Mari', roster, 'person'), /tu veux dire/);
+assert.throws(() => pick('Bernard', roster, 'person'), /Je ne trouve pas/);
 assert(sim('🎮 Gaming', 'gaming') === 1);
 console.log('name resolution: ok');
 
@@ -48,6 +48,20 @@ const CASES = [
   ['déplace Bernard dans gaming', 'ERR'],
   ['mute Zyklon et Kévin', 'mute:Kévin,Zyklon'],
   ['euh coupe le micro de... de Marie', 'mute:Marie'],
+  // English
+  ['mute Kevin', 'mute:Kévin'],
+  ['give Zyklon his mic back', 'unmute:Zyklon'],
+  ['deafen Marie please', 'deafen:Marie'],
+  ['move Lucas to the AFK channel', 'move:Lucas>AFK'],
+  ['bring Marie over here', 'move:Marie>Général'],
+  ['take me to gaming', 'move:Alex>Gaming'],
+  ['mute everyone except Kevin', 'mute:Zyklon'],
+  ['kick Lucas out of voice', 'disconnect:Lucas'],
+  ['post in announcements that the game starts at nine', 'message:>annonces'],
+  ['add buy milk to my list', 'todo_add:'],
+  ['undo that', 'undo:'],
+  ['you can go now', 'leave:'],
+  ['how are you doing', []],
 ];
 
 // LLM-free shortcut: what it takes must be right, what it leaves goes to the LLM (null).
@@ -63,6 +77,12 @@ const QUICK_CASES = [
   ['coupe le micro de Zyklon et Kévin', null],
   ['déplace Kévin dans AFK et coupe son micro', null],
   ['raconte-moi une blague', null],
+  ['Mute Zyklon.', 'mute:Zyklon'],
+  ['deafen marie', 'deafen:Marie'],
+  ['move Lucas to the AFK channel', 'move:Lucas>AFK'],
+  ['move me to gaming', 'move:Alex>Gaming'],
+  ['undo that', 'undo:'],
+  ['mute Zyklon and Kevin', null],
 ];
 
 const fmt = (plan) => plan.map((s) => `${s.type}:${(s.targets || []).map((t) => t.name).sort().join(',')}${s.channel ? `>${s.channel.name}` : ''}`).join(' | ');

@@ -34,7 +34,11 @@ whisper = WhisperModel(
     download_root=str(MODELS / "whisper_models"),
 )
 whisper.transcribe(np.zeros(16000, np.float32), language="fr")  # warm up the GPU
-voice = PiperVoice.load(str(MODELS / "piper" / "fr_FR-siwis-medium.onnx"))
+LANGS = ("fr", "en")  # Bobby understands and answers in these two languages
+voices = {
+    "fr": PiperVoice.load(str(MODELS / "piper" / "fr_FR-siwis-medium.onnx")),
+    "en": PiperVoice.load(str(MODELS / "piper" / "en_US-lessac-medium.onnx")),
+}
 print("Voice service ready.", flush=True)
 
 app = FastAPI()
@@ -51,26 +55,30 @@ async def transcribe(request: Request):
     # ponytail: async endpoint + blocking Whisper = transcriptions run one at a time, no lock needed.
     audio = to_16k(await request.body())
     t = time.perf_counter()
-    segments, _ = whisper.transcribe(
-        audio,
-        language="fr",
+    opts = dict(
         beam_size=1,  # greedy search: faster, near-identical quality on short sentences
         temperature=0,
         vad_filter=True,
         condition_on_previous_text=False,
         hotwords=unquote(request.headers.get("x-hotwords", "")) or None,
     )
+    segments, info = whisper.transcribe(audio, **opts)  # language detected by Whisper
+    lang = info.language
+    if lang not in LANGS:  # rare: misdetection on a short sentence, redo it in the likelier of fr/en
+        probs = dict(info.all_language_probs or [])
+        lang = max(LANGS, key=lambda l: probs.get(l, 0.0))
+        segments, _ = whisper.transcribe(audio, language=lang, **opts)
     text = " ".join(s.text for s in segments if s.avg_logprob > -1.0).strip()
     ms = round((time.perf_counter() - t) * 1000)
-    print(f"[stt] {ms} ms  {len(audio) / 16000:.1f} s of audio  {text!r}", flush=True)
-    return {"text": text, "ms": ms}
+    print(f"[stt] {ms} ms  {len(audio) / 16000:.1f} s of audio  {lang}  {text!r}", flush=True)
+    return {"text": text, "lang": lang, "ms": ms}
 
 
 @app.get("/tts")
-def tts(text: str):
+def tts(text: str, lang: str = "fr"):
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
-        voice.synthesize_wav(text, w)
+        voices.get(lang, voices["fr"]).synthesize_wav(text, w)
     return Response(buf.getvalue(), media_type="audio/wav")
 
 

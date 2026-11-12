@@ -96,6 +96,8 @@ function checkAlone() {
 
 const memberName = (guild) => async (id) => (guild.members.cache.get(id) ?? (await guild.members.fetch(id).catch(() => null)))?.displayName ?? id;
 
+let speech = null, speechGen = 0; // Bobby's voice playing now: { id (whom it answers), gen }
+
 function makeIo(guild, textChannel) {
   return {
     music,
@@ -104,15 +106,21 @@ function makeIo(guild, textChannel) {
     follow,
     post: async (text) => { await textChannel.send(text); return textChannel.name; },
     beep: () => { mixer.overlay(new PassThrough().end(BEEP)); },
-    // voice 'claude': Claude's answers, spoken with the second pair of Piper voices
-    async say(text, lang = 'fr', voice = 'bobby') {
+    // voice 'claude': Claude's answers, spoken with the second pair of Piper voices.
+    // forId: the person this answers, who may interrupt it with a plain "stop" (see brain.js).
+    async say(text, lang = 'fr', voice = 'bobby', forId = null) {
       // Voice only: replies are spoken, never echoed in a text channel (lists still go to TEXT_CHANNEL via post).
       console.log(`[${voice}] ${text}`);
+      const me = (speech = { id: forId, gen: ++speechGen });
       try {
         const res = await fetch(`${VOICE_URL}/tts?lang=${lang}&voice=${voice}&text=${encodeURIComponent(text)}`);
-        mixer.overlay(decode(Readable.fromWeb(res.body)));
+        if (speech !== me) return res.body?.cancel(); // interrupted, or another reply started, while it was synthesized
+        await mixer.overlay(decode(Readable.fromWeb(res.body)));
       } catch (e) { console.error(`[tts] ${e.cause?.code || e.message}`); }
+      if (speech === me) speech = null;
     },
+    speaking: () => speech, // { id } while Bobby's voice plays, else null
+    hush: () => { speech = null; mixer.stopOverlay(); },
     // Music stops now; the connection goes after the farewell has been spoken.
     // ponytail: fixed 3 s delay, enough for "À plus."; wait for the overlay's end if longer goodbyes appear.
     leave: () => { music.stop(); setTimeout(() => getVoiceConnection(guild.id)?.destroy(), 3000); },
@@ -143,7 +151,8 @@ function listen(connection, guild, io) {
         method: 'POST', body: pcm, duplex: 'half',
         headers: {
           'x-hotwords': encodeURIComponent(brain.hotwords(brain.context(member, guild))),
-          'x-force': brain.expecting(userId) ? '1' : '0', // waiting for a "yes" or a command: skip the wake word gate
+          // waiting for a "yes" or a command, or Bobby is answering this person (who may say "stop"): skip the wake word gate
+          'x-force': brain.expecting(userId) || io.speaking()?.id === userId ? '1' : '0',
         },
       });
       const { text, lang, wake, score, seconds, ms } = await res.json();

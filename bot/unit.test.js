@@ -6,6 +6,7 @@ const path = require('path');
 const fs = require('fs');
 
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'bobby-test-')); // never touch the real data/
+process.env.JOURNAL_FILE = path.join(process.env.DATA_DIR, 'conversations.jsonl'); // never the real journal
 process.env.BOBBY_PC_DRY = '1'; // PC actions only log: no sleep, lock, launch or volume change during tests
 const { resolve, quick, cancels, pick, sim, describe, run, needed } = require('./brain');
 const roles = require('./roles');
@@ -508,4 +509,36 @@ async function batch3() {
   assert.deepStrictEqual(W({ botChannel: 'A', joinerId: 'j', voice: [{ id: 'j', channel: 'B' }, { id: 'x', channel: 'C' }] }), { follow: 'B' });
   assert.strictEqual(W({ botChannel: 'A', joinerId: 'j', voice: [{ id: 'x', channel: 'C' }] }), 'wait');
   console.log('batch 3, follow the group: ok');
+
+  // Interrupting Bobby while it speaks
+  const { hear, STOP } = require('./brain');
+  for (const t of ['stop', 'Stop.', 'arrête', 'chut !', 'tais-toi', "c'est bon", 'ok merci', 'Bobby, stop', 'stop stop', 'shut up', "that's enough", 'ok thanks']) assert(STOP.test(t), t);
+  for (const t of ['stop la musique', 'arrête la radio', 'ok', 'merci de couper le micro de Kévin', 'stop the music']) assert(!STOP.test(t), t);
+  const guild = { voiceStates: { cache: new Map() }, channels: { cache: new Map() } };
+  const who = (id, displayName, roleNames = []) => ({ ...member(id, roleNames), displayName, user: { bot: false, username: displayName } });
+  const LUCAS = who('lucas', 'Lucas', ['Team Prime']), OTHER = who('42', 'Marie', ['Team Prime']), ADMIN = who(IISAL, 'Ilias'), SUPER = who(WAKANDEX, 'WakandeX');
+  const talk = (talking) => {
+    const io = { hushed: 0, said: [], posts: [], speaking: () => talking, hush() { io.hushed++; }, say(t) { io.said.push(t); }, beep() {}, post: async (c) => { io.posts.push(c); return 'dev-bot-test'; }, textChannel: { name: 'dev-bot-test' }, memberName: async (id) => id, music: { nowPlaying: () => null } };
+    return io;
+  };
+  const say = async (m, text, talking = { id: 'lucas' }) => { const io = talk(talking); await hear({ text, member: m, guild, tEnd: performance.now(), io }); return io; };
+  let io = await say(OTHER, 'Bobby, stop');
+  assert.deepStrictEqual([io.hushed, io.said.length], [0, 0]); // stop from someone else is ignored, silently
+  io = await say(ADMIN, 'stop');
+  assert.strictEqual(io.hushed, 0); // admin needs "Bobby" to stop it
+  io = await say(ADMIN, 'Bobby, stop !');
+  assert.strictEqual(io.hushed, 1);
+  io = await say(SUPER, 'Bobby arrête');
+  assert.strictEqual(io.hushed, 1);
+  io = await say(LUCAS, 'tais-toi');
+  assert.deepStrictEqual([io.hushed, io.said.length], [1, 0]); // the person it answers: no "Bobby" needed
+  io = await say(LUCAS, 'stop la musique');
+  assert.strictEqual(io.hushed, 0); // the music needs "Bobby, stop la musique"
+  io = await say(LUCAS, 'stop', null);
+  assert.strictEqual(io.hushed, 0); // Bobby is not speaking: nothing to interrupt
+  await new Promise((r) => setTimeout(r, 100)); // the journal is appended asynchronously
+  const journal = fs.readFileSync(process.env.JOURNAL_FILE, 'utf8');
+  assert.match(journal, /"outcome":"interrupted"/);
+  assert.match(journal, /"outcome":"stop_ignored"/);
+  console.log('batch 3, interrupt: ok');
 }

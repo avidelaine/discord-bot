@@ -36,13 +36,17 @@ class Mixer {
     return true;
   }
   pause(on) { this.paused = on; if (!on) this._ensure(); }
-  // ponytail: a new overlay replaces the running one (same as player.play before). Resolves when it ends.
+  // ponytail: a new overlay replaces the running one (same as player.play before). Resolves when it ends,
+  // is replaced or is stopped.
   overlay(stream) {
-    this.over?.stop();
+    this.over?.finish();
     const p = new Promise((done) => { this.over = channel(stream, done); });
     this._ensure();
     return p;
   }
+
+  // Bobby's voice stops now; the music comes back up.
+  stopOverlay() { const o = this.over; this.over = null; o?.finish(); }
 
   _ensure() {
     if (this.out) return;

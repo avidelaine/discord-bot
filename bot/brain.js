@@ -23,7 +23,7 @@ const { load } = require('./store');
 
 // One JSON line per exchange in _logs/conversations.jsonl (kept out of git), reviewed to improve Bobby.
 // Full text only for sentences addressed to Bobby; other speech is logged as metadata by bot.js.
-const JOURNAL = path.join(__dirname, '..', '_logs', 'conversations.jsonl');
+const JOURNAL = process.env.JOURNAL_FILE || path.join(__dirname, '..', '_logs', 'conversations.jsonl'); // tests use a temp file
 fs.mkdirSync(path.dirname(JOURNAL), { recursive: true });
 const journal = (rec) => fs.appendFile(JOURNAL, `${JSON.stringify(rec)}\n`, () => {});
 
@@ -35,6 +35,9 @@ const confirms = (text) => {
   const t = text.trim().replace(/[.!?…]+$/, '');
   return YES.test(t) && !NO.test(t);
 };
+
+// "Stop" while Bobby speaks (see hear). Whole sentence only: "stop la musique" is a music command.
+const STOP = /^(?:(?:bobby|ok|okay|bon|non|euh|allez|hey)[\s,.!?]*)*(?:stop|arr[eê]te(?:[- ]toi)?|chut|tais[- ]toi|c['’]est bon|[çc]a suffit|merci|shut up|be quiet|quiet|enough|that['’]s enough|thanks|thank you|that['’]s fine)(?:[\s,.!?]*(?:stop|bobby|merci|thanks|c['’]est bon|[çc]a suffit))*[\s,.!?…]*$/i;
 
 const DIR = path.join(__dirname, 'actions');
 const MODULES = fs.readdirSync(DIR).filter((f) => f.endsWith('.js')).sort().map((f) => require(path.join(DIR, f)));
@@ -376,6 +379,16 @@ async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttM
   if (p && Date.now() > p.until) p = null;
   const wake = findWake(text);
   const rec = { at: new Date().toISOString(), who: member.displayName, id: member.id, lang, wakeScore: score, heard: text };
+  // Bobby is speaking: the person it answers stops it with a plain "stop"; an admin needs "Bobby, stop";
+  // anyone else's "stop" is ignored. The voice stops, never the music. A pending "oui ?" keeps its own rules.
+  const talking = io.speaking?.();
+  if (talking && !p?.plan && STOP.test(text.trim())) {
+    const ok = talking.id === member.id || (wake && roles.allowed(roles.roleOf(member), 'admin'));
+    journal({ ...rec, outcome: ok ? 'interrupted' : 'stop_ignored', answering: talking.id });
+    if (!ok) return console.log(`[stop] ignored: ${member.displayName} is not the one Bobby answers`);
+    io.hush();
+    return console.log(`[stop] ${member.displayName} interrupted Bobby`);
+  }
   if (!wake && !p) { journal({ ...rec, outcome: 'ignored' }); return console.log(`[ignored] no "Bobby" in "${text}"`); }
   const L = lang === 'en' ? LINES.en : LINES.fr;
   const role = roles.roleOf(member);
@@ -389,7 +402,8 @@ async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttM
   pending.delete(member.id);
   const history = historyOf(member.id);
   // Nothing to say (e.g. "stop" with no music): stay silent.
-  const say = (s, voice) => { rec.reply = s; if (s) return io.say(s, lang, voice); };
+  // Not awaited: the reply plays on while the journal is written; member.id may interrupt it.
+  const say = (s, voice) => { rec.reply = s; if (s) io.say(s, lang, voice, member.id); };
   const t = { stt: sttMs };
   try {
     if (p?.plan) {
@@ -443,7 +457,7 @@ async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttM
       rec.outcome = 'confirm_asked';
       return say(`${describe(plan, lang)} ${L.confirm}`);
     }
-    for (const s of plan) { const a = ACTIONS[s.type].announce?.(lang); if (a) io.say(a, lang); }
+    for (const s of plan) { const a = ACTIONS[s.type].announce?.(lang); if (a) io.say(a, lang, undefined, member.id); }
     t0 = performance.now();
     await run(plan, io, lang);
     t.action = Math.round(performance.now() - t0);
@@ -483,4 +497,4 @@ async function intent(query, ctx, lang = 'fr', history = []) {
   return { via: 'llm', ...(await understand(query, ctx, lang, history)) };
 }
 
-module.exports = { hear, intent, guard, noteGuard, aboutBobby, remember, historyOf, journal, expecting, hotwords, context, understand, resolve, quick, cancels, confirms, pick, sim, describe, run, needed, roleTable, SYSTEM };
+module.exports = { STOP, hear, intent, guard, noteGuard, aboutBobby, remember, historyOf, journal, expecting, hotwords, context, understand, resolve, quick, cancels, confirms, pick, sim, describe, run, needed, roleTable, SYSTEM };

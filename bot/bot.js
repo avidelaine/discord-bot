@@ -27,6 +27,7 @@ const { Player } = require('./music/player');
 const { decode } = require('./music/sources');
 const aliases = require('./actions/aliases');
 const roles = require('./roles');
+const { whenAlone } = require('./actions/discord');
 
 const VOICE_URL = process.env.VOICE_URL || 'http://127.0.0.1:3000';
 // Silence that ends a sentence. Shorter is snappier, but cuts you off if you pause mid-sentence.
@@ -53,6 +54,46 @@ const BEEP = (() => {
   return b;
 })();
 
+// Moves the live connection to another channel of the same server: joinVoiceChannel on an existing connection
+// only sends a new voice state, so the receiver, the speaking listener, the player subscription (music) and
+// DAVE carry over. Returns the channel Bobby left (for undo), or null when it did not move.
+function follow(channel) {
+  const conn = channel && getVoiceConnection(channel.guild.id);
+  if (!conn || conn.joinConfig.channelId === channel.id) return null;
+  const prev = channel.guild.channels.cache.get(conn.joinConfig.channelId) || null;
+  joinVoiceChannel({ channelId: channel.id, guildId: channel.guild.id, adapterCreator: channel.guild.voiceAdapterCreator, selfDeaf: false });
+  console.log(`[voice] Bobby moves to ${channel.name}`);
+  return prev;
+}
+
+// Never alone: when its channel empties, Bobby joins the person who typed /join; if they are not in voice,
+// the music pauses and Bobby leaves after 2 minutes unless someone comes back.
+const ALONE_LEAVE_MS = 120_000;
+let session = null; // { guild, joinerId } since the last /join
+let settle = null, leaveTimer = null, autoPaused = false;
+client.on(Events.VoiceStateUpdate, (o, n) => {
+  if (!session || n.guild.id !== session.guild.id) return;
+  clearTimeout(settle);
+  settle = setTimeout(checkAlone, 1500); // a group move fires several updates: decide once they settle
+});
+function checkAlone() {
+  const { guild, joinerId } = session || {};
+  const conn = guild && getVoiceConnection(guild.id);
+  if (!conn) { clearTimeout(leaveTimer); leaveTimer = null; return; }
+  const voice = [...guild.voiceStates.cache.values()].filter((v) => v.channelId && v.member && !v.member.user.bot).map((v) => ({ id: v.id, channel: v.channelId }));
+  const next = whenAlone({ botChannel: conn.joinConfig.channelId, joinerId, voice });
+  if (next === 'wait') {
+    if (leaveTimer) return;
+    if (music.current && !music.paused) { music.pause(); autoPaused = true; }
+    console.log('[voice] alone, nobody to follow: leaving in 2 minutes unless someone comes back');
+    leaveTimer = setTimeout(() => { leaveTimer = null; music.stop(); autoPaused = false; getVoiceConnection(guild.id)?.destroy(); console.log('[voice] left: alone for 2 minutes'); }, ALONE_LEAVE_MS);
+    return;
+  }
+  clearTimeout(leaveTimer); leaveTimer = null;
+  if (next.follow) follow(guild.channels.cache.get(next.follow));
+  if (autoPaused) { autoPaused = false; music.resume(); }
+}
+
 const memberName = (guild) => async (id) => (guild.members.cache.get(id) ?? (await guild.members.fetch(id).catch(() => null)))?.displayName ?? id;
 
 function makeIo(guild, textChannel) {
@@ -60,6 +101,7 @@ function makeIo(guild, textChannel) {
     music,
     memberName: memberName(guild),
     textChannel,
+    follow,
     post: async (text) => { await textChannel.send(text); return textChannel.name; },
     beep: () => { mixer.overlay(new PassThrough().end(BEEP)); },
     // voice 'claude': Claude's answers, spoken with the second pair of Piper voices
@@ -153,6 +195,8 @@ async function onCommand(it) {
   const channel = it.member.voice.channel;
   if (!channel) return it.reply({ content: 'Rejoins un salon vocal d\'abord.', ephemeral: true });
   getVoiceConnection(it.guildId)?.destroy(); // a second /join must not attach a second listener (double actions)
+  session = { guild: it.guild, joinerId: it.user.id };
+  clearTimeout(leaveTimer); leaveTimer = null; autoPaused = false;
   const connection = joinVoiceChannel({
     channelId: channel.id, guildId: channel.guild.id, adapterCreator: channel.guild.voiceAdapterCreator, selfDeaf: false,
   });

@@ -32,6 +32,15 @@ async function own(ch, { all = false, max = 300 } = {}) {
 }
 const chan = (s, io) => s.channel?.ref || io.textChannel;
 
+// Where Bobby goes when nobody (but bots) is left in its channel: the channel of the person who typed /join,
+// if they are in voice; otherwise it waits ('wait': music paused, leaves after 2 minutes). Ids only, testable.
+// voice: [{ id, channel }] people in voice (bots excluded).
+function whenAlone({ botChannel, joinerId, voice }) {
+  if (voice.some((v) => v.channel === botChannel)) return 'stay';
+  const joiner = voice.find((v) => v.id === joinerId);
+  return joiner ? { follow: joiner.channel } : 'wait';
+}
+
 module.exports = {
   help: {
     fr: 'couper ou rétablir le micro et le son, déplacer, ramener ou déconnecter des gens, écrire dans un salon, modifier ou supprimer mes propres messages',
@@ -48,6 +57,7 @@ module.exports = {
     '- msg_delete : supprimer ton dernier message écrit ("channel" facultatif)',
     '- clean : supprimer tous tes propres messages d\'un salon texte ("channel" facultatif)',
     '- leave : Bobby quitte le salon vocal',
+    '- come : Bobby (toi) vient dans le salon vocal "channel" ("ici" = celui de celui qui parle)',
   ],
   rules: [
     '- "virer", "dégager" ou "kicker" une personne nommée du vocal, c\'est disconnect. Si on dit à Bobby lui-même de partir, c\'est leave.',
@@ -68,6 +78,8 @@ module.exports = {
     '"c\'est bon tu peux y aller" -> {"actions":[{"type":"leave"}],"say":""}',
     '"move me and Zyklon to Gaming" -> {"actions":[{"type":"move","who":["moi","Zyklon"],"channel":"Gaming"}],"say":""}',
     '"you can leave now" -> {"actions":[{"type":"leave"}],"say":""}',
+    '"viens dans Gaming" -> {"actions":[{"type":"come","channel":"Gaming"}],"say":""}',
+    '"rejoins-nous" -> {"actions":[{"type":"come","channel":"Général"}],"say":""}',
     '"kick Lucas from voice" -> {"actions":[{"type":"disconnect","who":["Lucas"]}],"say":""}',
     '"fais un clean-up du salon memes" -> {"actions":[{"type":"clean","channel":"memes"}],"say":""}',
     '"corrige ton dernier message en : rendez-vous à 21 h" -> {"actions":[{"type":"msg_edit","text":"rendez-vous à 21 h"}],"say":""}',
@@ -87,6 +99,8 @@ module.exports = {
     [/^(?:drag|draguer|drague|ramène) (.+?)(?: ici| here)?$/, (m) => [{ type: 'move', who: who(m[1]), channel: 'ici' }]],
     [/^(?:pars|partir|va-t'en|vas-t'en|quitte le (?:salon|vocal)(?: vocal)?|tu peux partir|leave|go away|leave the (?:channel|voice channel))$/, () => [{ type: 'leave' }]],
     [/^(?:nettoie|clean(?: up)?|fais (?:le |un )?(?:clean-?up|ménage)(?: de| du| dans)?)(?: le salon| the channel| salon)? ?#?(.*)$/, (m) => [{ type: 'clean', ...(m[1] && { channel: m[1] }) }]],
+    [/^(?:viens|ram[eè]ne-toi|rejoins(?:[- ](?:nous|moi))?|come(?: over)?|join (?:us|me))(?: (?:ici|here|là|la))?$/, () => [{ type: 'come', channel: 'ici' }]],
+    [/^(?:viens|rejoins(?:[- ](?:nous|moi))?|déplace-toi|come|join(?: us| me)?) (?:dans|en|sur|to|in|into|over to) (?:le salon |la salle (?:de )?|the )?(.+?)(?: channel)?$/, (m) => [{ type: 'come', channel: m[1] }]],
     [/^(?:supprime|efface|delete) ton dernier message$/, () => [{ type: 'msg_delete' }]],
     [/^(?:kick|vire|dégage|déconnecte) (.+?)(?: du vocal| from voice| out of voice)?$/, (m) => [{ type: 'disconnect', who: who(m[1]) }]],
   ],
@@ -99,11 +113,13 @@ module.exports = {
       role: 'admin',
       who: true,
       channel: 'voice',
-      async run(s) {
+      // A move that includes the speaker ("déplace-nous", "mets-moi", "tout le monde") takes Bobby along.
+      async run(s, io) {
         const ms = s.targets.map((t) => t.ref);
         const prev = ms.map((m) => [m, m.voice.channel]);
         await Promise.all(ms.map((m) => m.voice.setChannel(s.channel.ref)));
-        return () => Promise.all(prev.map(([m, c]) => m.voice.setChannel(c)));
+        const back = s.targets.some((t) => t.id === s.by?.id) ? io.follow?.(s.channel.ref) : null;
+        return () => Promise.all(prev.map(([m, c]) => m.voice.setChannel(c))).then(() => back && io.follow(back));
       },
       say: { fr: (s, n) => `Je déplace ${n} dans ${s.channel.name}.`, en: (s, n) => `Moving ${n} to ${s.channel.name}.` },
     },
@@ -147,10 +163,22 @@ module.exports = {
         en: (s) => (s.where ? (s.count ? `Deleting my ${s.count} messages in ${s.where}.` : `I have no messages in ${s.where}.`) : `Cleaning ${s.channel?.name || 'the channel'}.`),
       },
     },
+    // Bobby alone comes to a channel ("viens dans PRIME", "rejoins-nous"); moving other people stays admin.
+    come: {
+      role: 'prime',
+      channel: 'voice',
+      normalize: (a) => (a.channel ? null : { ...a, channel: 'ici' }),
+      run(s, io) {
+        const back = io.follow?.(s.channel.ref);
+        return back ? () => io.follow(back) : undefined;
+      },
+      say: { fr: (s) => `J'arrive dans ${s.channel.name}.`, en: (s) => `Coming to ${s.channel.name}.` },
+    },
     leave: {
       role: 'admin',
       run: (s, io) => io.leave(),
       say: { fr: () => 'À plus.', en: () => 'See you.' },
     },
   },
+  whenAlone,
 };

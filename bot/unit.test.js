@@ -288,6 +288,7 @@ console.log('PC shortcuts and rights: ok');
   console.log('claude off + help: ok');
 
   await batch2();
+  await batch3();
 })().catch((e) => { console.error(e); process.exit(1); });
 
 // ---------- Batch 2 (journal of 2026-11-12, 22:12-22:24) ----------
@@ -469,4 +470,42 @@ async function batch2() {
   assert(confirms('Bobby. Oui.'));
   console.log('review fixes: ok');
   void intent;
+}
+
+// ---------- Batch 3: Bobby follows the group, interruptions, written answers, embeds ----------
+async function batch3() {
+  const discord = require('./actions/discord');
+  // A move that includes the speaker takes Bobby along; a move of other people leaves it where it is
+  const followed = [];
+  const fio = { follow: (ch) => { followed.push(ch.name); return { name: 'Général' }; } };
+  const ref = () => ({ voice: { channel: { name: 'Général' }, setChannel: async () => {} } });
+  const step = (sentence, by = ctx.speaker) => {
+    const [s] = resolve(quick(sentence), { ...ctx, role: 'admin', speaker: by });
+    s.targets = s.targets.map((t) => ({ ...t, ref: ref() }));
+    s.channel = { ...s.channel, ref: { name: s.channel.name } };
+    return s;
+  };
+  let undo = await discord.actions.move.run(step('mets-moi dans Gaming'), fio);
+  assert.deepStrictEqual(followed, ['Gaming']);
+  await undo();
+  assert.deepStrictEqual(followed, ['Gaming', 'Général']); // undo brings Bobby back too
+  followed.length = 0;
+  await discord.actions.move.run(step('envoie Lucas en AFK'), fio);
+  assert.deepStrictEqual(followed, []);
+  await discord.actions.move.run(step('déplace tout le monde dans AFK'), fio); // everyone includes the speaker
+  assert.deepStrictEqual(followed, ['AFK']);
+  // "viens", "rejoins-nous", "come here": Bobby alone, Prime is enough
+  const prime = { ...ctx, role: 'prime' };
+  for (const [sentence, where] of [['viens dans Gaming', 'Gaming'], ['rejoins-nous', 'Général'], ['come here', 'Général'], ['come to the AFK channel', 'AFK'], ['viens ici', 'Général']]) {
+    const p = resolve(quick(sentence), prime);
+    assert.deepStrictEqual([p[0].type, p[0].channel.name, needed(p)], ['come', where, 'prime'], sentence);
+  }
+  assert.strictEqual(needed(plan('mets-moi dans Gaming')), 'admin');
+  assert.strictEqual(resolve([{ type: 'come' }], prime)[0].channel.name, 'Général'); // LLM without channel: here
+  // Never alone: follow the /join person, else wait
+  const W = discord.whenAlone;
+  assert.strictEqual(W({ botChannel: 'A', joinerId: 'j', voice: [{ id: 'x', channel: 'A' }] }), 'stay');
+  assert.deepStrictEqual(W({ botChannel: 'A', joinerId: 'j', voice: [{ id: 'j', channel: 'B' }, { id: 'x', channel: 'C' }] }), { follow: 'B' });
+  assert.strictEqual(W({ botChannel: 'A', joinerId: 'j', voice: [{ id: 'x', channel: 'C' }] }), 'wait');
+  console.log('batch 3, follow the group: ok');
 }

@@ -53,7 +53,7 @@ Each command prints its timings: `[temps] stt … · llm … · action … · to
 
 ## What Bobby understands
 
-Mute and unmute, deafen and undeafen, move, disconnect, post a message in a text channel, a to-do list, "annule" (undoes the last action), "tu peux partir". "Moi", "ici", "tout le monde", "sauf X" and several requests in one sentence all work. Anything else gets a short spoken answer.
+Mute and unmute, deafen and undeafen, move, disconnect, post a message in a text channel, nicknames ("appelle Zyklon le Grec", then "vire le Grec"; stored in `data/aliases.json`), a to-do list, "annule" (undoes the last action), "tu peux partir". "Moi", "ici", "tout le monde", "sauf X" and several requests in one sentence all work. Anything else gets a short spoken answer.
 
 Disconnecting someone, or acting on three people or more, waits for a "oui". If a name is ambiguous, Bobby asks which one you meant.
 

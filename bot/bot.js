@@ -62,7 +62,9 @@ function listen(connection, guild, io) {
           'x-force': brain.expecting(userId) ? '1' : '0', // waiting for a "yes" or a command: skip the wake word gate
         },
       });
-      const { text, lang, ms } = await res.json();
+      const { text, lang, wake, ms } = await res.json();
+      if (text) console.log(`\n[heard] ${member.displayName}: "${text}" (${lang}, whisper ${ms} ms${wake ? ', wake word heard' : ''})`);
+      else if (wake === false) console.log(`[skipped] ${member.displayName}: no "Bobby" in the audio`);
       if (text) await brain.hear({ text, lang, member, guild, tEnd, sttMs: ms, io });
     } catch (e) {
       console.error('[voice]', e.message);

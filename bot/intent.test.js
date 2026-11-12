@@ -16,7 +16,7 @@ console.log('name resolution: ok');
 const m = (name, channel) => ({ id: name, name, channel });
 const ctx = {
   speaker: m('Alex', 'Général'),
-  members: [m('Alex', 'Général'), m('Zyklon', 'Général'), m('Kévin', 'Général'), m('Marie', 'Gaming'), m('Lucas', 'Gaming')],
+  members: [m('Alex', 'Général'), { ...m('Zyklon', 'Général'), nicknames: ['le Grec'], aliases: ['le Grec'] }, m('Kévin', 'Général'), m('Marie', 'Gaming'), m('Lucas', 'Gaming')],
   voiceChannels: ['Général', 'Gaming', 'AFK', 'Réunion'].map((name) => ({ name })),
   textChannels: ['général', 'annonces', 'memes'].map((name) => ({ name })),
 };
@@ -62,6 +62,12 @@ const CASES = [
   ['undo that', 'undo:'],
   ['you can go now', 'leave:'],
   ['how are you doing', []],
+  // Nicknames (Zyklon is "le Grec" in the test context)
+  ['appelle Kévin le Boss', 'alias_add:Kévin'],
+  ["Zyklon ne s'appelle plus le Grec", 'alias_remove:Zyklon'],
+  ['vire le Grec du vocal', 'disconnect:Zyklon'],
+  ['coupe le micro du Grec', 'mute:Zyklon'],
+  ['call Lucas the rookie', 'alias_add:Lucas'],
 ];
 
 // LLM-free shortcut: what it takes must be right, what it leaves goes to the LLM (null).
@@ -83,6 +89,7 @@ const QUICK_CASES = [
   ['move me to gaming', 'move:Alex>Gaming'],
   ['undo that', 'undo:'],
   ['mute Zyklon and Kevin', null],
+  ['mute le grec', 'mute:Zyklon'],
 ];
 
 const fmt = (plan) => plan.map((s) => `${s.type}:${(s.targets || []).map((t) => t.name).sort().join(',')}${s.channel ? `>${s.channel.name}` : ''}`).join(' | ');

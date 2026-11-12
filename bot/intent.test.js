@@ -53,6 +53,11 @@ const CASES = [
   ['vire le Grec du vocal', 'disconnect:Zyklon'],
   ['coupe le micro du Grec', 'mute:Zyklon'],
   ['call Lucas the rookie', 'alias_add:Lucas'],
+  ['qui a quel surnom sur le serveur', 'alias_list:'],
+  ['who has which nickname', 'alias_list:'],
+  ['change le surnom le Grec en le Spartiate', 'alias_rename:'],
+  ['efface le surnom le Grec de Zyklon', 'alias_remove:Zyklon'],
+  ['remove the nickname le Grec from Zyklon', 'alias_remove:Zyklon'],
   // Questions forwarded to Claude
   ["c'est quoi la capitale de l'Australie", 'ask:'],
   ['explique-moi comment marche un trou noir', 'ask:'],

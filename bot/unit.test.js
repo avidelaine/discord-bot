@@ -59,6 +59,13 @@ const QUICK_CASES = [
   ['est-ce que tu peux me lister les features qu\'on t\'a déjà implémentées ?', 'help:'],
   ["qu'est-ce que tu sais faire", 'help:'],
   ['est-ce que tu peux me mute micro et casque s\'il te plaît ?', null],
+  // Nicknames
+  ['qui a quel surnom ?', 'alias_list:'],
+  ['who has which nicknames', 'alias_list:'],
+  ['renomme le surnom le Grec en le Spartiate', 'alias_rename:'],
+  ['rename the nickname le grec to the spartan', 'alias_rename:'],
+  ['supprime le surnom le Grec', 'alias_remove:'],
+  ['delete the nickname le grec', 'alias_remove:'],
   // Rights by voice (super admin)
   ['enlève les permissions de Lucas', 'perm_revoke:Lucas'],
   ['redonne les permissions à Lucas', 'perm_restore:Lucas'],
@@ -97,6 +104,12 @@ assert.strictEqual(needed(plan('passe Marie admin')), 'super');
 assert(roles.allowed('prime', needed(plan('quelle heure est-il'))));
 assert(!roles.allowed('prime', needed(plan('mute Zyklon'))));
 assert(!roles.allowed('admin', needed(plan('passe Marie admin'))));
+for (const sentence of ['qui a quel surnom', 'renomme le surnom le grec en le boss', 'supprime le surnom le grec']) {
+  assert.strictEqual(needed(plan(sentence)), 'super');
+  assert(!roles.allowed('prime', needed(plan(sentence))) && !roles.allowed('admin', needed(plan(sentence))));
+  assert(roles.allowed('super', needed(plan(sentence))));
+}
+assert.strictEqual(needed(resolve([{ type: 'alias_add', who: ['Kévin'], text: 'x' }], ctx)), 'super');
 
 (async () => {
   // Voice-managed rights, persisted in data/permissions.json; blacklist beats admin and Team Prime.
@@ -123,6 +136,34 @@ assert(!roles.allowed('admin', needed(plan('passe Marie admin'))));
   assert.deepStrictEqual(load('aliases', {}).Kévin, ['le Boss']);
   await run(plan('annule'), io);
   assert.deepStrictEqual(load('aliases', {}).Kévin, undefined);
+  // Nicknames: list (sorted by name, people out of voice included), rename, delete, each undoable
+  const posts = [];
+  const nio = { memberName: async (id) => ({ b: 'Zoé', a: 'Ana' })[id] || id, post: async (t) => { posts.push(t); return 'dev-bot-test'; } };
+  save('aliases', { b: ['le Grec', 'Zo'], a: ['la Reine'], c: [] });
+  const lst = plan('qui a quel surnom');
+  await run(lst, nio);
+  assert.deepStrictEqual(posts, ['**Ana** : la Reine\n**Zoé** : le Grec, Zo']);
+  assert.strictEqual(describe(lst), "Je l'ai mis dans dev-bot-test.");
+  assert.strictEqual(describe(lst, 'en'), 'I put it in dev-bot-test.');
+  const rn = plan('renomme le surnom le grec en le Spartiate');
+  await run(rn, nio);
+  assert.deepStrictEqual(load('aliases', {}).b, ['le spartiate', 'Zo']); // shortcuts lowercase the sentence
+  assert.strictEqual(describe(rn), '« le grec » devient « le spartiate » pour Zoé.');
+  await run(plan('annule'), nio);
+  assert.deepStrictEqual(load('aliases', {}).b, ['le Grec', 'Zo']);
+  const del = plan('supprime le surnom la reine');
+  await run(del, nio);
+  assert.strictEqual(load('aliases', {}).a, undefined);
+  assert.strictEqual(describe(del), "J'oublie « la reine » pour Ana.");
+  await run(plan('annule'), nio);
+  assert.deepStrictEqual(load('aliases', {}).a, ['la Reine']);
+  const nope = plan('supprime le surnom inconnu');
+  await run(nope, nio);
+  assert.strictEqual(describe(nope), 'Je ne trouve pas le surnom « inconnu ».');
+  const one = resolve([{ type: 'alias_remove', who: ['Zyklon'], text: 'le Grec' }], ctx); // with "who": only that person is searched
+  await run(one, nio);
+  assert.strictEqual(one[0].missing, true);
+  save('aliases', {});
   save('todo', ['pain']);
   await run(resolve([{ type: 'todo_add', text: 'lait' }], ctx), io);
   await run(resolve([{ type: 'todo_remove', text: 'pain' }], ctx), io);

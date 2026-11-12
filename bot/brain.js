@@ -5,7 +5,8 @@
 //   help     { fr, en }   one line for "what can you do"
 //   prompt   [lines]      action descriptions for the LLM          rules    [lines]  extra LLM rules
 //   examples [lines]      'sentence -> {json}' few-shot examples    quick    [[regex, (match) => actions]] LLM-free shortcuts
-//   actions  { type: { role: 'prime'|'admin'|'super', who, one, channel: 'voice'|'text', text, confirm,
+//   fields   { name: schema }   extra optional step fields for the LLM schema (e.g. alias_rename's "to")
+//   actions  { type: { role: 'prime'|'admin'|'super', who (true, or 'optional'), one, channel: 'voice'|'text', text, confirm,
 //                      announce(lang), run(step, io, lang) -> undo function or nothing, say: { fr(step, names), en } } }
 const fs = require('fs');
 const path = require('path');
@@ -41,6 +42,7 @@ const SCHEMA = {
           except: { type: 'array', items: { type: 'string' } },
           channel: { type: 'string' },
           text: { type: 'string' },
+          ...Object.assign({}, ...MODULES.map((m) => m.fields)),
         },
         required: ['type'],
       },
@@ -216,8 +218,8 @@ function resolve(actions, ctx) {
     if (!def) throw new Say("Je n'ai pas compris.", "Sorry, I didn't get that.");
     const step = { ...a, text: a.text || '' };
     delete step.who; delete step.except;
-    if (def.who) step.targets = targets(a, ctx);
-    if (def.one && step.targets.length !== 1) throw new Say('Une seule personne à la fois pour ça.', 'One person at a time for that.');
+    if (def.who && (def.who !== 'optional' || a.who?.length)) step.targets = targets(a, ctx);
+    if (def.one && step.targets && step.targets.length !== 1) throw new Say('Une seule personne à la fois pour ça.', 'One person at a time for that.');
     if (def.channel === 'voice') {
       const q = a.channel || '';
       step.channel = HERE.has(norm(q)) ? ctx.voiceChannels.find((c) => c.name === ctx.speaker.channel) : pick(q, ctx.voiceChannels, 'voice');

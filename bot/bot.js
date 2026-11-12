@@ -62,7 +62,12 @@ function listen(connection, guild, io) {
     if (busy.has(userId)) return;
     busy.add(userId);
     const opus = connection.receiver.subscribe(userId, { end: { behavior: EndBehaviorType.AfterSilence, duration: SILENCE_MS } });
-    const pcm = opus.pipe(new prism.opus.Decoder({ rate: 48000, channels: 2, frameSize: 960 }));
+    const decoder = new prism.opus.Decoder({ rate: 48000, channels: 2, frameSize: 960 });
+    // A corrupt audio packet must only drop this sentence, never crash the bot.
+    const drop = (e) => { console.error(`[audio] dropped a sentence: ${e.message}`); opus.destroy(); decoder.destroy(); busy.delete(userId); };
+    opus.on('error', drop);
+    decoder.on('error', drop);
+    const pcm = opus.pipe(decoder);
     let tEnd = performance.now();
     opus.once('end', () => { tEnd = performance.now() - SILENCE_MS; busy.delete(userId); });
     try {
@@ -84,7 +89,7 @@ function listen(connection, guild, io) {
       }
       if (text) await brain.hear({ text, lang, score, member, guild, tEnd, sttMs: ms, io });
     } catch (e) {
-      console.error('[voice]', e.message);
+      console.error(`[voice] ${e.cause?.code === 'ECONNREFUSED' ? `voice service not reachable at ${VOICE_URL} (is it running?)` : e.message}`);
     } finally {
       busy.delete(userId);
     }

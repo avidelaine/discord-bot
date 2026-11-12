@@ -561,6 +561,8 @@ async function batch3Written() {
   assert.deepStrictEqual(W('send me the list'), ['give me the list', null]);
   assert.strictEqual(W('écris dans général que la réunion est à 21 h'), null); // the message action, not an answer in writing
   assert.strictEqual(W("qu'est-ce que tu sais faire"), null);
+  // After review: moves and notes are never taken for answers in writing
+  for (const q of ['mets la musique de Daft Punk', 'mets-le en pause', 'envoie-le en AFK', 'mets-moi dans Gaming', 'envoie-moi en AFK', 'envoie-nous dans Gaming', 'écris le message bonjour dans général', 'note que le rapport est à rendre par écrit']) assert.strictEqual(W(q), null, q);
   for (const [q, type] of [['dis-moi ce que tu sais faire', 'help'], ['donne-moi la liste', 'todo_list'], ['donne-moi les surnoms', 'alias_list'], ['qui a quels droits', 'rights_list'], ['give me the list', 'todo_list'], ['donne-moi les droits de Lucas', 'perm_show']]) {
     assert.strictEqual(quick(q)?.[0].type, type, q);
   }
@@ -600,6 +602,10 @@ async function batch3Written() {
   assert(parts.length > 1 && parts.every((p) => p.length <= 2000) && parts.join('\n') === long);
   const code = fmt.chunks(`\`\`\`\n${long}\n\`\`\``);
   assert(code.every((p) => (p.match(/```/g) || []).length % 2 === 0)); // a cut code block is closed and reopened
+  for (const t of ['```code', '```\n' + long, 'a'.repeat(1995) + '\n```x']) { // odd fences: finite, closed, within limits
+    const p = fmt.chunks(t);
+    assert(p.length < 10 && p.every((x) => x.length <= 2000 && (x.match(/```/g) || []).length % 2 === 0), t.slice(0, 20));
+  }
   const many = fmt.embed({ title: 'T', fields: Array.from({ length: 30 }, (_, i) => ({ name: `f${i}`, value: 'v' })) });
   assert.deepStrictEqual(many.map((e) => e.fields.length), [25, 5]);
   const big = fmt.embed({ title: 'T', fields: [{ name: 'gros', value: 'y'.repeat(3000) }] });

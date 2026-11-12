@@ -352,25 +352,40 @@ const describe = (plan, lang = 'fr') => plan.map((s) => stepSay(s, plan, lang)).
 // "dis-moi par écrit…", "in writing" (anywhere), or "écris-moi…", "envoie-moi…", "send me…" (at the start).
 // "écris dans général bonjour" is not one of them: that is the message action.
 const IN_WRITING = /[\s,]*(?:par écrit|à l'écrit|a l'ecrit|in writing|by text|as a message)(?![\p{L}])[\s,]*/iu;
-const WRITE_ME = /^(?:(?:est-ce que |est ce que )?(?:tu peux|tu pourrais|peux-tu|can you|could you|please)[\s,]+)?((?:écris|ecris|écrit|envoie|envoies|mets)[- ](?:moi|le|la|les|ça|ca|nous)(?:[- ]moi)?|(?:write|send|text)(?: it| that| this)?(?: to)? me|write (?:it|that) down)(?![\p{L}])[\s,:]*/iu;
+// Never "mets" or "envoie-le" ("mets-moi dans Gaming", "envoie-le en AFK" are moves); "écris-le" repeats the last answer.
+const WRITE_ME = /^(?:(?:est-ce que |est ce que )?(?:tu peux|tu pourrais|peux-tu|can you|could you|please)[\s,]+)?((?:écris|ecris)-(?:le|la|les|ça|ca)(?:-moi)?|(?:écris|ecris|envoie)[- ](?:moi|nous)|(?:write|send|text)(?: it| that| this)?(?: to)? me|write (?:it|that) down)(?![\p{L}])[\s,:]*/iu;
+const REPEAT = /^(?:écris|ecris)-|^write (?:it|that) down/i; // no request of its own: the last one, in writing
 const TO_CHANNEL = /\s*(?:dans|sur|en|in|on|to) (?:le salon |the channel |the )?#?([\p{L}\d_-]+)(?: channel)?$/iu;
 const RIGHTS_Q = /droit|admin|permission|rights|liste noire|blacklist/i;
 
 // -> null, or { query (the request without its writing words; "écris-le" alone repeats the last request), channel }
 function writing(query, ctx, history = []) {
+  if (MODULES.some((x) => x.early?.(query))) return null; // "note que le rapport est à rendre par écrit" is a note
   const q = query.replace(/[’`]/g, "'").replace(/[.!?…]+$/, '').trim();
   const m = q.match(WRITE_ME);
   let rest;
   if (m) rest = q.slice(m[0].length);
   else if (IN_WRITING.test(q)) rest = q.replace(IN_WRITING, ' ').trim();
   else return null;
+  // "envoie-moi en AFK", "envoie-nous dans Gaming": a move, not an answer in writing
+  if (m && !REPEAT.test(m[1]) && /^(?:dans|en|sur|vers|to|in|into)\b/i.test(rest)) return null;
   let channel = null;
   const c = rest.match(TO_CHANNEL) || (rest ? null : q.match(TO_CHANNEL));
   const hit = c && ctx.textChannels.map((x) => ({ x, s: sim(c[1], x.name) })).sort((a, b) => b.s - a.s)[0];
   if (hit && hit.s >= 0.8) { channel = hit.x; rest = rest.replace(TO_CHANNEL, '').trim(); }
-  if (!rest) return { query: history.at(-1)?.query || '', channel };
+  if (!rest) return m && !REPEAT.test(m[1]) ? null : { query: history.at(-1)?.query || '', channel };
   // "écris-moi la liste" -> "donne-moi la liste", which the shortcuts know
   return { query: m ? `${/^(?:write|send|text)/i.test(m[1]) ? 'give me' : 'donne-moi'} ${rest}` : rest, channel };
+}
+
+const writingIo = (io, w) => ({ ...io, post: (c) => io.post(c, w.channel?.ref) }); // posts go to the channel asked for
+
+// After a plan asked in writing: steps that posted by themselves (lists) set s.where; the others post their card,
+// or what they would have said. Returns the short spoken line.
+async function postWritten(plan, rio, lang) {
+  let where = plan.find((s) => s.where)?.where;
+  for (const s of plan.filter((x) => !x.where)) { const c = s.card || stepSay(s, plan, lang); if (c) where = await rio.post(c); }
+  return where ? (lang === 'en' ? LINES.en : LINES.fr).wrote(where) : describe(plan, lang);
 }
 
 // ---------- Execution ----------
@@ -439,8 +454,10 @@ async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttM
       if (!roles.allowed(role, needed(p.plan))) { rec.outcome = 'forbidden'; return say(L.forbidden); } // rights may have changed meanwhile
       rec.outcome = 'confirmed';
       const t0 = performance.now();
-      await run(p.plan, io, lang);
+      const pio = p.w ? writingIo(io, p.w) : io; // asked in writing before the "oui"
+      await run(p.plan, pio, lang);
       t.action = Math.round(performance.now() - t0);
+      if (p.w) return say(await postWritten(p.plan, pio, lang));
       return say(describe(p.plan, lang), voiceOf(p.plan));
     }
     // "OK STOP BOBBY BOBBY STOP": the command follows the last of the repeated "Bobby".
@@ -461,7 +478,7 @@ async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttM
     }
     // A song title may end in a cancel word ("joue Nevermind"): playing wins.
     if (!quick(query)?.some((a) => a.type.startsWith('music_')) && cancels(query)) { rec.outcome = 'cancelled_by_speaker'; return say(L.cancelled); }
-    const rio = w ? { ...io, post: (c) => io.post(c, w.channel?.ref) } : io; // posts go to the channel asked for
+    const rio = w ? writingIo(io, w) : io;
     let t0 = performance.now();
     let plan = null;
     const fast = quick(query);
@@ -490,7 +507,7 @@ async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttM
       return say(L.forbidden);
     }
     if (needsConfirm(plan)) {
-      pending.set(member.id, { until: Date.now() + 10000, plan });
+      pending.set(member.id, { until: Date.now() + 10000, plan, w });
       rec.outcome = 'confirm_asked';
       return say(`${describe(plan, lang)} ${L.confirm}`);
     }
@@ -499,12 +516,7 @@ async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttM
     await run(plan, rio, lang);
     t.action = Math.round(performance.now() - t0);
     rec.outcome = 'done';
-    if (w) {
-      // Steps that posted by themselves (lists) set s.where; the others post their card, or what they would have said.
-      let where = plan.find((s) => s.where)?.where;
-      for (const s of plan.filter((x) => !x.where)) { const c = s.card || stepSay(s, plan, lang); if (c) where = await rio.post(c); }
-      return say(where ? L.wrote(where) : describe(plan, lang));
-    }
+    if (w) return say(await postWritten(plan, rio, lang));
     const g = noteGuard(describe(plan, lang), plan, lang);
     if (g.offer) offerNote(member.id, query, ctx);
     say(g.text, voiceOf(plan));

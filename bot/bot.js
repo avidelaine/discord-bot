@@ -63,6 +63,7 @@ function follow(channel) {
   if (!conn || conn.joinConfig.channelId === channel.id) return null;
   const prev = channel.guild.channels.cache.get(conn.joinConfig.channelId) || null;
   joinVoiceChannel({ channelId: channel.id, guildId: channel.guild.id, adapterCreator: channel.guild.voiceAdapterCreator, selfDeaf: false });
+  conn.joinConfig.channelId = channel.id; // a live connection only sends the payload: keep joinConfig (rejoins, checkAlone) in step
   console.log(`[voice] Bobby moves to ${channel.name}`);
   return prev;
 }
@@ -71,7 +72,7 @@ function follow(channel) {
 // the music pauses and Bobby leaves after 2 minutes unless someone comes back.
 const ALONE_LEAVE_MS = 120_000;
 let session = null; // { guild, joinerId } since the last /join
-let settle = null, leaveTimer = null, autoPaused = false;
+let settle = null, leaveTimer = null, autoPaused = null; // autoPaused: the track paused because Bobby was alone
 client.on(Events.VoiceStateUpdate, (o, n) => {
   if (!session || n.guild.id !== session.guild.id) return;
   clearTimeout(settle);
@@ -85,14 +86,24 @@ function checkAlone() {
   const next = whenAlone({ botChannel: conn.joinConfig.channelId, joinerId, voice });
   if (next === 'wait') {
     if (leaveTimer) return;
-    if (music.current && !music.paused) { music.pause(); autoPaused = true; }
+    if (music.current && !music.paused) { music.pause(); autoPaused = music.current; }
     console.log('[voice] alone, nobody to follow: leaving in 2 minutes unless someone comes back');
-    leaveTimer = setTimeout(() => { leaveTimer = null; music.stop(); autoPaused = false; getVoiceConnection(guild.id)?.destroy(); console.log('[voice] left: alone for 2 minutes'); }, ALONE_LEAVE_MS);
+    leaveTimer = setTimeout(() => { leaveTimer = null; disconnect(guild.id); console.log('[voice] left: alone for 2 minutes'); }, ALONE_LEAVE_MS);
     return;
   }
   clearTimeout(leaveTimer); leaveTimer = null;
   if (next.follow) follow(guild.channels.cache.get(next.follow));
-  if (autoPaused) { autoPaused = false; music.resume(); }
+  // only the very track Bobby paused, still paused: a pause, stop or new song by someone meanwhile wins
+  if (autoPaused && music.current === autoPaused && music.paused) music.resume();
+  autoPaused = null;
+}
+
+// Leaves voice now: music, Bobby's voice and the alone timers stop with it.
+function disconnect(guildId) {
+  music.stop();
+  speech = null; mixer.stopOverlay();
+  clearTimeout(leaveTimer); leaveTimer = null; autoPaused = null;
+  getVoiceConnection(guildId)?.destroy();
 }
 
 const memberName = (guild) => async (id) => (guild.members.cache.get(id) ?? (await guild.members.fetch(id).catch(() => null)))?.displayName ?? id;
@@ -125,7 +136,7 @@ function makeIo(guild, textChannel) {
     hush: () => { speech = null; mixer.stopOverlay(); },
     // Music stops now; the connection goes after the farewell has been spoken.
     // ponytail: fixed 3 s delay, enough for "À plus."; wait for the overlay's end if longer goodbyes appear.
-    leave: () => { music.stop(); setTimeout(() => getVoiceConnection(guild.id)?.destroy(), 3000); },
+    leave: () => { music.stop(); setTimeout(() => disconnect(guild.id), 3000); },
   };
 }
 
@@ -195,8 +206,7 @@ async function onCommand(it) {
     return it.reply({ content: "Tu n'as pas le droit d'utiliser cette commande.", ephemeral: true });
   }
   if (it.commandName === 'leave') {
-    music.stop();
-    getVoiceConnection(it.guildId)?.destroy();
+    disconnect(it.guildId);
     return it.reply('À plus.');
   }
   if (it.commandName === 'surnoms') {
@@ -207,7 +217,7 @@ async function onCommand(it) {
   if (!channel) return it.reply({ content: 'Rejoins un salon vocal d\'abord.', ephemeral: true });
   getVoiceConnection(it.guildId)?.destroy(); // a second /join must not attach a second listener (double actions)
   session = { guild: it.guild, joinerId: it.user.id };
-  clearTimeout(leaveTimer); leaveTimer = null; autoPaused = false;
+  clearTimeout(leaveTimer); leaveTimer = null; autoPaused = null;
   const connection = joinVoiceChannel({
     channelId: channel.id, guildId: channel.guild.id, adapterCreator: channel.guild.voiceAdapterCreator, selfDeaf: false,
   });

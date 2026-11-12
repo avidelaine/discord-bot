@@ -8,13 +8,14 @@ const cut = (s, n) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 // Splits text at line breaks into pieces of at most `max` chars; a code block cut in two is closed and reopened.
 function chunks(text, max = 2000) {
   const out = [];
+  const lim = max - 8; // room to close a code block
   let rest = text;
   while (rest) {
-    let n = rest.length <= max ? rest.length : rest.lastIndexOf('\n', max - 4);
-    if (n <= 0) n = max - 4;
+    let n = rest.length <= lim ? rest.length : rest.lastIndexOf('\n', lim);
+    if (n <= 0) n = lim;
     let piece = rest.slice(0, n);
     rest = rest.slice(n).replace(/^\n/, '');
-    if ((piece.match(/```/g) || []).length % 2) { piece += '\n```'; rest = `\`\`\`\n${rest}`; }
+    if ((piece.match(/```/g) || []).length % 2) { piece += '\n```'; if (rest) rest = `\`\`\`\n${rest}`; } // never reopen an empty rest
     out.push(piece);
   }
   return out;
@@ -30,8 +31,9 @@ function embed({ title, color = COLOR.info, description, fields = [], footer }) 
     const parts = chunks(f.value || '-', 1024);
     parts.forEach((v, i) => flat.push({ name: cut(i ? `${f.name} (suite)` : f.name, 256), value: v, inline: Boolean(f.inline) }));
   }
-  const first = { title: cut(title, 256), color, ...(description && { description: cut(description, 4096) }), fields: [] };
-  const out = [first];
+  const [desc, ...more] = description ? chunks(description, 4096) : [];
+  const out = [{ title: cut(title, 256), color, ...(desc && { description: desc }), fields: [] }];
+  for (const d of more) out.push({ title: cut(`${title} (suite)`, 256), color, description: d, fields: [] });
   for (const f of flat) {
     let cur = out.at(-1);
     if (cur.fields.length >= 25 || size(cur) + f.name.length + f.value.length > 5500) {
@@ -40,7 +42,7 @@ function embed({ title, color = COLOR.info, description, fields = [], footer }) 
     }
     cur.fields.push(f);
   }
-  if (footer) out.at(-1).footer = { text: cut(footer, 2048) };
+  if (footer) out.at(-1).footer = { text: cut(footer, 400) }; // fields stop at 5500: the footer stays under 6000
   return out;
 }
 

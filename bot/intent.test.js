@@ -99,6 +99,8 @@ const CASES = [
   ['can you mute Prime Ilias please?', 'mute:Prime Ilias'],
   ["est-ce que tu peux me mute micro et casque s'il te plaît ?", 'mute:Alex | deafen:Alex'],
   ['Mute Bobby', []], // Bobby says it cannot mute itself
+  ['tu peux venir avec nous dans gaming', 'come:>Gaming'],
+  ['viens nous rejoindre', 'come:>Général'],
   // Routing: commands stay local, only knowledge questions go to Claude (ask)
   ['tu sais faire quoi', 'help:'],
   ['what time is it', 'time:'],

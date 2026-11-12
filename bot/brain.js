@@ -343,7 +343,7 @@ async function hear({ text, lang = 'fr', member, guild, tEnd, sttMs, io }) {
   const wake = findWake(text);
   if (!wake && !p) return;
   if (!(ALLOWED.length ? ALLOWED.includes(member.id) : member.id === guild.ownerId)) {
-    return console.log(`[bobby] ${member.displayName} is not allowed to give commands`);
+    return console.log(`[bobby] ${member.displayName} is not allowed to give commands. To allow them, add ${member.id} to ALLOWED_USERS in .env`);
   }
   pending.delete(member.id);
   const L = LINES[lang] || LINES.fr;

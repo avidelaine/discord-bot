@@ -1,25 +1,10 @@
 // Comprehension test set: sentence -> expected actions, against the real LLM (llama-server running).
 // Run: node bot/intent.test.js   Add every sentence Bobby gets wrong in real use.
+// Shortcuts, names and rights are covered without the LLM in unit.test.js.
 const assert = require('assert');
-const { understand, resolve, quick, pick, sim } = require('./brain');
+const { understand, resolve } = require('./brain');
 
-// Name resolution: pure, tested without the LLM.
-const roster = [{ name: 'Zyklon' }, { name: 'Kévin', aliases: ['kev_du_93'] }, { name: 'Marie' }, { name: 'Mario' }];
-assert.strictEqual(pick('ziklone', roster, 'person').name, 'Zyklon');
-assert.strictEqual(pick('kevin', roster, 'person').name, 'Kévin');
-assert.strictEqual(pick('kev du 93', roster, 'person').name, 'Kévin');
-assert.throws(() => pick('Mari', roster, 'person'), /tu veux dire/);
-assert.throws(() => pick('Bernard', roster, 'person'), /Je ne trouve pas/);
-assert(sim('🎮 Gaming', 'gaming') === 1);
-console.log('name resolution: ok');
-
-const m = (name, channel) => ({ id: name, name, channel });
-const ctx = {
-  speaker: m('Alex', 'Général'),
-  members: [m('Alex', 'Général'), { ...m('Zyklon', 'Général'), nicknames: ['le Grec'], aliases: ['le Grec'] }, m('Kévin', 'Général'), m('Marie', 'Gaming'), m('Lucas', 'Gaming')],
-  voiceChannels: ['Général', 'Gaming', 'AFK', 'Réunion'].map((name) => ({ name })),
-  textChannels: ['général', 'annonces', 'memes'].map((name) => ({ name })),
-};
+const ctx = require('./test-context');
 
 // [sentence, expected] ; expected = "type:targets>channel" per action, joined by " | ". [] = no action.
 const CASES = [
@@ -32,7 +17,7 @@ const CASES = [
   ['envoie Lucas en AFK', 'move:Lucas>AFK'],
   ['mets-moi dans la salle de réunion', 'move:Alex>Réunion'],
   ['ramène Marie ici', 'move:Marie>Général'],
-  ['tout le monde dans gaming', 'move:Alex,Kévin,Lucas,Marie,Zyklon>Gaming'],
+  ['tout le monde dans gaming', 'move:Alex,Kévin,Lucas,Marie,Prime Ilias,Sorciax,WakandeX,Zyklon>Gaming'],
   ['coupe tout le monde sauf Kévin', 'mute:Zyklon'],
   ['vire Lucas du vocal', 'disconnect:Lucas'],
   ['déplace Kévin dans AFK et coupe son micro', 'move:Kévin>AFK | mute:Kévin'],
@@ -43,7 +28,7 @@ const CASES = [
   ['annule', 'undo:'],
   ['laisse tomber, reviens en arrière', 'undo:'],
   ['tu peux partir', 'leave:'],
-  ['quelle heure est-il', []],
+  ['quelle heure est-il', 'time:'],
   ['raconte-moi une blague', 'ask:'],
   ['déplace Bernard dans gaming', 'ERR'],
   ['mute Zyklon et Kévin', 'mute:Kévin,Zyklon'],
@@ -74,39 +59,43 @@ const CASES = [
   ['combien font 17 fois 23', 'ask:'],
   ['who won the last world cup', 'ask:'],
   ['salut Bobby ça va', []],
+  // Missed on 2026-11-12 (journal)
+  ['il est quelle heure ?', 'time:'],
+  ['est-ce que tu peux me dire la population de la République démocratique du Congo ?', 'ask:'],
+  ["c'est quoi la République Démocratique du Congo ?", 'ask:'],
+  ["est-ce que tu peux me lister les features qu'on t'a déjà implémentées ?", 'help:'],
+  ["est-ce que tu peux kick Sorciax s'il te plaît ?", 'disconnect:Sorciax'],
+  ['est-ce que tu peux renommer Lucas en le Boss ?', 'alias_add:Lucas'],
+  // "des mute Ilias" is taken by the shortcut before the LLM (unit.test.js); the LLM alone reads it as deafen.
+  ['peux-tu draguer Sorciax ?', 'move:Sorciax>Général'],
+  ['vas-y mute moi', 'mute:Alex'],
+  ['can you mute Prime Ilias please?', 'mute:Prime Ilias'],
+  ["est-ce que tu peux me mute micro et casque s'il te plaît ?", 'mute:Alex | deafen:Alex'],
+  ['Mute Bobby', []], // Bobby says it cannot mute itself
+  // Routing: commands stay local, only knowledge questions go to Claude (ask)
+  ['tu sais faire quoi', 'help:'],
+  ['what time is it', 'time:'],
+  ["t'es qui toi", []],
+  ['mets un surnom à Marie, la Reine', 'alias_add:Marie'],
+  ['écris dans memes que Lucas a perdu', 'message:>memes'],
+  ['pourquoi le ciel est bleu', 'ask:'],
+  ['quel temps fait-il à Paris demain', 'ask:'],
+  ['how many people live in Canada', 'ask:'],
+  ['donne-moi une idée de recette pour ce soir', 'ask:'],
+  // Rights by voice
+  ['enlève les permissions de Lucas', 'perm_revoke:Lucas'],
+  ['passe Marie admin', 'admin_add:Marie'],
 ];
 
-// LLM-free shortcut: what it takes must be right, what it leaves goes to the LLM (null).
-const QUICK_CASES = [
-  ['Coupe le micro de Kévin.', 'mute:Kévin'],
-  ['mute ziklone', 'mute:Zyklon'],
-  ['rends le micro à Kevin', 'unmute:Kévin'],
-  ['coupe le son de Marie', 'deafen:Marie'],
-  ['déplace Zyklon dans gaming', 'move:Zyklon>Gaming'],
-  ['envoie Lucas en AFK', 'move:Lucas>AFK'],
-  ['mets-moi dans la salle de réunion', 'move:Alex>Réunion'],
-  ['annule', 'undo:'],
-  ['coupe le micro de Zyklon et Kévin', null],
-  ['déplace Kévin dans AFK et coupe son micro', null],
-  ['raconte-moi une blague', null],
-  ['Mute Zyklon.', 'mute:Zyklon'],
-  ['deafen marie', 'deafen:Marie'],
-  ['move Lucas to the AFK channel', 'move:Lucas>AFK'],
-  ['move me to gaming', 'move:Alex>Gaming'],
-  ['undo that', 'undo:'],
-  ['mute Zyklon and Kevin', null],
-  ['mute le grec', 'mute:Zyklon'],
-];
+// Adjacent steps of the same type and channel count as one ("mute Zyklon" + "mute Kévin" = "mute Zyklon and Kévin").
+const merge = (plan) => plan.reduce((out, s) => {
+  const last = out.at(-1);
+  if (last && last.type === s.type && last.channel === s.channel && last.targets && s.targets) last.targets = [...last.targets, ...s.targets];
+  else out.push({ ...s });
+  return out;
+}, []);
+const fmt = (plan) => merge(plan).map((s) => `${s.type}:${(s.targets || []).map((t) => t.name).sort().join(',')}${s.channel ? `>${s.channel.name}` : ''}`).join(' | ');
 
-const fmt = (plan) => plan.map((s) => `${s.type}:${(s.targets || []).map((t) => t.name).sort().join(',')}${s.channel ? `>${s.channel.name}` : ''}`).join(' | ');
-
-for (const [phrase, want] of QUICK_CASES) {
-  const a = quick(phrase);
-  let got = null;
-  try { got = a && fmt(resolve(a, ctx)); } catch { got = null; } // name not found: falls back to the LLM
-  assert.strictEqual(got, want, `shortcut: "${phrase}"`);
-}
-console.log('LLM-free shortcut: ok');
 
 (async () => {
   let ok = 0;
@@ -118,7 +107,7 @@ console.log('LLM-free shortcut: ok');
       const out = await understand(phrase, ctx);
       got = out.actions.length ? fmt(resolve(out.actions, ctx)) : [];
     } catch (e) {
-      if (e.code === 'ECONNREFUSED' || e.cause?.code === 'ECONNREFUSED') throw new Error('llama-server is not answering on port 8080');
+      if (e.code === 'LLM_DOWN') throw new Error('llama-server is not answering on port 8080');
       got = 'ERR';
     }
     times.push(performance.now() - t0);

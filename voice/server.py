@@ -65,9 +65,9 @@ voices = {
 
 # Wake word gate: a tiny CPU model listens for "Bobby" so Whisper (GPU) only runs on sentences meant for Bobby.
 WAKE_MODEL = MODELS / "wakeword" / "bobby.onnx"
-# 0.2: catches 26/30 of your recorded "Bobby"; a false trigger only costs one transcription,
-# since the bot still checks that the transcript contains "Bobby".
-WAKE_THRESHOLD = float(os.getenv("WAKE_THRESHOLD", "0.2"))
+# 0.12: 3 real "Bobby" scored 0.15 on 2026-11-12 and were missed at 0.2. A false trigger only costs one
+# transcription, since the bot still checks that the transcript contains "Bobby".
+WAKE_THRESHOLD = float(os.getenv("WAKE_THRESHOLD", "0.12"))
 wake = None
 if WAKE_MODEL.exists():
     from openwakeword.model import Model

@@ -1,7 +1,7 @@
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env'), quiet: true });
 const fs = require('fs');
-const { Readable } = require('stream');
+const { Readable, PassThrough } = require('stream');
 
 // Mirror the console to _logs/bot.log, so errors can be reviewed later.
 fs.mkdirSync(path.join(__dirname, '..', '_logs'), { recursive: true });
@@ -19,8 +19,9 @@ const {
   joinVoiceChannel, getVoiceConnection, entersState, EndBehaviorType, VoiceConnectionStatus,
   createAudioPlayer, createAudioResource, StreamType,
 } = require('@discordjs/voice');
-const prism = require('prism-media');
+const { OpusEncoder } = require('@discordjs/opus');
 const brain = require('./brain');
+const claude = require('./actions/ask');
 
 const VOICE_URL = process.env.VOICE_URL || 'http://127.0.0.1:3000';
 // Silence that ends a sentence. Shorter is snappier, but cuts you off if you pause mid-sentence.
@@ -62,12 +63,15 @@ function listen(connection, guild, io) {
     if (busy.has(userId)) return;
     busy.add(userId);
     const opus = connection.receiver.subscribe(userId, { end: { behavior: EndBehaviorType.AfterSilence, duration: SILENCE_MS } });
-    const decoder = new prism.opus.Decoder({ rate: 48000, channels: 2, frameSize: 960 });
-    // A corrupt audio packet must only drop this sentence, never crash the bot.
-    const drop = (e) => { console.error(`[audio] dropped a sentence: ${e.message}`); opus.destroy(); decoder.destroy(); busy.delete(userId); };
-    opus.on('error', drop);
-    decoder.on('error', drop);
-    const pcm = opus.pipe(decoder);
+    // Decode packet by packet: a corrupt packet is skipped instead of dropping the whole sentence.
+    const decoder = new OpusEncoder(48000, 2);
+    const pcm = new PassThrough();
+    let bad = 0;
+    opus.on('data', (packet) => {
+      try { pcm.write(decoder.decode(packet)); } catch { bad++; }
+    });
+    opus.on('end', () => { if (bad) console.log(`[audio] skipped ${bad} corrupt packet(s)`); pcm.end(); });
+    opus.on('error', (e) => { console.error(`[audio] ${e.message}`); pcm.end(); });
     let tEnd = performance.now();
     opus.once('end', () => { tEnd = performance.now() - SILENCE_MS; busy.delete(userId); });
     try {
@@ -98,6 +102,8 @@ function listen(connection, guild, io) {
 
 client.once(Events.ClientReady, async () => {
   console.log(`Bobby online: ${client.user.tag}`);
+  console.log(`[rights] role needed per action: ${Object.entries(brain.roleTable()).map(([a, r]) => `${a}=${r}`).join(' ')}`);
+  claude.check();
   await client.application.commands.set([]); // drop global commands left by older versions: only the server ones below remain
   await client.guilds.cache.get(process.env.GUILD_ID)?.commands.set([
     { name: 'join', description: 'Bobby rejoint ton salon vocal' },

@@ -68,6 +68,7 @@ Règles :
 - Plusieurs demandes dans une phrase donnent plusieurs actions, dans l'ordre.
 ${MODULES.flatMap((m) => m.rules).join('\n')}
 - Demande impossible ou incompréhensible : "actions" vide, et "say" le dit en une phrase courte.
+- Quand il y a des actions, "say" reste vide : Bobby annonce lui-même ce qu'il fait.
 - "say" est toujours dans la langue de la phrase : français si on te parle français, anglais si on te parle anglais.
 
 Exemples :
@@ -123,7 +124,7 @@ async function understand(query, ctx, lang = 'fr') {
       body: JSON.stringify({
         messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: prompt(ctx, query, lang) }],
         temperature: 0,
-        max_tokens: 200,
+        max_tokens: 300, // a JSON cut short by this limit fails to parse: keep "say" short in the prompt
         response_format: { type: 'json_schema', json_schema: { name: 'plan', schema: SCHEMA } },
       }),
     });

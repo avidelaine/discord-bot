@@ -46,6 +46,8 @@ module.exports = {
     '"appelle Zyklon le Grec" -> {"actions":[{"type":"alias_add","who":["Zyklon"],"text":"le Grec"}],"say":""}',
     '"Kévin ne s\'appelle plus Kev" -> {"actions":[{"type":"alias_remove","who":["Kévin"],"text":"Kev"}],"say":""}',
     '"renomme Lucas en le Boss" -> {"actions":[{"type":"alias_add","who":["Lucas"],"text":"le Boss"}],"say":""}',
+    '"tu peux renommer Marie en la Reine ?" -> {"actions":[{"type":"alias_add","who":["Marie"],"text":"la Reine"}],"say":""}',
+    '"coupe le micro du Rat" (le Rat = surnom de Lucas) -> {"actions":[{"type":"mute","who":["Lucas"]}],"say":""}',
     '"renomme le surnom le Rat en le Spartiate" -> {"actions":[{"type":"alias_rename","text":"le Rat","to":"le Spartiate"}],"say":""}',
     '"delete the nickname the rookie" -> {"actions":[{"type":"alias_remove","text":"the rookie"}],"say":""}',
     '"qui a quel surnom" -> {"actions":[{"type":"alias_list"}],"say":""}',

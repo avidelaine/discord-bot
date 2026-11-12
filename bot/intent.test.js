@@ -44,7 +44,7 @@ const CASES = [
   ['laisse tomber, reviens en arrière', 'undo:'],
   ['tu peux partir', 'leave:'],
   ['quelle heure est-il', []],
-  ['raconte-moi une blague', []],
+  ['raconte-moi une blague', 'ask:'],
   ['déplace Bernard dans gaming', 'ERR'],
   ['mute Zyklon et Kévin', 'mute:Kévin,Zyklon'],
   ['euh coupe le micro de... de Marie', 'mute:Marie'],
@@ -68,6 +68,12 @@ const CASES = [
   ['vire le Grec du vocal', 'disconnect:Zyklon'],
   ['coupe le micro du Grec', 'mute:Zyklon'],
   ['call Lucas the rookie', 'alias_add:Lucas'],
+  // Questions forwarded to Claude
+  ["c'est quoi la capitale de l'Australie", 'ask:'],
+  ['explique-moi comment marche un trou noir', 'ask:'],
+  ['combien font 17 fois 23', 'ask:'],
+  ['who won the last world cup', 'ask:'],
+  ['salut Bobby ça va', []],
 ];
 
 // LLM-free shortcut: what it takes must be right, what it leaves goes to the LLM (null).

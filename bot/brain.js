@@ -13,6 +13,9 @@ const journal = (rec) => fs.appendFile(JOURNAL, `${JSON.stringify(rec)}\n`, () =
 
 const LLM_URL = process.env.LLM_URL || 'http://127.0.0.1:8080';
 const ALLOWED = (process.env.ALLOWED_USERS || '').split(',').map((s) => s.trim()).filter(Boolean);
+// Who may have questions forwarded to Claude (comma-separated Discord IDs). Empty: nobody.
+const CLAUDE_USERS = (process.env.CLAUDE_USERS || '').split(',').map((x) => x.trim()).filter(Boolean);
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'haiku';
 const YES = /\b(oui|ouais|vas-y|confirme|ok|okay|d'accord|go|yes|yeah|yep|sure|confirm)\b/i;
 
 const SCHEMA = {
@@ -24,7 +27,7 @@ const SCHEMA = {
         type: 'object',
         properties: {
           type: { enum: ['mute', 'unmute', 'deafen', 'undeafen', 'move', 'disconnect', 'message',
-            'todo_add', 'todo_remove', 'todo_list', 'alias_add', 'alias_remove', 'undo', 'leave'] },
+            'todo_add', 'todo_remove', 'todo_list', 'alias_add', 'alias_remove', 'ask', 'undo', 'leave'] },
           who: { type: 'array', items: { type: 'string' } },
           except: { type: 'array', items: { type: 'string' } },
           channel: { type: 'string' },
@@ -52,6 +55,7 @@ Actions possibles (champ "type") :
 - todo_list : lire la liste de tâches
 - undo : annuler la dernière action
 - leave : Bobby quitte le salon vocal
+- ask : transmettre la question "text" (reformulée clairement, complète) à un assistant plus savant
 - alias_add / alias_remove : donner ou retirer à "who" (une seule personne) le surnom "text"
 
 Règles :
@@ -61,7 +65,7 @@ Règles :
 - "ici" désigne le salon vocal de celui qui parle : mets son nom exact dans "channel".
 - Les noms sont souvent mal transcrits : écris le nom du contexte qui ressemble le plus à ce qui a été dit.
 - Plusieurs demandes dans une phrase donnent plusieurs actions, dans l'ordre.
-- Question ou discussion sans action : "actions" vide, et réponds dans "say" en une phrase courte.
+- Question de connaissance, d'actualité, de calcul, d'explication ou de conseil : action ask. Ne réponds toi-même ("actions" vide, réponse courte dans "say") qu'aux salutations, à la date et l'heure, et aux questions sur toi.
 - Tu connais la date et l'heure actuelles (dans le contexte) : utilise-les si on te les demande.
 - Demande impossible ou incompréhensible : "actions" vide, et "say" le dit en une phrase courte.
 - "say" est toujours dans la langue de la phrase : français si on te parle français, anglais si on te parle anglais.
@@ -75,6 +79,8 @@ Exemples :
 "non annule ça" -> {"actions":[{"type":"undo"}],"say":""}
 "c'est bon tu peux y aller" -> {"actions":[{"type":"leave"}],"say":""}
 "t'es qui toi" -> {"actions":[],"say":"Je suis Bobby, l'assistant vocal du serveur."}
+"c'est quoi la capitale de l'Australie" -> {"actions":[{"type":"ask","text":"Quelle est la capitale de l'Australie ?"}],"say":""}
+"who won the last world cup" -> {"actions":[{"type":"ask","text":"Who won the last FIFA World Cup?"}],"say":""}
 "move me and Zyklon to Gaming" -> {"actions":[{"type":"move","who":["moi","Zyklon"],"channel":"Gaming"}],"say":""}
 "kick Lucas from voice" -> {"actions":[{"type":"disconnect","who":["Lucas"]}],"say":""}
 "appelle Zyklon le Grec" -> {"actions":[{"type":"alias_add","who":["Zyklon"],"text":"le Grec"}],"say":""}
@@ -243,7 +249,7 @@ function resolve(actions, ctx) {
     }
     if (a.type === 'message') step.channel = pick(a.channel || '', ctx.textChannels, 'text');
     if (a.type.startsWith('alias_') && step.targets.length !== 1) throw new Say('Un surnom, une seule personne à la fois.', 'One person at a time for nicknames.');
-    if (['message', 'todo_add', 'todo_remove', 'alias_add', 'alias_remove'].includes(a.type) && !step.text) throw new Say('Il me manque le texte.', "I'm missing the text.");
+    if (['message', 'todo_add', 'todo_remove', 'alias_add', 'alias_remove', 'ask'].includes(a.type) && !step.text) throw new Say('Il me manque le texte.', "I'm missing the text.");
     return step;
   });
 }
@@ -268,6 +274,10 @@ const LINES = {
     todo_list: (l) => (l.length ? `Ta liste : ${l.join(', ')}.` : 'Ta liste est vide.'),
     undo: (done) => (done ? "J'annule." : "Il n'y a rien à annuler."),
     leave: () => 'À plus.',
+    ask: (n, c, t, missing, answer) => answer,
+    asking: 'Je demande à Claude.',
+    noClaude: "Désolé, je ne peux pas demander à Claude pour toi.",
+    claudeDown: "Je n'arrive pas à joindre Claude.",
     alias_add: (n, c, t) => `${n} s'appelle aussi « ${t} ».`,
     alias_remove: (n, c, t, missing) => (missing ? `${n} n'avait pas le surnom « ${t} ».` : `J'oublie « ${t} » pour ${n}.`),
     confirm: 'Tu confirmes ?',
@@ -289,6 +299,10 @@ const LINES = {
     todo_list: (l) => (l.length ? `Your list: ${l.join(', ')}.` : 'Your list is empty.'),
     undo: (done) => (done ? 'Undone.' : 'Nothing to undo.'),
     leave: () => 'See you.',
+    ask: (n, c, t, missing, answer) => answer,
+    asking: 'Let me ask Claude.',
+    noClaude: "Sorry, I can't ask Claude for you.",
+    claudeDown: "I can't reach Claude right now.",
     alias_add: (n, c, t) => `${n} can now also be called "${t}".`,
     alias_remove: (n, c, t, missing) => (missing ? `${n} had no nickname "${t}".` : `Forgetting "${t}" for ${n}.`),
     confirm: 'Confirm?',
@@ -306,13 +320,39 @@ function describe(plan, lang = 'fr') {
   return plan.map((s) => {
     if (s.type === 'todo_list') return L.todo_list(load('todo', []));
     if (s.type === 'undo') return L.undo(Boolean(lastUndo));
-    return L[s.type](s.targets && names(s.targets, lang), s.channel?.name, s.text, s.missing);
+    return L[s.type](s.targets && names(s.targets, lang), s.channel?.name, s.text, s.missing, s.answer);
   }).join(' ');
 }
 
 // ---------- Execution ----------
 
-async function run(plan, io) {
+// Ask Claude through the Claude Code CLI: no files, no shell, no MCP, no user settings; web search only.
+function askClaude(question, lang) {
+  const dir = path.join(require('os').tmpdir(), 'bobby-claude'); // empty working folder: nothing to read
+  fs.mkdirSync(dir, { recursive: true });
+  const style = lang === 'en'
+    ? 'Answer in English, in one or two short spoken sentences, no markdown, no lists.'
+    : 'Réponds en français, en une ou deux phrases courtes à dire à voix haute, sans markdown ni liste.';
+  return new Promise((resolve, reject) => {
+    const child = require('child_process').spawn('claude', [
+      '-p', question, '--model', CLAUDE_MODEL, '--append-system-prompt', `You answer for Bobby, a Discord voice assistant. ${style}`,
+      '--tools', 'WebSearch', '--allowedTools', 'WebSearch', '--setting-sources', '', '--strict-mcp-config',
+      '--no-session-persistence', '--output-format', 'text',
+    ], { cwd: dir, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '', err = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { err += d; });
+    const timer = setTimeout(() => child.kill(), 60_000);
+    child.on('error', reject);
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0 && out.trim()) resolve(out.trim());
+      else reject(new Error(`claude exited ${code}: ${(err || out).trim().slice(0, 200)}`));
+    });
+  });
+}
+
+async function run(plan, io, lang = 'fr') {
   const undos = [];
   for (const s of plan) {
     const ms = (s.targets || []).map((t) => t.ref);
@@ -343,6 +383,12 @@ async function run(plan, io) {
       }
       case 'undo': if (lastUndo) await lastUndo(); break;
       case 'leave': io.leave(); break;
+      case 'ask': {
+        const t0 = performance.now();
+        try { s.answer = await askClaude(s.text, lang); } catch (e) { console.error('[claude]', e.message); s.answer = LINES[lang]?.claudeDown || LINES.fr.claudeDown; }
+        console.log(`[claude] ${Math.round(performance.now() - t0)} ms: ${s.answer}`);
+        break;
+      }
       case 'alias_add': case 'alias_remove': {
         const all = load('aliases', {});
         const id = s.targets[0].id, list = all[id] || [];
@@ -389,7 +435,7 @@ async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttM
       if (!YES.test(text)) { rec.outcome = 'cancelled'; return say(L.cancelled); }
       rec.outcome = 'confirmed';
       const t0 = performance.now();
-      await run(p.plan, io);
+      await run(p.plan, io, lang);
       t.action = Math.round(performance.now() - t0);
       return say(describe(p.plan, lang));
     }
@@ -419,8 +465,12 @@ async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttM
       rec.outcome = 'confirm_asked';
       return say(`${describe(plan, lang)} ${L.confirm}`);
     }
+    if (plan.some((x) => x.type === 'ask')) {
+      if (!CLAUDE_USERS.includes(member.id)) { rec.outcome = 'claude_not_allowed'; return say(L.noClaude); }
+      io.say(L.asking, lang); // Claude takes a few seconds: tell the user right away
+    }
     t0 = performance.now();
-    await run(plan, io);
+    await run(plan, io, lang);
     t.action = Math.round(performance.now() - t0);
     rec.outcome = 'done';
     say(describe(plan, lang));

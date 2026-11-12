@@ -40,6 +40,8 @@ Whisper downloads itself into `models/whisper_models` on first start.
 | `DISCORD_TOKEN`, `GUILD_ID` | Bot token and server ID |
 | `ALLOWED_USERS` | Discord IDs allowed to command Bobby, comma-separated. Empty: server owner only. |
 | `RECORD_SILENCE_MS` | Silence that ends a sentence (default 600). Lower is faster but cuts you off if you pause. |
+| `CLAUDE_USERS` | Discord IDs whose knowledge questions Bobby may forward to Claude, comma-separated. Empty: nobody. |
+| `CLAUDE_MODEL` | Claude model for those questions (default `haiku`). |
 | `TEXT_CHANNEL` | Text channel (name or ID) where Bobby writes what it says. Empty: the channel where `/join` was typed. |
 | `WAKE_THRESHOLD` | Wake word score needed to wake Whisper (default 0.2). Higher means fewer wasted transcriptions but more missed "Bobby". |
 
@@ -53,7 +55,7 @@ Each command prints its timings: `[temps] stt … · llm … · action … · to
 
 ## What Bobby understands
 
-Mute and unmute, deafen and undeafen, move, disconnect, post a message in a text channel, nicknames ("appelle Zyklon le Grec", then "vire le Grec"; stored in `data/aliases.json`), a to-do list, "annule" (undoes the last action), "tu peux partir". "Moi", "ici", "tout le monde", "sauf X" and several requests in one sentence all work. Anything else gets a short spoken answer.
+Mute and unmute, deafen and undeafen, move, disconnect, post a message in a text channel, nicknames ("appelle Zyklon le Grec", then "vire le Grec"; stored in `data/aliases.json`), a to-do list, "annule" (undoes the last action), "tu peux partir". "Moi", "ici", "tout le monde", "sauf X" and several requests in one sentence all work. Greetings, the date and time are answered locally; knowledge questions ("c'est quoi la capitale de l'Australie ?") are forwarded to Claude Haiku through the Claude Code CLI, for allowed users only. Claude runs in an empty folder with every tool disabled except web search, no MCP servers and no user settings. This needs `claude` installed and logged in (`claude auth status`).
 
 Disconnecting someone, or acting on three people or more, waits for a "oui". If a name is ambiguous, Bobby asks which one you meant.
 

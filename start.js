@@ -10,6 +10,13 @@ const LOGS = path.join(ROOT, '_logs');
 fs.mkdirSync(LOGS, { recursive: true });
 const logFile = fs.createWriteStream(path.join(LOGS, 'bobby.log'), { flags: 'a' });
 const pidFile = path.join(LOGS, 'bobby.pid');
+// One launcher at a time: a second one would log the bot in twice and fight over the ports.
+try {
+  const old = Number(fs.readFileSync(pidFile, 'utf8'));
+  process.kill(old, 0); // throws if that process is gone (stale pid file)
+  console.error(`Bobby is already running (pid ${old}). Run stop.cmd first.`);
+  process.exit(1);
+} catch {}
 fs.writeFileSync(pidFile, String(process.pid)); // lets stop.cmd find us
 
 let PARTS = [

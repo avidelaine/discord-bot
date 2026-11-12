@@ -22,11 +22,14 @@ Discord voice ──► bot/ (Node, discord.js, @discordjs/voice 0.19 with DAVE)
 
 Requirements: Windows, an NVIDIA GPU, Node 22+, Python 3.11, ffmpeg on the PATH.
 
+- `_bin/yt-dlp.exe`: the Windows binary from the yt-dlp GitHub releases (for YouTube music).
+
 - `_bin/llama/`: llama.cpp Windows CUDA 12.4 build (`llama-bXXXX-bin-win-cuda-12.4-x64.zip` + `cudart-…zip`, from the llama.cpp GitHub releases).
 - `models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf`: from `unsloth/Qwen3-4B-Instruct-2507-GGUF` on Hugging Face.
 - `models/piper/fr_FR-siwis-medium.onnx`, `models/piper/en_US-lessac-medium.onnx` and their `.onnx.json`: from `rhasspy/piper-voices`.
 - Python: `py -3.11 -m venv voice/.venv`, then `voice/.venv/Scripts/pip install faster-whisper fastapi "uvicorn[standard]" scipy piper-tts openwakeword==0.6.0 nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"`, then `voice/.venv/Scripts/python -c "from openwakeword.utils import download_models; download_models(['hey_jarvis'])"` (fetches openWakeWord's shared feature models).
 - `models/wakeword/bobby.onnx` and `bobby.onnx.data`: the custom "Bobby" wake word model (see below). Without it, every sentence goes through Whisper.
+- PC control: `voice/.venv/Scripts/pip install -r voice/requirements-pc.txt` (Windows media sessions and volume).
 - Node: `cd bot && npm install`.
 
 Whisper downloads itself into `models/whisper_models` on first start.
@@ -38,26 +41,55 @@ Whisper downloads itself into `models/whisper_models` on first start.
 | Variable | Role |
 |---|---|
 | `DISCORD_TOKEN`, `GUILD_ID` | Bot token and server ID |
-| `ALLOWED_USERS` | Discord IDs allowed to command Bobby, comma-separated. Empty: server owner only. |
+| `SUPER_ADMINS` | Discord IDs with every right, including PC control and managing rights by voice. |
+| `ADMINS` | Discord IDs of admins (moderation, Claude questions, to-do list). Super admins are admins too. |
+| `PRIME_ROLE` | Discord role (name or ID) whose members get music and simple questions (default `Team Prime`). |
 | `RECORD_SILENCE_MS` | Silence that ends a sentence (default 600). Lower is faster but cuts you off if you pause. |
-| `CLAUDE_USERS` | Discord IDs whose knowledge questions Bobby may forward to Claude, comma-separated. Empty: nobody. |
 | `CLAUDE_MODEL` | Claude model for those questions (default `haiku`). |
 | `TEXT_CHANNEL` | Text channel (name or ID) where Bobby writes what it says. Empty: the channel where `/join` was typed. |
-| `WAKE_THRESHOLD` | Wake word score needed to wake Whisper (default 0.2). Higher means fewer wasted transcriptions but more missed "Bobby". |
+| `WAKE_THRESHOLD` | Wake word score needed to wake Whisper (default 0.12). Higher means fewer wasted transcriptions but more missed "Bobby". |
 
 The bot needs the **Connect**, **Speak**, **Mute Members**, **Deafen Members**, **Move Members** and **Send Messages** permissions. No privileged intent is required.
 
 ## Run
 
-`start.cmd` opens the three parts (LLM, voice, bot). In Discord, join a voice channel and type `/join`.
+- `start.cmd` opens the three parts (LLM, voice, bot) in three minimized windows. Each part restarts by itself 3 s after a crash.
+- `node start.js`: the same in one console, one colored line per event, also written to `_logs/bobby.log`.
+- `start-headless.cmd`: the same with no window at all (logs in `_logs/`), for gaming.
+- `stop.cmd` stops whichever of these is running.
+
+In Discord, join a voice channel and type `/join`. Logs: `_logs/bot.log`, `_logs/voice.log`, `_logs/llm.log`, and the journal of every exchange `_logs/conversations.jsonl`.
 
 Each command prints its timings: `[temps] stt … · llm … · action … · total …`.
 
+## Rights
+
+Each action needs a role (printed at startup as `[rights] role needed per action`):
+
+| Role | Who | Can |
+|---|---|---|
+| super | `SUPER_ADMINS` | everything below, PC control, nicknames, rights by voice |
+| admin | super admins + `ADMINS` | mute, deafen, move, disconnect, messages, Claude questions, to-do list |
+| prime | members with the `PRIME_ROLE` Discord role | music, the time, "what can you do" |
+| others | everyone else | nothing: Bobby says "Je n'ai pas le droit de te répondre" (at most once per 30 s per person) |
+
+The super admin changes rights by voice, stored in `data/permissions.json`: "enlève les permissions de X" (X falls to "others", whatever their Discord role), "redonne les permissions à X", "passe X admin", "retire l'admin à X". "Annule" undoes it.
+
 ## What Bobby understands
 
-Mute and unmute, deafen and undeafen, move, disconnect, post a message in a text channel, nicknames ("appelle Zyklon le Grec", then "vire le Grec"; stored in `data/aliases.json`), a to-do list, "annule" (undoes the last action), "tu peux partir". "Moi", "ici", "tout le monde", "sauf X" and several requests in one sentence all work. Greetings, the date and time are answered locally; knowledge questions ("c'est quoi la capitale de l'Australie ?") are forwarded to Claude Haiku through the Claude Code CLI, for allowed users only. Claude runs in an empty folder with every tool disabled except web search, no MCP servers and no user settings. This needs `claude` installed and logged in (`claude auth status`).
+- **Moderation:** mute and unmute ("dé-mute" too), deafen and undeafen, move, drag someone to your channel ("drague X"), disconnect, post a message in a text channel. "Moi", "ici", "tout le monde", "sauf X" and several requests in one sentence all work.
+- **Music (Prime):** "joue Bohemian Rhapsody" (YouTube), "joue du hardstyle" / "mets une radio jazz" (web radios from Radio Browser), pause, resume, skip, stop, replay, "ajoute X à la file", the queue, volume up/down/to N, "c'est quoi ce son". Music ducks while Bobby speaks.
+- **PC (super admin):** media on the PC ("mets pause sur le PC", "musique suivante sur Spotify", through Windows media sessions, no simulated keys), Windows volume ("monte le son du PC"), launch games (Steam, Valorant through the Riot Client, Epic) and apps from the Start menu ("ouvre Claude"), GPU info, lock / sleep / shut down after a spoken "oui". Only launching an app takes the focus.
+- **Nicknames (super admin):** "appelle Zyklon le Grec", then "vire le Grec"; "renomme le surnom X en Y", "supprime le surnom X", "qui a quel surnom ?" (list posted in the text channel), and the `/surnoms` slash command. Stored in `data/aliases.json`.
+- **To-do list**, "quelle heure est-il", "qu'est-ce que tu sais faire", "tu peux partir".
+- **Undo and cancel:** "annule" undoes the last action (moderation, nicknames, to-do list, rights); a sentence that ends in "annule" or "laisse tomber" is dropped entirely.
+- **Claude:** knowledge questions ("c'est quoi la capitale de l'Australie ?") are forwarded to Claude Haiku through the Claude Code CLI, for admins. Claude runs in an empty folder with every tool disabled except web search, no MCP servers and no user settings. Bobby checks `claude auth status` at startup; while Claude Code is not logged in, it answers "Claude n'est pas encore branché" at once.
 
-Disconnecting someone, or acting on three people or more, waits for a "oui". If a name is ambiguous, Bobby asks which one you meant.
+Polite wrappers ("est-ce que tu peux …", "s'il te plaît", "can you … please") are ignored by the LLM-free shortcuts. Disconnecting someone, acting on three people or more, and lock / sleep / shutdown wait for a "oui". If a name is ambiguous, Bobby asks which one you meant. If the LLM is down, Bobby says "Mon cerveau ne répond pas".
+
+## Code layout
+
+`bot/brain.js` is the core (shortcuts, LLM, names, rights, confirm, undo). Each feature is a module in `bot/actions/` that brings its action types, prompt lines, examples, shortcuts, required role, `run` and spoken reply (contract at the top of `brain.js`): adding a feature means adding a file. `bot/music/` is the player (PCM mixer with ducking, radios, yt-dlp). `voice/pc.py` serves Windows media and volume to the bot.
 
 ## The wake word model
 
@@ -68,11 +100,13 @@ Disconnecting someone, or acting on three people or more, waits for a "oui". If 
 - 20 real recordings of the owner's voice, each duplicated 100 times with different noise and room echo,
 - the standard openWakeWord negative set (2,000 hours of speech, noise and music).
 
-On held-out real recordings it lets through 9 of 10 "Bobby" and stops 14 of 15 look-alike sentences ("hobby", "lobby", "bébé"...) before Whisper. The threshold is deliberately low: a false trigger only costs one transcription, because the bot still requires "Bobby" in the transcript before acting. A model trained on English voices only detected none of the real recordings, so real recordings matter.
+On held-out real recordings, at the default threshold of 0.12, it lets through 9 of 10 "Bobby" and stops 14 of 15 look-alike sentences ("hobby", "lobby", "bébé"...) before Whisper. The threshold is deliberately low: a false trigger only costs one transcription, because the bot still requires "Bobby" in the transcript before acting. A model trained on English voices only detected none of the real recordings, so real recordings matter.
 
 The model is kept out of git because it was trained partly on a personal voice.
 
 ## Tests
 
 - `node bot/wake.test.js`: detection of "Bobby" in the transcript, including the spellings Whisper produces ("Bobbie", "Dibobby"...).
+- `node bot/unit.test.js`: shortcuts, names, rights, cancel, undo, nicknames, music and PC commands (dry run: nothing is launched, locked or shut down), without the LLM.
+- `node bot/music/music.test.js`: the mixer's ducking, and a radio and a YouTube track streamed to a sink without Discord (needs the network).
 - `node bot/intent.test.js` (llama-server running): comprehension score on French and English sentences, and LLM latency. Add every sentence Bobby gets wrong in real use.

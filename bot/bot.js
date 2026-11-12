@@ -34,7 +34,10 @@ const SILENCE_MS = parseInt(process.env.RECORD_SILENCE_MS || '600');
 // Text channel (name or ID) where Bobby writes what it says. Empty: the channel where /join was typed.
 const TEXT_CHANNEL = process.env.TEXT_CHANNEL || '';
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
+// allowedMentions: a YouTube title or nickname like "@everyone" must never ping the server.
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates], allowedMentions: { parse: [] } });
+// Last safety net: a failed reply (voice service restarting, expired interaction) is logged, never fatal.
+process.on('unhandledRejection', (e) => console.error('[unhandled]', e));
 const player = createAudioPlayer(); // ponytail: one player, Bobby lives on a single server
 // Everything audible goes through the mixer: music underneath, beep/TTS on top (music ducks meanwhile).
 const mixer = new Mixer((out) => player.play(createAudioResource(out, { inputType: StreamType.Raw })));
@@ -61,10 +64,14 @@ function makeIo(guild, textChannel) {
     async say(text, lang = 'fr') {
       console.log(`[bobby] ${text}`);
       textChannel.send(`🗣️ ${text}`).catch(() => {});
-      const res = await fetch(`${VOICE_URL}/tts?lang=${lang}&text=${encodeURIComponent(text)}`);
-      mixer.overlay(decode(Readable.fromWeb(res.body)));
+      try {
+        const res = await fetch(`${VOICE_URL}/tts?lang=${lang}&text=${encodeURIComponent(text)}`);
+        mixer.overlay(decode(Readable.fromWeb(res.body)));
+      } catch (e) { console.error(`[tts] ${e.cause?.code || e.message}`); }
     },
-    leave: () => getVoiceConnection(guild.id)?.destroy(),
+    // Music stops now; the connection goes after the farewell has been spoken.
+    // ponytail: fixed 3 s delay, enough for "À plus."; wait for the overlay's end if longer goodbyes appear.
+    leave: () => { music.stop(); setTimeout(() => getVoiceConnection(guild.id)?.destroy(), 3000); },
   };
 }
 
@@ -115,6 +122,7 @@ client.once(Events.ClientReady, async () => {
   console.log(`Bobby online: ${client.user.tag}`);
   console.log(`[rights] role needed per action: ${Object.entries(brain.roleTable()).map(([a, r]) => `${a}=${r}`).join(' ')}`);
   claude.check();
+  require('./actions/pc').warm();
   await client.application.commands.set([]); // drop global commands left by older versions: only the server ones below remain
   await client.guilds.cache.get(process.env.GUILD_ID)?.commands.set([
     { name: 'join', description: 'Bobby rejoint ton salon vocal' },
@@ -123,18 +131,26 @@ client.once(Events.ClientReady, async () => {
   ]);
 });
 
-client.on(Events.InteractionCreate, async (it) => {
+client.on(Events.InteractionCreate, (it) => onCommand(it).catch((e) => console.error('[command]', e)));
+
+async function onCommand(it) {
   if (!it.isChatInputCommand()) return;
+  const need = { join: 'prime', leave: 'admin' }[it.commandName] || 'super';
+  if (!roles.allowed(roles.roleOf(it.member), need)) {
+    return it.reply({ content: "Tu n'as pas le droit d'utiliser cette commande.", ephemeral: true });
+  }
   if (it.commandName === 'leave') {
+    music.stop();
     getVoiceConnection(it.guildId)?.destroy();
     return it.reply('À plus.');
   }
   if (it.commandName === 'surnoms') {
-    if (roles.roleOf(it.member) !== 'super') return it.reply({ content: 'Réservé au super admin.', ephemeral: true });
-    return it.reply((await aliases.listText({ memberName: memberName(it.guild) })) || "Personne n'a de surnom.");
+    const list = (await aliases.listText({ memberName: memberName(it.guild) })) || "Personne n'a de surnom.";
+    return it.reply(list.slice(0, 2000)); // Discord message limit
   }
   const channel = it.member.voice.channel;
   if (!channel) return it.reply({ content: 'Rejoins un salon vocal d\'abord.', ephemeral: true });
+  getVoiceConnection(it.guildId)?.destroy(); // a second /join must not attach a second listener (double actions)
   const connection = joinVoiceChannel({
     channelId: channel.id, guildId: channel.guild.id, adapterCreator: channel.guild.voiceAdapterCreator, selfDeaf: false,
   });
@@ -148,6 +164,6 @@ client.on(Events.InteractionCreate, async (it) => {
   }
   const text = channel.guild.channels.cache.find((c) => c.isTextBased() && (c.id === TEXT_CHANNEL || c.name === TEXT_CHANNEL)) || it.channel;
   listen(connection, channel.guild, makeIo(channel.guild, text));
-});
+}
 
 client.login(process.env.DISCORD_TOKEN);

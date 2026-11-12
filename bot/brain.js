@@ -7,7 +7,7 @@
 //   examples [lines]      'sentence -> {json}' few-shot examples    quick    [[regex, (match) => actions]] LLM-free shortcuts
 //   fields   { name: schema }   extra optional step fields for the LLM schema (e.g. alias_rename's "to")
 //   actions  { type: { role: 'prime'|'admin'|'super', who (true, or 'optional'), one, channel: 'voice'|'text', text, confirm,
-//                      announce(lang), run(step, io, lang) -> undo function or nothing, say: { fr(step, names), en } } }
+//                      normalize(action) -> fixed action or null, announce(lang), run(step, io, lang) -> undo function or nothing, say: { fr(step, names), en } } }
 const fs = require('fs');
 const path = require('path');
 const { findWake } = require('./wake');
@@ -22,7 +22,14 @@ fs.mkdirSync(path.dirname(JOURNAL), { recursive: true });
 const journal = (rec) => fs.appendFile(JOURNAL, `${JSON.stringify(rec)}\n`, () => {});
 
 const LLM_URL = process.env.LLM_URL || 'http://127.0.0.1:8080';
-const YES = /\b(oui|ouais|vas-y|confirme|ok|okay|d'accord|go|yes|yeah|yep|sure|confirm)\b/i;
+// A confirmation is a short sentence starting with a yes and with no "no" in it: "non, pas ok" or
+// chatting with a friend while Bobby waits must never confirm a disconnect or a shutdown.
+const YES = /^(?:bobby[\s,]*)?(?:oui|ouais|vas-y|confirme|je confirme|ok|okay|d'accord|go|yes|yeah|yep|sure|confirm)\b/i;
+const NO = /\b(?:non|no|pas|nope|don't|annule|cancel|stop|attends|wait)\b/i;
+const confirms = (text) => {
+  const t = text.trim().replace(/[.!?…]+$/, '');
+  return YES.test(t) && !NO.test(t) && t.split(/\s+/).length <= 5;
+};
 
 const DIR = path.join(__dirname, 'actions');
 const MODULES = fs.readdirSync(DIR).filter((f) => f.endsWith('.js')).sort().map((f) => require(path.join(DIR, f)));
@@ -214,7 +221,8 @@ function targets(step, ctx) {
 }
 
 function resolve(actions, ctx) {
-  return actions.map((a) => {
+  return actions.map((raw) => {
+    const a = ACTIONS[raw.type]?.normalize?.(raw) || raw; // a module may fix a known LLM confusion
     const def = ACTIONS[a.type];
     if (!def) throw new Say("Je n'ai pas compris.", "Sorry, I didn't get that.");
     const step = { ...a, text: a.text || '' };
@@ -324,7 +332,8 @@ async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttM
   try {
     if (p?.plan) {
       rec.plan = planText(p.plan);
-      if (!YES.test(text)) { rec.outcome = 'cancelled'; return say(L.cancelled); }
+      if (!confirms(text)) { rec.outcome = 'cancelled'; return say(L.cancelled); }
+      if (!roles.allowed(role, needed(p.plan))) { rec.outcome = 'forbidden'; return say(L.forbidden); } // rights may have changed meanwhile
       rec.outcome = 'confirmed';
       const t0 = performance.now();
       await run(p.plan, io, lang);
@@ -336,7 +345,8 @@ async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttM
     console.log(`[query] "${query}" (${lang})`);
     io.beep();
     if (query.replace(/[^\p{L}]/gu, '').length < 2) { pending.set(member.id, { until: Date.now() + 6000 }); rec.outcome = 'waiting'; return console.log('[waiting] "Bobby" alone: next sentence is the command (6 s)'); }
-    if (cancels(query)) { rec.outcome = 'cancelled_by_speaker'; return say(L.cancelled); }
+    // A song title may end in a cancel word ("joue Nevermind"): playing wins.
+    if (!quick(query)?.some((a) => a.type.startsWith('music_')) && cancels(query)) { rec.outcome = 'cancelled_by_speaker'; return say(L.cancelled); }
 
     const ctx = context(member, guild);
     let t0 = performance.now();
@@ -383,4 +393,4 @@ async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttM
   }
 }
 
-module.exports = { hear, journal, expecting, hotwords, context, understand, resolve, quick, cancels, pick, sim, describe, run, needed, roleTable, SYSTEM };
+module.exports = { hear, journal, expecting, hotwords, context, understand, resolve, quick, cancels, confirms, pick, sim, describe, run, needed, roleTable, SYSTEM };

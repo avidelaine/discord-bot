@@ -58,13 +58,14 @@ def volume_state(v=None):
     return {"level": round(v.GetMasterVolumeLevelScalar() * 100), "muted": bool(v.GetMute())}
 
 
+# async: runs on the main thread, where COM is initialised (a threadpool thread would need CoInitialize).
 @router.get("/volume")
-def volume_get():
+async def volume_get():
     return volume_state()
 
 
 @router.post("/volume")
-def volume_set(level: int | None = None, delta: int | None = None, mute: bool | None = None):
+async def volume_set(level: int | None = None, delta: int | None = None, mute: bool | None = None):
     v = _vol()
     if level is not None or delta is not None:
         new = level if level is not None else round(v.GetMasterVolumeLevelScalar() * 100) + delta

@@ -24,7 +24,11 @@ from faster_whisper import WhisperModel
 from piper import PiperVoice
 from scipy.signal import resample_poly
 
-import pc
+try:  # PC control is optional: without its packages (requirements-pc.txt), STT and TTS still work
+    import pc
+except Exception as e:  # noqa: BLE001
+    pc = None
+    print(f"PC control disabled: {e}", flush=True)
 
 MODELS = Path(__file__).resolve().parent.parent / "models"
 
@@ -92,7 +96,8 @@ def bobby_score(audio: np.ndarray) -> float:
 print("Voice service ready.", flush=True)
 
 app = FastAPI()
-app.include_router(pc.router)
+if pc:
+    app.include_router(pc.router)
 
 
 def to_16k(raw: bytes) -> np.ndarray:

@@ -36,7 +36,7 @@ module.exports = {
   prompt: [
     '- alias_add : donner à "who" (une seule personne) le surnom "text"',
     '- alias_remove : retirer le surnom "text" ("who" facultatif : sans "who", on cherche chez tout le monde)',
-    '- alias_rename : remplacer un surnom existant "text" par "to", seulement si la phrase dit "le surnom X" ("who" facultatif)',
+    '- alias_rename : remplacer un surnom existant "text" par "to" ("who" facultatif). Jamais sans les mots "le surnom" (ou "the nickname") dans la phrase.',
     '- alias_list : poster dans le salon texte la liste des surnoms de chaque personne',
   ],
   rules: [
@@ -55,6 +55,7 @@ module.exports = {
   // ponytail: shortcuts see the lowercased sentence, so nicknames set through them are stored in lowercase.
   quick: [
     [/^(?:qui a quels? surnoms?|(?:liste|montre|affiche|donne)(?:-moi)? (?:les|tous les|la liste des) surnoms|who has which nicknames?|(?:list|show)(?: all)?(?: the)? nicknames)$/, () => [{ type: 'alias_list' }]],
+    [/^renommer? (?!le surnom )(.+?) en (.+)$/, (m) => [{ type: 'alias_add', who: [m[1]], text: m[2] }]],
     [/^renomme le surnom (.+?) en (.+)$/, (m) => [{ type: 'alias_rename', text: m[1], to: m[2] }]],
     [/^rename(?: the)? nickname (.+?) (?:to|into) (.+)$/, (m) => [{ type: 'alias_rename', text: m[1], to: m[2] }]],
     [/^(?:supprime|efface|retire|enlève) le surnom (.+)$/, (m) => [{ type: 'alias_remove', text: m[1] }]],
@@ -87,6 +88,8 @@ module.exports = {
     },
     alias_rename: {
       role: 'super', who: 'optional', one: true, text: true,
+      // "renomme Lucas en le Boss": the 4B model sometimes answers rename with text = to; that means giving a nickname.
+      normalize: (a) => (a.who?.length && (!a.to || norm(a.to) === norm(a.text)) ? { type: 'alias_add', who: a.who, text: a.to || a.text } : null),
       run: edit((all, s) => {
         if (!s.to) return null;
         const id = owner(all, s);

@@ -34,7 +34,9 @@ const read = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return 
 function steamGames() {
   const root = process.env.STEAM_DIR || 'C:\\Program Files (x86)\\Steam';
   const libs = [root, ...[...read(path.join(root, 'steamapps', 'libraryfolders.vdf')).matchAll(/"path"\s+"([^"]+)"/g)].map((m) => m[1].replace(/\\\\/g, '\\'))];
-  return [...new Set(libs)].flatMap((l) => walk(path.join(l, 'steamapps')).filter((f) => /appmanifest_\d+\.acf$/.test(f)).map((f) => {
+  // manifests sit directly in steamapps/: never recurse into the game files
+  const manifests = (l) => { try { return fs.readdirSync(path.join(l, 'steamapps')).filter((f) => /^appmanifest_\d+\.acf$/.test(f)).map((f) => path.join(l, 'steamapps', f)); } catch { return []; } };
+  return [...new Set(libs)].flatMap((l) => manifests(l).map((f) => {
     const t = read(f);
     return { name: t.match(/"name"\s+"([^"]+)"/)?.[1], id: t.match(/"appid"\s+"(\d+)"/)?.[1] };
   })).filter((g) => g.name && g.id && !/Steamworks|Proton|Steam Linux/i.test(g.name))
@@ -198,5 +200,6 @@ module.exports = {
       },
     },
   },
+  warm: () => setTimeout(index, 1000), // build the game/app index at startup, not in the middle of a sentence
   _test: { calls, index, find },
 };

@@ -41,7 +41,9 @@ const youtube = (query) => new Promise((resolve, reject) => {
   const target = /^https?:\/\//.test(query) ? query : `ytsearch1:${query.replace(/^ytsearch1:/, '')}`;
   execFile(YTDLP, ['-f', 'bestaudio/best', '--no-playlist', '--no-warnings', '-j', target], { maxBuffer: 1 << 26, timeout: 30000 }, (err, out) => {
     if (err) return reject(new Error(`yt-dlp failed: ${err.message.split('\n')[0]}`));
-    const j = JSON.parse(out.split('\n')[0]);
+    let j = null;
+    try { j = JSON.parse(out.split('\n')[0]); } catch { /* no result: empty output */ }
+    if (!j?.url) return reject(new Error(`nothing found on YouTube for "${query}"`));
     resolve({ title: j.title, url: j.url });
   });
 });

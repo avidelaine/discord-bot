@@ -92,6 +92,12 @@ assert(!cancels('laisse tomber, reviens en arrière'));
 assert(!cancels('annule ça'));
 console.log('cancel: ok');
 
+// ---------- Confirmation: a short yes, never a sentence that only contains "ok" ----------
+const { confirms } = require('./brain');
+for (const t of ['oui', 'Oui !', 'je confirme', 'ok vas-y', 'yes', 'Bobby, oui']) assert(confirms(t), t);
+for (const t of ['non, pas ok', 'ok oui go mais attends', "tu crois que c'est ok de faire ça demain soir", 'non', 'oui non annule']) assert(!confirms(t), t);
+console.log('confirm: ok');
+
 // ---------- Rights ----------
 const member = (id, roleNames = []) => ({ id, roles: { cache: roleNames.map((name) => ({ name, id: `r-${name}` })) } });
 const WAKANDEX = '261531632589078528', IISAL = '397478613559148545';

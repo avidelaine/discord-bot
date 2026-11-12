@@ -1,94 +1,100 @@
-require('dotenv').config();
-const { Client, GatewayIntentBits, Events, REST, Routes } = require('discord.js');
-const { joinVoiceChannel, EndBehaviorType } = require('@discordjs/voice');
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '..', '.env'), quiet: true });
+const { Readable } = require('stream');
+const { Client, GatewayIntentBits, Events } = require('discord.js');
+const {
+  joinVoiceChannel, getVoiceConnection, entersState, EndBehaviorType, VoiceConnectionStatus,
+  createAudioPlayer, createAudioResource, StreamType,
+} = require('@discordjs/voice');
 const prism = require('prism-media');
+const brain = require('./brain');
 
-// Augmenter la limite pour éviter les avertissements de fuite mémoire (Node.js)
-require('events').EventEmitter.defaultMaxListeners = 50;
+const VOICE_URL = process.env.VOICE_URL || 'http://127.0.0.1:3000';
+// Silence qui clôt une phrase. Plus court = plus réactif, mais coupe si tu hésites en parlant.
+const SILENCE_MS = parseInt(process.env.RECORD_SILENCE_MS || '600');
 
-const STT_URL = process.env.STT_URL || 'http://stt:3000/transcribe';
-const SILENCE_MS = parseInt(process.env.RECORD_SILENCE_MS || "2000");
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
+const player = createAudioPlayer(); // ponytail: un seul lecteur, Bobby est sur un seul serveur
 
-const client = new Client({ 
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] 
-});
+// Bip de 120 ms à 880 Hz, PCM 48 kHz stéréo, généré une fois.
+const BEEP = (() => {
+  const n = 5760, b = Buffer.alloc(n * 4);
+  for (let i = 0; i < n; i++) {
+    const v = Math.round(Math.sin((2 * Math.PI * 880 * i) / 48000) * 6000 * Math.min(1, (n - i) / 1500));
+    b.writeInt16LE(v, i * 4); b.writeInt16LE(v, i * 4 + 2);
+  }
+  return b;
+})();
 
-// Set pour éviter de traiter plusieurs flux simultanés pour le même utilisateur
-const activeListeners = new Set();
+const play = (stream, inputType) => player.play(createAudioResource(stream, { inputType }));
+
+function makeIo(guild, textChannel) {
+  return {
+    beep: () => play(Readable.from([BEEP]), StreamType.Raw),
+    async say(text) {
+      console.log(`[bobby] ${text}`);
+      textChannel.send(`🗣️ ${text}`).catch(() => {});
+      const res = await fetch(`${VOICE_URL}/tts?text=${encodeURIComponent(text)}`);
+      play(Readable.fromWeb(res.body), StreamType.Arbitrary);
+    },
+    leave: () => getVoiceConnection(guild.id)?.destroy(),
+  };
+}
+
+function listen(connection, guild, io) {
+  const busy = new Set();
+  connection.receiver.speaking.on('start', async (userId) => {
+    if (busy.has(userId)) return;
+    busy.add(userId);
+    const opus = connection.receiver.subscribe(userId, { end: { behavior: EndBehaviorType.AfterSilence, duration: SILENCE_MS } });
+    const pcm = opus.pipe(new prism.opus.Decoder({ rate: 48000, channels: 2, frameSize: 960 }));
+    let tEnd = performance.now();
+    opus.once('end', () => { tEnd = performance.now() - SILENCE_MS; busy.delete(userId); });
+    try {
+      const member = guild.members.cache.get(userId) ?? (await guild.members.fetch(userId));
+      if (member.user.bot) return opus.destroy();
+      const res = await fetch(`${VOICE_URL}/transcribe`, {
+        method: 'POST', body: pcm, duplex: 'half',
+        headers: { 'x-hotwords': encodeURIComponent(brain.hotwords(brain.context(member, guild))) },
+      });
+      const { text, ms } = await res.json();
+      if (text) await brain.hear({ text, member, guild, tEnd, sttMs: ms, io });
+    } catch (e) {
+      console.error('[voix]', e.message);
+    } finally {
+      busy.delete(userId);
+    }
+  });
+}
 
 client.once(Events.ClientReady, async () => {
-    console.log(`🚀 Bot BobbY en ligne`);
-    const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-    try {
-        await rest.put(
-            Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
-            { body: [{ name: 'join', description: 'Rejoint le vocal' }] }
-        );
-    } catch (e) { 
-        console.error("❌ Erreur enregistrement commandes Slash:", e); 
-    }
+  console.log(`Bobby en ligne : ${client.user.tag}`);
+  await client.guilds.cache.get(process.env.GUILD_ID)?.commands.set([
+    { name: 'join', description: 'Bobby rejoint ton salon vocal' },
+    { name: 'leave', description: 'Bobby quitte le vocal' },
+  ]);
 });
 
-client.on(Events.InteractionCreate, async (interaction) => {
-    if (!interaction.isChatInputCommand() || interaction.commandName !== 'join') return;
-
-    const channel = interaction.member.voice.channel;
-    if (!channel) return interaction.reply("Connecte-toi à un salon !");
-
-    const connection = joinVoiceChannel({
-        channelId: channel.id,
-        guildId: channel.guild.id,
-        adapterCreator: channel.guild.voiceAdapterCreator,
-        selfDeaf: false,
-    });
-
-    await interaction.reply(`✅ BobbY est à l'écoute (Silence: ${SILENCE_MS}ms)`);
-
-    connection.receiver.speaking.on('start', (userId) => {
-        // Anti-doublon : Si on traite déjà cet utilisateur, on ignore les nouveaux paquets
-        if (activeListeners.has(userId)) return;
-        
-        activeListeners.add(userId);
-
-        // Capture de l'audio jusqu'au silence
-        const audioStream = connection.receiver.subscribe(userId, {
-            end: { behavior: EndBehaviorType.AfterSilence, duration: SILENCE_MS },
-        });
-
-        // Décodage Opus vers PCM Raw (format attendu par ton stt.py)
-        const decoder = new prism.opus.Decoder({ rate: 48000, channels: 2, frameSize: 960 });
-        const streamForSTT = audioStream.pipe(decoder);
-
-        // Envoi au service Python (STT + LLM intégré)
-        fetch(STT_URL, {
-            method: 'POST',
-            headers: { 
-                'Content-Type': 'audio/raw;rate=48000;bits=16;channels=2', 
-                'X-User-Id': userId 
-            },
-            body: streamForSTT,
-            duplex: 'half'
-        })
-        .then(res => res.json())
-        .then((data) => {
-            // "data.text" contient la réponse finale de l'IA renvoyée par ton service Python
-            if (data && data.detected && data.text && data.text.length > 0) {
-                console.log(`🤖 Réponse pour ${userId}: ${data.text}`);
-                
-                // Envoi direct dans le salon textuel
-                interaction.channel.send(`**<@${userId}>** : ${data.text}`);
-            }
-        })
-        .catch(err => {
-            console.error(`❌ Erreur service STT:`, err.message);
-        })
-        .finally(() => {
-            // NETTOYAGE CRUCIAL pour éviter les fuites mémoire et les crashs de flux
-            activeListeners.delete(userId);
-            decoder.destroy();
-            audioStream.destroy();
-        });
-    });
+client.on(Events.InteractionCreate, async (it) => {
+  if (!it.isChatInputCommand()) return;
+  if (it.commandName === 'leave') {
+    getVoiceConnection(it.guildId)?.destroy();
+    return it.reply('À plus.');
+  }
+  const channel = it.member.voice.channel;
+  if (!channel) return it.reply({ content: 'Rejoins un salon vocal d\'abord.', ephemeral: true });
+  const connection = joinVoiceChannel({
+    channelId: channel.id, guildId: channel.guild.id, adapterCreator: channel.guild.voiceAdapterCreator, selfDeaf: false,
+  });
+  connection.subscribe(player);
+  await it.reply(`Bobby écoute dans ${channel.name}. Dis « Bobby, … ».`);
+  try {
+    await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
+  } catch {
+    connection.destroy();
+    return it.followUp('Connexion vocale impossible.');
+  }
+  listen(connection, channel.guild, makeIo(channel.guild, it.channel));
 });
 
 client.login(process.env.DISCORD_TOKEN);

@@ -82,6 +82,14 @@ const CASES = [
   ['quel temps fait-il à Paris demain', 'ask:'],
   ['how many people live in Canada', 'ask:'],
   ['donne-moi une idée de recette pour ce soir', 'ask:'],
+  // PC control (super admin; the actions only run for the super role)
+  ['mets la musique du PC en pause', 'pc_media:'],
+  ['est-ce que tu peux passer au morceau suivant sur Spotify', 'pc_media:'],
+  ['baisse le volume de Windows à 20', 'pc_volume:'],
+  ['démarre le jeu Valorant', 'pc_launch:'],
+  ['turn the PC volume up', 'pc_volume:'],
+  ['what is the temperature of my graphics card', 'pc_gpu:'],
+  ['put my computer to sleep', 'pc_sleep:'],
   // Rights by voice
   ['enlève les permissions de Lucas', 'perm_revoke:Lucas'],
   ['passe Marie admin', 'admin_add:Marie'],

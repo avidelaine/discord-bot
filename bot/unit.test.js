@@ -6,10 +6,12 @@ const path = require('path');
 const fs = require('fs');
 
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'bobby-test-')); // never touch the real data/
+process.env.BOBBY_PC_DRY = '1'; // PC actions only log: no sleep, lock, launch or volume change during tests
 const { resolve, quick, cancels, pick, sim, describe, run, needed } = require('./brain');
 const roles = require('./roles');
 const { load, save } = require('./store');
 const ask = require('./actions/ask');
+const pc = require('./actions/pc');
 
 // ---------- Name resolution ----------
 const roster = [{ name: 'Zyklon' }, { name: 'Kévin', aliases: ['kev_du_93'] }, { name: 'Marie' }, { name: 'Mario' }];
@@ -98,6 +100,38 @@ assert(roles.allowed('prime', needed(plan('quelle heure est-il'))));
 assert(!roles.allowed('prime', needed(plan('mute Zyklon'))));
 assert(!roles.allowed('admin', needed(plan('passe Marie admin'))));
 
+// ---------- PC control: shortcuts, rights, confirmations, dry run ----------
+const PC_CASES = [
+  ['mets pause', 'pc_media', 'pause'], ['Mets la musique en pause.', 'pc_media', 'pause'], ['pause sur le PC', 'pc_media', 'pause'],
+  ['pause the music on Spotify', 'pc_media', 'pause'], ['reprends la musique', 'pc_media', 'play'],
+  ['musique suivante', 'pc_media', 'next'], ['next song on youtube music', 'pc_media', 'next'], ['musique précédente', 'pc_media', 'previous'],
+  ["c'est quoi la musique sur le PC", 'pc_music', ''], ["what's playing on the PC", 'pc_music', ''],
+  ['monte le son du PC', 'pc_volume', 'up'], ['baisse le volume Windows', 'pc_volume', 'down'], ['mets le son du PC à 30', 'pc_volume', '30'],
+  ['set the PC volume to 40 percent', 'pc_volume', '40'], ['coupe le son du PC', 'pc_volume', 'mute'], ['remets le son du PC', 'pc_volume', 'unmute'],
+  ['lance Valorant', 'pc_launch', 'valorant'], ['ouvre Claude', 'pc_launch', 'claude'], ['open ChatGPT', 'pc_launch', 'chatgpt'],
+  ['verrouille le PC', 'pc_lock', ''], ['mets le PC en veille', 'pc_sleep', ''], ["éteins l'ordinateur", 'pc_shutdown', ''],
+  ['shut down the PC', 'pc_shutdown', ''], ['température du GPU', 'pc_gpu', ''], ['how hot is the gpu', 'pc_gpu', ''],
+];
+for (const [phrase, type, text] of PC_CASES) {
+  const a = quick(phrase);
+  assert(a && a.length === 1 && a[0].type === type && a[0].text === text, `PC shortcut: "${phrase}" -> ${JSON.stringify(a)}`);
+}
+// Bobby's own Discord player will own these; the PC shortcuts must not take them.
+for (const phrase of ['pause', 'skip', 'suivant', 'volume 50', 'monte le son', 'lance de la musique', 'play despacito', 'ouvre un truc inconnu xyz']) {
+  assert(!quick(phrase)?.some((s) => s.type.startsWith('pc_')), `not a PC shortcut: "${phrase}"`);
+}
+for (const phrase of ['mets pause', 'monte le son du PC', 'lance Valorant', 'mets le PC en veille', 'éteins le PC', 'verrouille le PC', 'température du GPU']) {
+  const p = plan(phrase);
+  assert.strictEqual(needed(p), 'super');
+  assert(!roles.allowed('admin', needed(p)) && !roles.allowed('prime', needed(p)) && roles.allowed('super', needed(p)));
+}
+for (const t of ['pc_lock', 'pc_sleep', 'pc_shutdown']) assert.strictEqual(pc.actions[t].confirm, true, `${t} needs confirm`);
+for (const t of ['pc_media', 'pc_volume', 'pc_launch', 'pc_gpu']) assert(!pc.actions[t].confirm);
+const idx = pc._test.index();
+const kinds = idx.reduce((o, e) => ({ ...o, [e.kind]: (o[e.kind] || 0) + 1 }), {});
+console.log('PC index:', JSON.stringify(kinds));
+console.log('PC shortcuts and rights: ok');
+
 (async () => {
   // Voice-managed rights, persisted in data/permissions.json; blacklist beats admin and Team Prime.
   const io = { leave() {} };
@@ -130,6 +164,17 @@ assert(!roles.allowed('admin', needed(plan('passe Marie admin'))));
   await run(plan('annule'), io);
   assert.deepStrictEqual(load('todo', []), ['pain', 'lait']);
   console.log('undo: ok');
+
+  // PC actions in dry mode: only recorded, never executed
+  const dry = async (sentence) => { pc._test.calls.length = 0; const p = plan(sentence); await run(p, io); return [pc._test.calls.map((c) => c.join(' ')).join(' ; '), describe(p)]; };
+  assert.match((await dry('mets le PC en veille'))[0], /^powershell\.exe .*SetSuspendState/);
+  assert.match((await dry('éteins le PC'))[0], /^shutdown\.exe \/s/);
+  assert.match((await dry('verrouille le PC'))[0], /^rundll32\.exe user32\.dll,LockWorkStation/);
+  assert.deepStrictEqual(await dry('mets le son du PC à 30'), ['POST /pc/volume?level=30', 'Volume du PC à 30.']);
+  assert.strictEqual((await dry('musique suivante'))[0], 'POST /pc/media/next');
+  if (idx.some((e) => e.name === 'Valorant')) assert.match((await dry('lance Valorant'))[0], /RiotClientServices\.exe --launch-product=valorant --launch-patchline=live/);
+  assert.match((await dry('ouvre Claude'))[0], /explorer\.exe/);
+  console.log('PC dry run: ok');
 
   // Claude not logged in: immediate answer, no wait
   ask.setReady(false);

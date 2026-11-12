@@ -24,6 +24,8 @@ from faster_whisper import WhisperModel
 from piper import PiperVoice
 from scipy.signal import resample_poly
 
+import pc
+
 MODELS = Path(__file__).resolve().parent.parent / "models"
 
 # Mirror everything printed (including server errors) to _logs/voice.log, so it can be reviewed later.
@@ -90,6 +92,7 @@ def bobby_score(audio: np.ndarray) -> float:
 print("Voice service ready.", flush=True)
 
 app = FastAPI()
+app.include_router(pc.router)
 
 
 def to_16k(raw: bytes) -> np.ndarray:

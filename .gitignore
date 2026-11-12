@@ -68,3 +68,6 @@ build/
 
 # Logs (conversation journal, launcher logs)
 /_logs/
+
+# Git worktrees of parallel work (folder rule)
+/.claude/worktrees/

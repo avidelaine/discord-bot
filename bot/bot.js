@@ -55,7 +55,10 @@ function listen(connection, guild, io) {
       if (member.user.bot) return opus.destroy();
       const res = await fetch(`${VOICE_URL}/transcribe`, {
         method: 'POST', body: pcm, duplex: 'half',
-        headers: { 'x-hotwords': encodeURIComponent(brain.hotwords(brain.context(member, guild))) },
+        headers: {
+          'x-hotwords': encodeURIComponent(brain.hotwords(brain.context(member, guild))),
+          'x-force': brain.expecting(userId) ? '1' : '0', // waiting for a "yes" or a command: skip the wake word gate
+        },
       });
       const { text, lang, ms } = await res.json();
       if (text) await brain.hear({ text, lang, member, guild, tEnd, sttMs: ms, io });

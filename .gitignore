@@ -62,3 +62,6 @@ build/
 
 # Local binaries (llama.cpp)
 /_bin/
+
+# Wake word training workspace (third-party trainer, datasets)
+/_training/

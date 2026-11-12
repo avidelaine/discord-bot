@@ -332,6 +332,11 @@ async function run(plan, io) {
 
 const pending = new Map(); // userId -> { until, plan? }: "Bobby" said alone, or a pending confirmation
 
+// True while Bobby waits for this person's next sentence, which then needs no "Bobby".
+const expecting = (userId) => (pending.get(userId)?.until ?? 0) > Date.now();
+
+// The wake word model upstream is a cheap, lenient filter; the transcript must still contain "Bobby",
+// so a false trigger ("beau bilan") costs one transcription and never an action.
 async function hear({ text, lang = 'fr', member, guild, tEnd, sttMs, io }) {
   let p = pending.get(member.id);
   if (p && Date.now() > p.until) p = null;
@@ -386,4 +391,4 @@ async function hear({ text, lang = 'fr', member, guild, tEnd, sttMs, io }) {
   }
 }
 
-module.exports = { hear, hotwords, context, understand, resolve, quick, pick, sim, describe };
+module.exports = { hear, expecting, hotwords, context, understand, resolve, quick, pick, sim, describe };

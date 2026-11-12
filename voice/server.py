@@ -39,6 +39,30 @@ voices = {
     "fr": PiperVoice.load(str(MODELS / "piper" / "fr_FR-siwis-medium.onnx")),
     "en": PiperVoice.load(str(MODELS / "piper" / "en_US-lessac-medium.onnx")),
 }
+
+# Wake word gate: a tiny CPU model listens for "Bobby" so Whisper (GPU) only runs on sentences meant for Bobby.
+WAKE_MODEL = MODELS / "wakeword" / "bobby.onnx"
+# 0.2: catches 26/30 of your recorded "Bobby"; a false trigger only costs one transcription,
+# since the bot still checks that the transcript contains "Bobby".
+WAKE_THRESHOLD = float(os.getenv("WAKE_THRESHOLD", "0.2"))
+wake = None
+if WAKE_MODEL.exists():
+    from openwakeword.model import Model
+
+    wake = Model(wakeword_models=[str(WAKE_MODEL)], inference_framework="onnx")
+    print("Wake word model loaded: Whisper only runs after 'Bobby'.", flush=True)
+else:
+    print("No wake word model: every sentence goes through Whisper.", flush=True)
+
+
+def bobby_score(audio: np.ndarray) -> float:
+    """Highest wake word score over the sentence, scanned in 80 ms frames."""
+    pad = np.zeros(8000, np.float32)  # Discord sends no audio during silence; give the model some on both sides
+    pcm = (np.clip(np.concatenate([pad, audio, pad]), -1, 1) * 32767).astype(np.int16)
+    wake.reset()
+    return max((max(wake.predict(pcm[i : i + 1280]).values()) for i in range(0, len(pcm) - 1279, 1280)), default=0.0)
+
+
 print("Voice service ready.", flush=True)
 
 app = FastAPI()
@@ -55,6 +79,16 @@ async def transcribe(request: Request):
     # ponytail: async endpoint + blocking Whisper = transcriptions run one at a time, no lock needed.
     audio = to_16k(await request.body())
     t = time.perf_counter()
+    heard = None
+    # x-force: Bobby is waiting for an answer from this person (a "yes", or the command after "Bobby" alone).
+    if wake is not None and request.headers.get("x-force") != "1":
+        score = bobby_score(audio)
+        ms = round((time.perf_counter() - t) * 1000)
+        if score < WAKE_THRESHOLD:
+            print(f"[wake] no 'Bobby' (score {score:.2f}, {ms} ms): Whisper skipped", flush=True)
+            return {"text": "", "wake": False, "ms": ms}
+        print(f"[wake] 'Bobby' heard (score {score:.2f}, {ms} ms)", flush=True)
+        heard = True
     opts = dict(
         beam_size=1,  # greedy search: faster, near-identical quality on short sentences
         temperature=0,
@@ -68,10 +102,11 @@ async def transcribe(request: Request):
         probs = dict(info.all_language_probs or [])
         lang = max(LANGS, key=lambda l: probs.get(l, 0.0))
         segments, _ = whisper.transcribe(audio, language=lang, **opts)
-    text = " ".join(s.text for s in segments if s.avg_logprob > -1.0).strip()
+    # -1.5: lenient, the wake word filter already keeps most chatter away from Whisper ("Dis Bobby" scored -0.95).
+    text = " ".join(s.text for s in segments if s.avg_logprob > -1.5).strip()
     ms = round((time.perf_counter() - t) * 1000)
     print(f"[stt] {ms} ms  {len(audio) / 16000:.1f} s of audio  {lang}  {text!r}", flush=True)
-    return {"text": text, "lang": lang, "ms": ms}
+    return {"text": text, "lang": lang, "wake": heard, "ms": ms}
 
 
 @app.get("/tts")

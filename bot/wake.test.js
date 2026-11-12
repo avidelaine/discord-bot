@@ -3,7 +3,7 @@ const { findWake } = require('./wake');
 
 // Must trigger (real variants produced by Whisper in French and English)
 for (const s of ['Bobby ajoute du lait', 'hey bobbie', 'Boby raconte une blague',
-                 'BOBI mets la musique', 'Bobé tu es là', "d'accord Bobby."]) {
+                 'BOBI mets la musique', 'Bobé tu es là', "d'accord Bobby.", 'Dibobby, coupe Kévin', 'Diboby.', 'Heybobby']) {
   assert(findWake(s), `missed: ${s}`);
 }
 

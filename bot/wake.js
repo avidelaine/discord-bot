@@ -12,7 +12,9 @@ const norm = (t) => t.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 // Returns the original token that matches the wake word, or null.
 function findWake(text) {
   for (const w of text.match(/\p{L}+/gu) || []) {
-    if (VARIANTS.has(norm(w))) return w;
+    const n = norm(w);
+    // Also "Bobby" glued to the previous word by Whisper ("Dibobby", "Heybobby"); "hobby"/"lobby" never end in "bobby".
+    if (VARIANTS.has(n) || /.bobb?(y|ie|i)$/.test(n)) return w;
   }
   return null;
 }

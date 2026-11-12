@@ -4,6 +4,7 @@
 // Events: 'track' (nowPlaying) when a track starts, 'end' when the queue ran dry, 'error' (message).
 const { EventEmitter } = require('events');
 const { decode, radio, youtube } = require('./sources');
+const { XFADE } = require('./mixer');
 
 const label = (it) => it.title || (it.kind === 'radio' ? `${it.style} radio` : it.query);
 
@@ -30,22 +31,21 @@ class Player extends EventEmitter {
   // -> nowPlaying() data, or { error }
   async playNow(item) {
     const id = ++this.token;
-    this.mixer.stopMusic();
-    this.current = null;
-    this._setPaused(false);
-    try {
+    try { // the old track keeps playing while the new one is looked up
       if (item.kind === 'radio') {
         const [first, ...alts] = await radio(item.style);
         item = { ...item, title: first.station, station: first.station, url: first.url, alts, live: true };
       } else if (!item.url) item = { ...item, ...(await youtube(item.query)) };
     } catch (e) { return this._fail(e, id); }
     if (id !== this.token) return { error: 'superseded' };
-    return this._start(item);
+    const cross = this.mixer.stopMusic(XFADE); // old track fades out while the new one fades in
+    this._setPaused(false);
+    return this._start(item, cross);
   }
 
-  _start(item) {
+  _start(item, cross = false) {
     this.current = item;
-    this.mixer.setMusic(decode(item.url, { live: item.live }), (bytes) => this._ended(item, bytes));
+    this.mixer.setMusic(decode(item.url, { live: item.live }), (bytes) => this._ended(item, bytes), cross);
     this.emit('track', this.nowPlaying());
     return this.nowPlaying();
   }
@@ -90,7 +90,7 @@ class Player extends EventEmitter {
   stop() {
     const { cleared } = this.clear();
     this.token++;
-    this.mixer.stopMusic();
+    this.mixer.stopMusic(true);
     const stopped = this.nowPlaying();
     this.current = null;
     this._setPaused(false);
@@ -99,8 +99,8 @@ class Player extends EventEmitter {
   async skip() {
     const skipped = this.nowPlaying();
     if (!skipped) return { error: 'nothing is playing' };
-    this.mixer.stopMusic();
-    await this._advance();
+    await this._advance(); // playNow crossfades into the next track
+    if (!this.current) this.mixer.stopMusic(true); // nothing next: fade out
     return { skipped, nowPlaying: this.nowPlaying() };
   }
   // Restart the current track from the beginning (for radio: reconnect).

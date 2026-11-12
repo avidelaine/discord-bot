@@ -6,19 +6,35 @@ const { Readable } = require('stream');
 const FRAME = 3840; // 20 ms of s16le 48 kHz stereo
 const DUCK = 0.25; // music gain while the overlay plays
 const STEP = 0.1; // max gain change per frame: smooth ducking, no clicks
+const FADE_OUT = 1; // seconds: fade out on stop / skip
+const XFADE = 2; // seconds: crossfade between two tracks
+const frames = (sec) => Math.round(sec * 50);
 
 class Mixer {
   constructor(play, { duck = DUCK } = {}) {
-    Object.assign(this, { play, duck, volume: 0.5, paused: false, music: null, over: null, out: null, gain: 0 });
+    Object.assign(this, { play, duck, volume: 0.5, paused: false, music: null, fading: null, mf: 1, over: null, out: null, gain: 0 });
   }
 
   // stream: non-object Readable of raw PCM. onEnd(bytes) fires when it ends by itself (not when replaced/stopped).
-  setMusic(stream, onEnd) {
+  // fadeIn: ramp the new track up over XFADE seconds (crossfade with the one fading out).
+  setMusic(stream, onEnd, fadeIn = false) {
     this.stopMusic();
     this.music = channel(stream, onEnd);
+    this.mf = fadeIn ? 0 : 1;
+    this._mfStep = 1 / frames(XFADE);
     this._ensure();
   }
-  stopMusic() { this.music?.stop(); this.music = null; }
+  // fade: true (FADE_OUT) or a duration in seconds: the track ramps to 0 in the mixer instead of cutting.
+  // A paused mixer just stops. Returns true when a track is now fading out.
+  stopMusic(fade = false) {
+    const m = this.music;
+    this.music = null;
+    if (!m) return false;
+    if (!fade || this.paused) { m.stop(); return false; }
+    this.fading?.ch.stop();
+    this.fading = { ch: m, f: 1, per: 1 / frames(fade === true ? FADE_OUT : fade) };
+    return true;
+  }
   pause(on) { this.paused = on; if (!on) this._ensure(); }
   // ponytail: a new overlay replaces the running one (same as player.play before). Resolves when it ends.
   overlay(stream) {
@@ -36,16 +52,22 @@ class Mixer {
 
   _pushFrame(out) {
     const music = this.music && !this.paused ? this.music : null;
-    if (!music && !this.over) { this.out = null; return out.push(null); }
-    const m = music?.take(), o = this.over?.take();
+    const fd = this.fading;
+    if (!music && !fd && !this.over) { this.out = null; return out.push(null); }
+    const m = music?.take(), o = this.over?.take(), x = fd?.ch.take();
+    const mf0 = this.mf, mf1 = (this.mf = music ? Math.min(1, mf0 + this._mfStep) : mf0);
+    const f0 = fd?.f, f1 = fd && (fd.f = Math.max(0, fd.f - fd.per));
     const target = this.volume * (this.over ? this.duck : 1);
     const g0 = this.gain, g1 = (this.gain += Math.max(-STEP, Math.min(STEP, target - g0)));
     const buf = Buffer.alloc(FRAME);
     for (let i = 0; i < FRAME; i += 2) {
       const g = g0 + ((g1 - g0) * i) / FRAME;
-      const v = (m ? m.readInt16LE(i) * g : 0) + (o ? o.readInt16LE(i) : 0);
+      const t = i / FRAME;
+      const v = (m ? m.readInt16LE(i) * g * (mf0 + (mf1 - mf0) * t) : 0) + (x ? x.readInt16LE(i) * g * (f0 + (f1 - f0) * t) : 0) +
+        (o ? o.readInt16LE(i) : 0);
       buf.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(v))), i);
     }
+    if (fd && (f1 === 0 || fd.ch.done)) { fd.ch.stop(); this.fading = null; }
     if (music?.done) { this.music = null; music.finish(); }
     if (this.over?.done) { const ov = this.over; this.over = null; ov.finish(); }
     out.push(buf);
@@ -71,4 +93,4 @@ function channel(stream, onEnd) {
   return ch;
 }
 
-module.exports = { Mixer, FRAME };
+module.exports = { Mixer, FRAME, FADE_OUT, XFADE };

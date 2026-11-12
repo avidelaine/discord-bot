@@ -1,7 +1,7 @@
 // Run: node bot/music/music.test.js  (the network part needs internet, ffmpeg and _bin/yt-dlp.exe)
 const assert = require('assert');
 const { PassThrough } = require('stream');
-const { Mixer, FRAME } = require('./mixer');
+const { Mixer, FRAME, FADE_OUT, XFADE } = require('./mixer');
 const { Player } = require('./player');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -43,6 +43,38 @@ async function synthetic() {
   console.log('ok  mixer: ducking lowers music during the overlay, overlay audible, restored after, ends when idle');
 }
 
+async function fades() {
+  const near = (x, y) => Math.abs(x - y) < 60;
+  // fade out: ramps down to silence within FADE_OUT, then the stream ends
+  let mixer = new Mixer(null), s = sink(mixer, 1);
+  mixer.volume = 1;
+  mixer.setMusic(dc(8000, 400));
+  while (s.frames.length < 30) await sleep(5);
+  assert(mixer.stopMusic(true), 'stopMusic(true) fades a playing track');
+  const n0 = s.frames.length;
+  while (!s.ended) await sleep(5);
+  let f = s.frames.slice(n0 - 4); // a few frames were already buffered
+  const start = f.findIndex((v) => v < 7900), zero = f.length;
+  assert(start >= 0 && f[zero - 1] < 250 && zero <= start + FADE_OUT * 50 + 3, `fades to ~0 within ${FADE_OUT}s (${start}..${zero})`);
+  assert(f.slice(start, zero).every((v, i, a) => !i || v <= a[i - 1]), 'monotonic decrease');
+  // paused: no fade
+  mixer = new Mixer(null); sink(mixer, 1);
+  mixer.setMusic(dc(8000, 10)); mixer.pause(true);
+  assert(!mixer.stopMusic(true) && !mixer.fading, 'paused: plain stop');
+  // crossfade: old fades out while the new fades in, both audible in between
+  mixer = new Mixer(null); s = sink(mixer, 1);
+  mixer.volume = 1;
+  mixer.setMusic(dc(8000, 400));
+  while (s.frames.length < 30) await sleep(5);
+  mixer.stopMusic(XFADE);
+  mixer.setMusic(dc(4000, 120), null, true);
+  while (!s.ended) await sleep(5);
+  f = s.frames;
+  assert(f.some((v) => v > 4600 && v < 7400), 'both tracks mixed during the crossfade');
+  assert(f.slice(-30).some((v) => near(v, 4000)), 'new track reaches full level');
+  console.log('ok  mixer: fade out reaches silence in time, crossfade mixes both tracks, stream ends when all is gone');
+}
+
 async function network() {
   const mixer = new Mixer(null);
   const s = sink(mixer, 20);
@@ -61,6 +93,7 @@ async function network() {
 
 (async () => {
   await synthetic();
+  await fades();
   await network();
   process.exit(0);
 })().catch((e) => { console.error('FAIL', e.message); process.exit(1); });

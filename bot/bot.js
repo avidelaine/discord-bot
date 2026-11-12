@@ -59,13 +59,15 @@ function makeIo(guild, textChannel) {
   return {
     music,
     memberName: memberName(guild),
+    textChannel,
     post: async (text) => { await textChannel.send(text); return textChannel.name; },
     beep: () => { mixer.overlay(new PassThrough().end(BEEP)); },
-    async say(text, lang = 'fr') {
-      console.log(`[bobby] ${text}`);
-      textChannel.send(`🗣️ ${text}`).catch(() => {});
+    // voice 'claude': Claude's answers, spoken with the second pair of Piper voices
+    async say(text, lang = 'fr', voice = 'bobby') {
+      console.log(`[${voice}] ${text}`);
+      textChannel.send(voice === 'claude' ? `🤖 Claude : ${text}` : `🗣️ ${text}`).catch(() => {});
       try {
-        const res = await fetch(`${VOICE_URL}/tts?lang=${lang}&text=${encodeURIComponent(text)}`);
+        const res = await fetch(`${VOICE_URL}/tts?lang=${lang}&voice=${voice}&text=${encodeURIComponent(text)}`);
         mixer.overlay(decode(Readable.fromWeb(res.body)));
       } catch (e) { console.error(`[tts] ${e.cause?.code || e.message}`); }
     },

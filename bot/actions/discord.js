@@ -1,4 +1,4 @@
-// Voice moderation and messages: mute, deafen, move, disconnect, post, and Bobby leaving.
+// Voice moderation and messages: mute, deafen, move, disconnect, post, Bobby's own messages, and Bobby leaving.
 const ALL = /^(?:tout le monde|everyone|everybody)$/;
 const who = (w) => [ALL.test(w) ? 'tous' : w];
 
@@ -15,23 +15,45 @@ const voiceSet = (key, on) => ({
   },
 });
 
+// Bobby's own messages in a channel, newest first (reads up to `max` messages of history).
+// Voice echoes ("🗣️ …") are skipped unless all = true. Bobby can delete its own messages without Manage Messages.
+async function own(ch, { all = false, max = 300 } = {}) {
+  const me = ch.client.user.id;
+  const out = [];
+  let before;
+  for (let seen = 0; seen < max;) {
+    const batch = await ch.messages.fetch({ limit: 100, ...(before && { before }) });
+    if (!batch.size) break;
+    out.push(...[...batch.values()].filter((m) => m.author.id === me && (all || !/^(?:🗣️|🤖)/u.test(m.content))));
+    before = batch.last().id;
+    seen += batch.size;
+  }
+  return out;
+}
+const chan = (s, io) => s.channel?.ref || io.textChannel;
+
 module.exports = {
   help: {
-    fr: 'couper ou rétablir le micro et le son, déplacer, ramener ou déconnecter des gens, écrire dans un salon',
-    en: 'mute, deafen, move, drag or disconnect people, post in a channel',
+    fr: 'couper ou rétablir le micro et le son, déplacer, ramener ou déconnecter des gens, écrire dans un salon, modifier ou supprimer mes propres messages',
+    en: 'mute, deafen, move, drag or disconnect people, post in a channel, edit or delete my own messages',
   },
+  short: { fr: 'la modération et les messages', en: 'moderation and messages' },
   prompt: [
     '- mute / unmute : couper ou rétablir le micro de "who"',
     '- deafen / undeafen : couper ou rétablir le son (le casque) de "who"',
     '- move : déplacer "who" dans le salon vocal "channel"',
     '- disconnect : déconnecter "who" du vocal',
     '- message : envoyer "text" dans le salon texte "channel"',
+    '- msg_edit : remplacer le texte de ton dernier message écrit par "text" ("channel" facultatif)',
+    '- msg_delete : supprimer ton dernier message écrit ("channel" facultatif)',
+    '- clean : supprimer tous tes propres messages d\'un salon texte ("channel" facultatif)',
     '- leave : Bobby quitte le salon vocal',
   ],
   rules: [
     '- "virer", "dégager" ou "kicker" une personne nommée du vocal, c\'est disconnect. Si on dit à Bobby lui-même de partir, c\'est leave.',
     '- "dé-mute", "démute" ou "des mute" (mal transcrit), c\'est unmute. "drag" ou "draguer" quelqu\'un, c\'est le déplacer (move) dans le salon de celui qui parle.',
     '- "couper" quelqu\'un sans préciser, c\'est mute (le micro seulement).',
+    '- "nettoie" un salon ou "supprime les messages" d\'un salon : clean (tu ne supprimes que tes propres messages).',
     '- Bobby, c\'est toi : tu ne peux ni te muter ni te déplacer ("actions" vide, dis-le dans "say").',
     '- "ici" désigne le salon vocal de celui qui parle : mets son nom exact dans "channel".',
   ],
@@ -47,6 +69,8 @@ module.exports = {
     '"move me and Zyklon to Gaming" -> {"actions":[{"type":"move","who":["moi","Zyklon"],"channel":"Gaming"}],"say":""}',
     '"you can leave now" -> {"actions":[{"type":"leave"}],"say":""}',
     '"kick Lucas from voice" -> {"actions":[{"type":"disconnect","who":["Lucas"]}],"say":""}',
+    '"fais un clean-up du salon memes" -> {"actions":[{"type":"clean","channel":"memes"}],"say":""}',
+    '"corrige ton dernier message en : rendez-vous à 21 h" -> {"actions":[{"type":"msg_edit","text":"rendez-vous à 21 h"}],"say":""}',
   ],
   // LLM-free shortcuts. ponytail: a handful of phrasings per language; add the ones that keep showing up in the logs.
   quick: [
@@ -57,10 +81,13 @@ module.exports = {
     [/^unmute (.+)$/, (m) => [{ type: 'unmute', who: who(m[1]) }]],
     [/^(?:coupe le son (?:de|à|a)|deafen) (.+)$/, (m) => [{ type: 'deafen', who: who(m[1]) }]],
     [/^(?:(?:rends|remets|rétablis|redonne) le son (?:de|à|a)|undeafen) (.+)$/, (m) => [{ type: 'undeafen', who: who(m[1]) }]],
-    [/^(?:déplace|mets|envoie|bouge) (?!la musique |le pc |l'ordi|mon pc |pause |le son |le volume |du |de la )(.+?) (?:dans|en|sur|vers) (?:le salon |la salle (?:de )?)?(.+)$/, (m) => [{ type: 'move', who: who(m[1]), channel: m[2] }]],
+    [/^(?:déplace|mets|envoie|bouge) (?!la musique |le pc |l'ordi|mon pc |pause |le son |le volume |du |de la |le dernier |le point |ça |ca )(.+?) (?:dans|en|sur|vers) (?:le salon |la salle (?:de )?)?(.+)$/, (m) => [{ type: 'move', who: who(m[1]), channel: m[2] }]],
     [/^mets[- ]moi (?:dans|en) (?:le salon |la salle (?:de )?)?(.+)$/, (m) => [{ type: 'move', who: ['moi'], channel: m[1] }]],
     [/^(?:move|put|send|drag) (.+?) (?:to|in|into) (?:the )?(.+?)(?: channel)?$/, (m) => [{ type: 'move', who: who(m[1]), channel: m[2] }]],
     [/^(?:drag|draguer|drague|ramène) (.+?)(?: ici| here)?$/, (m) => [{ type: 'move', who: who(m[1]), channel: 'ici' }]],
+    [/^(?:pars|partir|va-t'en|vas-t'en|quitte le (?:salon|vocal)(?: vocal)?|tu peux partir|leave|go away|leave the (?:channel|voice channel))$/, () => [{ type: 'leave' }]],
+    [/^(?:nettoie|clean(?: up)?|fais (?:le |un )?(?:clean-?up|ménage)(?: de| du| dans)?)(?: le salon| the channel| salon)? ?#?(.*)$/, (m) => [{ type: 'clean', ...(m[1] && { channel: m[1] }) }]],
+    [/^(?:supprime|efface|delete) ton dernier message$/, () => [{ type: 'msg_delete' }]],
     [/^(?:kick|vire|dégage|déconnecte) (.+?)(?: du vocal| from voice| out of voice)?$/, (m) => [{ type: 'disconnect', who: who(m[1]) }]],
   ],
   actions: {
@@ -93,6 +120,32 @@ module.exports = {
       text: true,
       run: (s) => s.channel.ref.send(s.text),
       say: { fr: (s) => `J'envoie le message dans ${s.channel.name}.`, en: (s) => `Message sent to ${s.channel.name}.` },
+    },
+    msg_edit: {
+      role: 'admin', channel: 'text?', text: true,
+      async run(s, io) { const [m] = await own(chan(s, io)); s.found = Boolean(m); if (m) await m.edit(s.text); },
+      say: { fr: (s) => (s.found ? 'Message modifié.' : "Je n'ai pas de message à modifier ici."), en: (s) => (s.found ? 'Message edited.' : 'I have no message to edit here.') },
+    },
+    msg_delete: {
+      role: 'admin', channel: 'text?',
+      async run(s, io) { const [m] = await own(chan(s, io)); s.found = Boolean(m); if (m) await m.delete(); },
+      say: { fr: (s) => (s.found ? 'Message supprimé.' : "Je n'ai pas de message à supprimer ici."), en: (s) => (s.found ? 'Message deleted.' : 'I have no message to delete here.') },
+    },
+    // Only Bobby's own messages: deleting other people's would need Manage Messages, which Bobby does not have.
+    clean: {
+      role: 'admin', channel: 'text?', confirm: true,
+      async run(s, io) {
+        const ch = chan(s, io);
+        const mine = await own(ch, { all: true, max: 1000 });
+        s.count = mine.length;
+        s.where = ch.name;
+        // one by one, in the background (rate limits): the spoken reply does not wait
+        (async () => { for (const m of mine) await m.delete().catch(() => {}); console.log(`[clean] ${mine.length} message(s) deleted in ${ch.name}`); })();
+      },
+      say: {
+        fr: (s) => (s.where ? (s.count ? `Je supprime mes ${s.count} messages dans ${s.where}.` : `Je n'ai aucun message dans ${s.where}.`) : `Je nettoie ${s.channel?.name || 'le salon'}.`),
+        en: (s) => (s.where ? (s.count ? `Deleting my ${s.count} messages in ${s.where}.` : `I have no messages in ${s.where}.`) : `Cleaning ${s.channel?.name || 'the channel'}.`),
+      },
     },
     leave: {
       role: 'admin',

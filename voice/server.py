@@ -68,6 +68,11 @@ voices = {
     "fr": PiperVoice.load(str(MODELS / "piper" / "fr_FR-siwis-medium.onnx")),
     "en": PiperVoice.load(str(MODELS / "piper" / "en_US-lessac-medium.onnx")),
 }
+# A second pair of voices for Claude's answers, so you hear who is talking.
+claude_voices = {
+    "fr": PiperVoice.load(str(MODELS / "piper" / "fr_FR-tom-medium.onnx")),
+    "en": PiperVoice.load(str(MODELS / "piper" / "en_US-ryan-medium.onnx")),
+}
 
 # Wake word gate: a tiny CPU model listens for "Bobby" so Whisper (GPU) only runs on sentences meant for Bobby.
 WAKE_MODEL = MODELS / "wakeword" / "bobby.onnx"
@@ -142,10 +147,11 @@ async def transcribe(request: Request):
 
 
 @app.get("/tts")
-def tts(text: str, lang: str = "fr"):
+def tts(text: str, lang: str = "fr", voice: str = "bobby"):
+    pair = claude_voices if voice == "claude" else voices
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
-        voices.get(lang, voices["fr"]).synthesize_wav(text, w)
+        pair.get(lang, pair["fr"]).synthesize_wav(text, w)
     return Response(buf.getvalue(), media_type="audio/wav")
 
 

@@ -29,4 +29,12 @@ function roleOf(member) {
 const allowed = (role, need) => LEVEL[role] >= LEVEL[need || 'admin'];
 const isSuper = (id) => SUPER().includes(id);
 
-module.exports = { roleOf, allowed, isSuper, perms, savePerms, LEVEL };
+// People with each role right now, for "who can do what" (ids; the Prime role is a Discord role, not a list).
+function people() {
+  const p = perms();
+  const sup = SUPER();
+  const admins = [...new Set([...ADMINS(), ...p.admins])].filter((id) => !sup.includes(id) && !p.notAdmins.includes(id) && !p.blacklist.includes(id));
+  return { supers: sup, admins, primeRole: PRIME_ROLE(), blacklist: p.blacklist.filter((id) => !sup.includes(id)) };
+}
+
+module.exports = { roleOf, allowed, isSuper, perms, savePerms, people, LEVEL };

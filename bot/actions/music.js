@@ -9,9 +9,11 @@ const item = (s) => (s.kind === 'radio' ? { kind: 'radio', style: s.text } : { k
 const NOTHING = { fr: 'Rien ne joue.', en: 'Nothing is playing.' };
 const ERR = { 'nothing is playing': NOTHING, superseded: { fr: '', en: '' } };
 // Every line goes through here so errors are spoken plainly in both languages.
+// A bare "stop" (s.quiet) with nothing playing says nothing at all.
+const quiet = (s) => s.quiet && s.res?.error === 'nothing is playing';
 const say = (fr, en) => ({
-  fr: (s) => (s.res?.error ? (ERR[s.res.error] || { fr: `Ça n'a pas marché : ${s.res.error}.` }).fr : fr(s.res || {}, s)),
-  en: (s) => (s.res?.error ? (ERR[s.res.error] || { en: `That didn't work: ${s.res.error}.` }).en : en(s.res || {}, s)),
+  fr: (s) => (quiet(s) ? '' : s.res?.error ? (ERR[s.res.error] || { fr: `Ça n'a pas marché : ${s.res.error}.` }).fr : fr(s.res || {}, s)),
+  en: (s) => (quiet(s) ? '' : s.res?.error ? (ERR[s.res.error] || { en: `That didn't work: ${s.res.error}.` }).en : en(s.res || {}, s)),
 });
 const radio = (r, s) => r.kind === 'radio' || s.kind === 'radio';
 const playing = say(
@@ -30,6 +32,7 @@ module.exports = {
     fr: "jouer de la musique (un titre sur YouTube ou une radio par style), pause, suivant, file d'attente, volume",
     en: 'play music (a YouTube title or a radio by style), pause, skip, queue, volume',
   },
+  short: { fr: 'la musique', en: 'music' },
   prompt: [
     '- music_play : jouer de la musique avec Bobby ; "text" est le titre ou l\'artiste (champ "kind" = youtube) ou le style/genre (champ "kind" = radio)',
     '- music_add : ajouter à la file d\'attente, "text" et "kind" comme music_play',
@@ -57,7 +60,8 @@ module.exports = {
     [/^(?:mets? (?:la musique )?en pause|mets? pause|pause(?: la musique| the music| music)?)$/, () => act('music_pause')],
     [/^(?:reprends|relance|remets|continue|resume|unpause)(?: la musique| the music| music)?$/, () => act('music_resume')],
     [/^(?:skip(?: (?:this|the) (?:song|track|music))?|next(?: song| track)?|suivante?|passe|saute|(?:musique|morceau|titre|chanson|piste) suivante?|(?:passe|saute) (?:cette |la )?(?:musique|chanson|piste|titre|morceau)|prochaine (?:musique|chanson))$/, () => act('music_skip')],
-    [/^(?:stop|arrête|arrete|(?:stop|arrête|arrete|coupe)(?: la| le| the)? (?:musique|music|radio))$/, () => act('music_stop')],
+    [/^(?:stop|arrête|arrete)$/, () => [{ type: 'music_stop', text: '', quiet: true }]], // stops the music if any, else silence; never leaves
+    [/^(?:(?:stop|arrête|arrete|coupe)(?: la| le| the)? (?:musique|music|radio))$/, () => act('music_stop')],
     [/^(?:rejoue|replay|recommence)(?: (?:ça|ce son|cette musique|le morceau|this|it|the song|this song))?$|^(?:joue|play) (?:ça|it|this|that)(?: again| encore)$/, () => act('music_replay')],
     [UP, () => act('music_volume', 'up')],
     [DOWN, () => act('music_volume', 'down')],
@@ -79,7 +83,7 @@ module.exports = {
     },
     music_pause: simple('Pause.', 'Paused.', (p) => p.pause()),
     music_resume: simple('Je reprends.', 'Resuming.', (p) => p.resume()),
-    music_stop: simple('Musique arrêtée.', 'Stopped.', (p) => p.stop()),
+    music_stop: { role: 'prime', run: go((p) => (p.nowPlaying() ? p.stop() : { error: 'nothing is playing' })), say: say(() => 'Musique arrêtée.', () => 'Stopped.') },
     music_skip: {
       role: 'prime', run: go((p) => p.skip()),
       say: say((r) => (r.nowPlaying ? `Suivant : ${r.nowPlaying.title}.` : 'Plus rien dans la file.'), (r) => (r.nowPlaying ? `Next: ${r.nowPlaying.title}.` : 'Nothing left in the queue.')),

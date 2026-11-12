@@ -33,11 +33,12 @@ const notFound = { fr: (s) => `Je ne trouve pas le surnom « ${s.text} ».`, en:
 
 module.exports = {
   help: { fr: 'retenir, renommer, supprimer et lister les surnoms', en: 'remember, rename, delete and list nicknames' },
+  short: { fr: 'les surnoms', en: 'nicknames' },
   prompt: [
     '- alias_add : donner à "who" (une seule personne) le surnom "text"',
     '- alias_remove : retirer le surnom "text" ("who" facultatif : sans "who", on cherche chez tout le monde)',
     '- alias_rename : remplacer un surnom existant "text" par "to" ("who" facultatif). Jamais sans les mots "le surnom" (ou "the nickname") dans la phrase.',
-    '- alias_list : poster dans le salon texte la liste des surnoms de chaque personne',
+    '- alias_list : poster dans le salon texte la liste des surnoms de chaque personne, seulement si la phrase dit "surnom" (ou "nickname")',
   ],
   rules: [
     '- Chaque personne peut avoir des surnoms (listés dans le contexte) : un surnom désigne cette personne. "renommer X en Y" avec une personne X, c\'est alias_add ; "renomme le surnom X en Y", c\'est alias_rename. "X ne s\'appelle plus Y", c\'est alias_remove.',

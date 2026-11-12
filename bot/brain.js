@@ -6,12 +6,18 @@
 //   prompt   [lines]      action descriptions for the LLM          rules    [lines]  extra LLM rules
 //   examples [lines]      'sentence -> {json}' few-shot examples    quick    [[regex, (match) => actions]] LLM-free shortcuts
 //   fields   { name: schema }   extra optional step fields for the LLM schema (e.g. alias_rename's "to")
-//   actions  { type: { role: 'prime'|'admin'|'super', who (true, or 'optional'), one, channel: 'voice'|'text', text, confirm,
+//   early(query) -> actions or null   checked first, on the raw sentence (e.g. "note que ...", which keeps its full text)
+//   promptLines(ctx) -> [lines]        live context added to each LLM request (e.g. the to-do lists)
+//   short    { fr, en }   a few words for "who can do what"
+//   actions  { type: { role: 'prime'|'admin'|'super', who (true, or 'optional'), one, channel: 'voice'|'text'|'text?', text, confirm,
+//                      list / to (to-do list names, resolved by actions/todo.js), info (read-only answer, not a right),
+//                      saves (the step stores something: only then may Bobby say it noted it),
 //                      normalize(action) -> fixed action or null, announce(lang), run(step, io, lang) -> undo function or nothing, say: { fr(step, names), en } } }
+// Every step gets step.by = { id, name, role } (who asked) and step.ctx (server snapshot + history).
 const fs = require('fs');
 const path = require('path');
 const { findWake } = require('./wake');
-const { Say, norm, sim } = require('./util');
+const { Say, norm, sim, llm, words } = require('./util');
 const roles = require('./roles');
 const { load } = require('./store');
 
@@ -21,14 +27,13 @@ const JOURNAL = path.join(__dirname, '..', '_logs', 'conversations.jsonl');
 fs.mkdirSync(path.dirname(JOURNAL), { recursive: true });
 const journal = (rec) => fs.appendFile(JOURNAL, `${JSON.stringify(rec)}\n`, () => {});
 
-const LLM_URL = process.env.LLM_URL || 'http://127.0.0.1:8080';
-// A confirmation is a short sentence starting with a yes and with no "no" in it: "non, pas ok" or
-// chatting with a friend while Bobby waits must never confirm a disconnect or a shutdown.
+// A confirmation starts with a yes and has no "no" in it, however long ("oui je confirme Bobby je confirme"):
+// "non, pas ok" or "ok mais attends" must never confirm a disconnect or a shutdown.
 const YES = /^(?:bobby[\s,]*)?(?:oui|ouais|vas-y|confirme|je confirme|ok|okay|d'accord|go|yes|yeah|yep|sure|confirm)\b/i;
 const NO = /\b(?:non|no|pas|nope|don't|annule|cancel|stop|attends|wait)\b/i;
 const confirms = (text) => {
   const t = text.trim().replace(/[.!?…]+$/, '');
-  return YES.test(t) && !NO.test(t) && t.split(/\s+/).length <= 5;
+  return YES.test(t) && !NO.test(t);
 };
 
 const DIR = path.join(__dirname, 'actions');
@@ -70,11 +75,14 @@ ${MODULES.flatMap((m) => m.prompt).join('\n')}
 Ce que tu sais faire : ${require('./actions/info').capabilities('fr')}.
 
 Règles :
+- Tout se traite en local par défaut. Questions sur toi, tes capacités, tes réglages, ta voix, ton mot d'activation, les droits, les gens du serveur, la conversation en cours, ou remarque / avis / critique sur toi : action about avec la question complète dans "text".
+- "réessaie" ou "try again" : refais la dernière demande de l'historique (mêmes actions). L'historique sert aussi à comprendre "il", "ça", "le dernier point".
+- "stop" tout seul arrête la musique (music_stop), jamais leave. leave seulement si on dit à Bobby de partir ("pars", "quitte le salon", "tu peux partir").
 - "who" contient des noms de personnes, "moi" pour celui qui parle, ou "tous" pour tout le monde dans son salon, même si la phrase est en anglais. "except" liste les personnes exclues.
 - Les noms sont souvent mal transcrits : écris le nom du contexte qui ressemble le plus à ce qui a été dit.
 - Plusieurs demandes dans une phrase donnent plusieurs actions, dans l'ordre.
 ${MODULES.flatMap((m) => m.rules).join('\n')}
-- Demande impossible ou incompréhensible : "actions" vide, et "say" le dit en une phrase courte.
+- Demande impossible ou incompréhensible : "actions" vide, et "say" le dit en une phrase courte. Ne prétends jamais avoir fait, noté ou retenu quelque chose sans l'action correspondante.
 - Quand il y a des actions, "say" reste vide : Bobby annonce lui-même ce qu'il fait.
 - "say" est toujours dans la langue de la phrase : français si on te parle français, anglais si on te parle anglais.
 
@@ -105,7 +113,15 @@ function context(member, guild) {
 
 const hotwords = (ctx) => ['Bobby', ...ctx.members.flatMap((m) => [m.name, ...(m.nicknames || [])]), ...ctx.voiceChannels.map((c) => c.name)].join(' ').slice(0, 400);
 
-function prompt(ctx, query, lang) {
+// Last requests of each person (5 at most, 10 minutes), so "réessaie" and "pourquoi il était perdu ?" make sense.
+const HISTORY = new Map(); // userId -> [{ at, query, reply }]
+const historyOf = (id) => (HISTORY.get(id) || []).filter((h) => Date.now() - h.at < 10 * 60_000).slice(-5);
+function remember(id, query, reply) {
+  if (!query) return;
+  HISTORY.set(id, [...historyOf(id), { at: Date.now(), query, reply: (reply || '').slice(0, 150) }].slice(-5));
+}
+
+function prompt(ctx, query, lang, history = []) {
   const byChan = {};
   for (const m of ctx.members) (byChan[m.channel] ||= []).push(m.nicknames?.length ? `${m.name} [surnoms : ${m.nicknames.join(', ')}]` : m.name);
   return [
@@ -114,35 +130,56 @@ function prompt(ctx, query, lang) {
     `Salons vocaux : ${ctx.voiceChannels.map((c) => c.name).join(', ')}.`,
     `Salons texte : ${ctx.textChannels.map((c) => c.name).join(', ')}.`,
     `Date : ${new Date().toLocaleString('fr-FR', { dateStyle: 'full', timeStyle: 'short' })}.`,
+    ...MODULES.flatMap((m) => m.promptLines?.(ctx) || []),
+    ...(history.length ? [`Historique récent de ${ctx.speaker.name} (du plus ancien au plus récent) :`, ...history.map((h) => `- "${h.query}" -> Bobby : "${h.reply}"`)] : []),
     '',
     `Réponds dans "say" en ${lang === 'en' ? 'anglais' : 'français'}.`,
     `Phrase : "${query}"`,
   ].join('\n');
 }
 
-const LLM_DOWN = () => new Say('Mon cerveau ne répond pas.', "My brain isn't responding.");
-
-async function understand(query, ctx, lang = 'fr') {
-  let res;
-  try {
-    res = await fetch(`${LLM_URL}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: prompt(ctx, query, lang) }],
-        temperature: 0,
-        max_tokens: 300, // a JSON cut short by this limit fails to parse: keep "say" short in the prompt
-        response_format: { type: 'json_schema', json_schema: { name: 'plan', schema: SCHEMA } },
-      }),
-    });
-  } catch (e) {
-    // fetch only throws when the server cannot be reached (ECONNREFUSED: llama-server is down or restarting)
-    console.error(`[llm] llama-server unreachable at ${LLM_URL}: ${e.cause?.code || e.message}`);
-    throw Object.assign(LLM_DOWN(), { code: 'LLM_DOWN' });
-  }
-  if (!res.ok) throw new Error(`LLM ${res.status}`);
-  return JSON.parse((await res.json()).choices[0].message.content);
+async function understand(query, ctx, lang = 'fr', history = []) {
+  const out = await llm([{ role: 'system', content: SYSTEM }, { role: 'user', content: prompt(ctx, query, lang, history) }], SCHEMA);
+  return guard(out, query, ctx, history);
 }
+
+// ---------- Guards on what the LLM picked (each one fixes a miss seen in the journal) ----------
+
+const LEAVE = /\b(?:pars|partir|quitte|quitter|leave|go away|va-t'en|vas-t'en|casse-toi|bye|au revoir|à plus|a plus|y aller|go now|you can go|déconnecte-toi|sors|get out)\b/i;
+// Questions about Bobby, the server, its people or the conversation are answered locally (about), never by Claude.
+const ASK_LEAD = /^(?:(?:est-ce que |est ce que )?(?:tu peux|tu pourrais|peux-tu|pourrais-tu)(?: me| nous)? (?:dire|expliquer|rappeler|donner)|(?:dis|explique|raconte|donne)[- ]moi|can you tell me|tell me)\s*/i;
+const SELF = /(?:^|[^\p{L}])(?:bobby|toi|tu es|t'es|es-tu|ta|ton|tes|tu (?:penses|crois|trouves|préfères|aimes)|you are|are you|your|yourself|do you think|droits?|permissions?|admins?|surnoms?|nicknames?|liste|to-?do|serveur|server|rights)(?![\p{L}])/iu;
+const BACKREF = /^(?:pourquoi|comment ça|comment|qu'est-ce qui|c'était quoi|why|what happened)\b.*\b(?:il|elle|ils|elles|ça|ca|c'était|t'as|it|he|she|they)\b/i;
+function aboutBobby(query, ctx, history = []) {
+  const q = query.toLowerCase().replace(/[’`]/g, "'").replace(ASK_LEAD, '');
+  if (SELF.test(q) || (history.length && BACKREF.test(q))) return true;
+  const names = ctx.members.flatMap((m) => [m.name, ...(m.aliases || [])]).map(norm).filter((n) => n.length >= 4);
+  return q.split(/[^\p{L}0-9]+/u).some((w) => w.length >= 4 && names.some((n) => sim(w, n) >= 0.85));
+}
+
+function guard(out, query, ctx, history = []) {
+  const q = query.toLowerCase();
+  const actions = out.actions.flatMap((a) => {
+    if (a.type === 'leave' && !LEAVE.test(q)) return /\b(?:stop|arrête|arrete|tais-toi|chut)\b/.test(q) ? [{ type: 'music_stop', quiet: true }] : [];
+    if (a.type === 'pc_launch' && /\b(?:ferme|quitte|close|quit|kill)\b/.test(q)) return [{ ...a, type: 'pc_close' }];
+    if (a.type === 'alias_list' && !/surnom|nickname/.test(q)) return [{ type: 'todo_list', list: 'general' }];
+    if (/^(?:admin_add|admin_remove|perm_restore|perm_revoke)$/.test(a.type) && /super[\s-]?admin/.test(q)) return [{ type: 'super_admin' }];
+    if (a.type === 'ask' && aboutBobby(query, ctx, history)) return [{ type: 'about', text: query }];
+    // "qui est admin" read as perm_show of someone called "admin": a general question about rights
+    const known = (w) => { try { return ME.has(norm(w)) || Boolean(pick(w, ctx.members, 'person')); } catch { return false; } };
+    if (a.type === 'perm_show' && !(a.who?.length && a.who.every(known))) return [{ type: 'about', text: query }];
+    // "renomme Lucas en le Boss" read as renaming the nickname "Lucas": Lucas is a person, so it gives a nickname
+    if (a.type === 'alias_rename' && !a.who?.length && a.to && !/surnom|nickname/.test(q)) {
+      const named = ctx.members.find((m) => q.split(/[^\p{L}0-9]+/u).some((w) => w.length >= 3 && sim(w, m.name) >= 0.85));
+      if (named) return [{ type: 'alias_add', who: [named.name], text: a.to }];
+    }
+    // the 4B model shortens long notes ("gérer une to-do list"): keep the whole sentence
+    if (a.type === 'todo_add' && words(query) >= 12 && words(a.text) < 0.6 * words(query)) return [{ ...a, text: noteText(query) }];
+    return [a];
+  });
+  return { ...out, actions };
+}
+const noteText = (query) => MODULES.map((m) => m.early?.(query)).find((x) => x?.[0]?.type === 'todo_add')?.[0].text || query;
 
 // ---------- LLM-free shortcuts ----------
 
@@ -158,6 +195,7 @@ function clean(query) {
 
 // Simple commands without the LLM (saves ~1 s). Anything more complex returns null and goes to the LLM.
 function quick(query) {
+  for (const m of MODULES) { const hit = m.early?.(query); if (hit) return hit; }
   const q = clean(query);
   // several requests, people or exclusions: leave it to the LLM
   if (/ et | puis |sauf| and | then |except|,/.test(q)) return null;
@@ -220,13 +258,17 @@ function targets(step, ctx) {
   return res;
 }
 
+const todo = () => require('./actions/todo');
+
 function resolve(actions, ctx) {
   return actions.map((raw) => {
     const a = ACTIONS[raw.type]?.normalize?.(raw) || raw; // a module may fix a known LLM confusion
     const def = ACTIONS[a.type];
     if (!def) throw new Say("Je n'ai pas compris.", "Sorry, I didn't get that.");
-    const step = { ...a, text: a.text || '' };
+    const step = { ...a, text: a.text || '', by: { id: ctx.speaker.id, name: ctx.speaker.name, role: ctx.role }, ctx };
     delete step.who; delete step.except;
+    step.list = def.list && a.list ? todo().listOf(a.list, ctx, pick) : null;
+    if (def.to) step.to = todo().listOf(a.to || 'general', ctx, pick);
     if (def.who && (def.who !== 'optional' || a.who?.length)) step.targets = targets(a, ctx);
     if (def.one && step.targets && step.targets.length !== 1) throw new Say('Une seule personne à la fois pour ça.', 'One person at a time for that.');
     if (def.channel === 'voice') {
@@ -234,7 +276,7 @@ function resolve(actions, ctx) {
       step.channel = HERE.has(norm(q)) ? ctx.voiceChannels.find((c) => c.name === ctx.speaker.channel) : pick(q, ctx.voiceChannels, 'voice');
       if (!step.channel) throw new Say("Tu n'es dans aucun salon vocal.", "You're not in a voice channel.");
     }
-    if (def.channel === 'text') step.channel = pick(a.channel || '', ctx.textChannels, 'text');
+    if (def.channel === 'text' || (def.channel === 'text?' && a.channel)) step.channel = pick(a.channel || '', ctx.textChannels, 'text');
     if (def.text && !step.text) throw new Say('Il me manque le texte.', "I'm missing the text.");
     return step;
   });
@@ -249,6 +291,19 @@ const needed = (plan) => plan.map((s) => (s.type === 'undo' ? lastUndo?.role || 
 
 // Which role each action needs, for the startup log and the README.
 const roleTable = () => Object.fromEntries(Object.entries(ACTIONS).map(([k, d]) => [k, d.role || 'admin']));
+
+// ---------- Nothing is "noted" unless a step saved it ----------
+
+const CLAIM = /(?:^|[^\p{L}])(?:not[ée]e?s?|retenu|enregistr[ée]e?s?|ajout[ée]e?s?|je (?:le |l'|la )?(?:note|retiens|garde en (?:t[eê]te|mémoire))|bien reçu|c'est dans la liste|noted|saved|i'?ll remember|i(?:'ve| have) (?:added|written))(?![\p{L}])/iu;
+const OFFER = /(?:tu veux|veux-tu|vous voulez|voulez-vous) que je (?:l'|le |la )?(?:ajoute|note|rajoute)|want me to (?:add|note|write)/i;
+const OFFER_LINE = { fr: "Tu veux que je l'ajoute à la liste ?", en: 'Do you want me to add it to the list?' };
+// A reply with no saving step that claims to have noted something becomes the offer; an offer waits for a "oui".
+function noteGuard(text, plan, lang) {
+  if (plan.some((s) => ACTIONS[s.type]?.saves)) return { text };
+  if (OFFER.test(text)) return { text, offer: true };
+  if (CLAIM.test(text)) return { text: OFFER_LINE[lang === 'en' ? 'en' : 'fr'], offer: true };
+  return { text };
+}
 
 // ---------- What Bobby says ----------
 
@@ -327,20 +382,24 @@ async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttM
     return;
   }
   pending.delete(member.id);
-  const say = (s) => { rec.reply = s; return io.say(s, lang); };
+  const history = historyOf(member.id);
+  // Nothing to say (e.g. "stop" with no music): stay silent.
+  const say = (s, voice) => { rec.reply = s; if (s) return io.say(s, lang, voice); };
   const t = { stt: sttMs };
   try {
     if (p?.plan) {
       rec.plan = planText(p.plan);
+      rec.query = text;
       if (!confirms(text)) { rec.outcome = 'cancelled'; return say(L.cancelled); }
       if (!roles.allowed(role, needed(p.plan))) { rec.outcome = 'forbidden'; return say(L.forbidden); } // rights may have changed meanwhile
       rec.outcome = 'confirmed';
       const t0 = performance.now();
       await run(p.plan, io, lang);
       t.action = Math.round(performance.now() - t0);
-      return say(describe(p.plan, lang));
+      return say(describe(p.plan, lang), voiceOf(p.plan));
     }
-    const query = wake ? text.slice(text.indexOf(wake) + wake.length).replace(/^[\s,.:;!?]+/, '').trim() : text;
+    // "OK STOP BOBBY BOBBY STOP": the command follows the last of the repeated "Bobby".
+    const query = retry((wake ? text.slice(text.indexOf(wake) + wake.length) : text).replace(/^(?:[\s,.:;!?]+|bobby\b)+/i, '').trim(), history);
     rec.query = query;
     console.log(`[query] "${query}" (${lang})`);
     io.beep();
@@ -348,17 +407,22 @@ async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttM
     // A song title may end in a cancel word ("joue Nevermind"): playing wins.
     if (!quick(query)?.some((a) => a.type.startsWith('music_')) && cancels(query)) { rec.outcome = 'cancelled_by_speaker'; return say(L.cancelled); }
 
-    const ctx = context(member, guild);
+    const ctx = { ...context(member, guild), role, history };
     let t0 = performance.now();
     let plan = null;
     const fast = quick(query);
     if (fast) try { plan = resolve(fast, ctx); t.shortcut = 0; rec.intent = { via: 'shortcut', actions: fast }; console.log(`[intent] shortcut: ${JSON.stringify(fast)}`); } catch { /* name not found: let the LLM try */ }
     if (!plan) {
-      const out = await understand(query, ctx, lang);
+      const out = await understand(query, ctx, lang, history);
       t.llm = Math.round(performance.now() - t0);
       rec.intent = { via: 'llm', ...out };
       console.log(`[intent] LLM (${t.llm} ms): ${JSON.stringify(out)}`);
-      if (!out.actions.length) { rec.outcome = 'answered'; return say(out.say || L.notUnderstood); }
+      if (!out.actions.length) {
+        rec.outcome = 'answered';
+        const g = noteGuard(out.say || L.notUnderstood, [], lang);
+        if (g.offer) offerNote(member.id, query, ctx);
+        return say(g.text);
+      }
       plan = resolve(out.actions, ctx);
     }
     rec.plan = planText(plan);
@@ -379,13 +443,16 @@ async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttM
     await run(plan, io, lang);
     t.action = Math.round(performance.now() - t0);
     rec.outcome = 'done';
-    say(describe(plan, lang));
+    const g = noteGuard(describe(plan, lang), plan, lang);
+    if (g.offer) offerNote(member.id, query, ctx);
+    say(g.text, voiceOf(plan));
   } catch (e) {
     if (e instanceof Say) { rec.outcome = e.code === 'LLM_DOWN' ? 'llm_down' : 'resolve_error'; rec.error = e.message; console.log(`[resolve] ${e.message}`); return say(e.in(lang)); }
     rec.outcome = 'error'; rec.error = String(e.message || e);
     console.error('[bobby]', e);
     say(e.code === 50013 ? L.noRights : L.failed);
   } finally {
+    if (rec.query && rec.outcome !== 'waiting') remember(member.id, rec.query, rec.reply);
     t.total = Math.round(performance.now() - tEnd);
     rec.timing = t;
     journal(rec);
@@ -393,4 +460,22 @@ async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttM
   }
 }
 
-module.exports = { hear, journal, expecting, hotwords, context, understand, resolve, quick, cancels, confirms, pick, sim, describe, run, needed, roleTable, SYSTEM };
+// "Tu veux que je l'ajoute à la liste ?": a "oui" within 15 s adds the whole sentence to the general list.
+function offerNote(userId, query, ctx) {
+  pending.set(userId, { until: Date.now() + 15000, plan: resolve([{ type: 'todo_add', text: noteText(query), list: 'general' }], ctx) });
+}
+// "Réessaie" replays the person's last request (the LLM tended to read it as undo). "Recommence" stays music replay.
+const RETRY = /^(?:(?:bobby|vas-y|allez)[\s,]+)*(?:réessaie|réessaye|reessaie|essaie encore|essaye encore|refais(?:-le| le| ça)?|try again|retry)[\s.!?]*$/i;
+const retry = (query, history) => (RETRY.test(query) && history.length ? history.filter((h) => !RETRY.test(h.query)).at(-1)?.query || query : query);
+// Claude's answers are spoken with another voice.
+const voiceOf = (plan) => plan.find((s) => s.voice)?.voice;
+
+// Shortcut or LLM, as hear() does it, without running anything (tests).
+async function intent(query, ctx, lang = 'fr', history = []) {
+  query = retry(query, history);
+  const fast = quick(query);
+  if (fast) try { resolve(fast, ctx); return { via: 'shortcut', actions: fast, say: '' }; } catch { /* the LLM tries */ }
+  return { via: 'llm', ...(await understand(query, ctx, lang, history)) };
+}
+
+module.exports = { hear, intent, guard, noteGuard, aboutBobby, remember, historyOf, journal, expecting, hotwords, context, understand, resolve, quick, cancels, confirms, pick, sim, describe, run, needed, roleTable, SYSTEM };

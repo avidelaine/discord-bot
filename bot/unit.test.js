@@ -204,12 +204,14 @@ console.log('PC shortcuts and rights: ok');
   await run(one, nio);
   assert.strictEqual(one[0].missing, true);
   save('aliases', {});
-  save('todo', ['pain']);
-  await run(resolve([{ type: 'todo_add', text: 'lait' }], ctx), io);
-  await run(resolve([{ type: 'todo_remove', text: 'pain' }], ctx), io);
-  assert.deepStrictEqual(load('todo', []), ['lait']);
+  save('todo', []);
+  const sup = { ...ctx, role: 'super' };
+  await run(resolve([{ type: 'todo_add', text: 'pain' }], sup), io);
+  await run(resolve([{ type: 'todo_add', text: 'lait' }], sup), io);
+  await run(resolve([{ type: 'todo_remove', text: 'pain' }], sup), io);
+  assert.deepStrictEqual(load('todo', []).map((x) => x.text), ['lait']);
   await run(plan('annule'), io);
-  assert.deepStrictEqual(load('todo', []), ['pain', 'lait']);
+  assert.deepStrictEqual(load('todo', []).map((x) => x.text), ['pain', 'lait']);
   console.log('undo: ok');
 
   // PC actions in dry mode: only recorded, never executed
@@ -284,4 +286,164 @@ console.log('PC shortcuts and rights: ok');
   assert.strictEqual(describe(q), "Claude n'est pas encore branché.");
   assert.match(describe(plan('qu\'est-ce que tu sais faire')), /^Je sais .*couper/);
   console.log('claude off + help: ok');
+
+  await batch2();
 })().catch((e) => { console.error(e); process.exit(1); });
+
+// ---------- Batch 2 (journal of 2026-11-12, 22:12-22:24) ----------
+async function batch2() {
+  const { noteGuard, guard, aboutBobby, intent } = require('./brain');
+  const info = require('./actions/info');
+  const posts = [];
+  const io = { leave() {}, post: async (t) => { posts.push(t); return 'dev-bot-test'; }, memberName: async (id) => id };
+  const as = (role, name = 'Alex') => ({ ...ctx, role, speaker: ctx.members.find((m) => m.name === name) });
+  const go = async (actions, c) => { const p = resolve(actions, c); await run(p, io); return describe(p); };
+  const texts = () => load('todo', []).map((x) => x.text);
+
+  // To-do lists: author, date, list, done; general + personal lists; rights
+  save('todo', []);
+  const prime = as('prime', 'Prime Ilias'), wak = as('super', 'WakandeX'), alex = as('prime', 'Alex');
+  assert.strictEqual(await go([{ type: 'todo_add', text: 'Ilias doit avoir absolument tous les droits sur le bot' }], prime), "C'est noté dans la liste générale.");
+  const [it] = load('todo', []);
+  assert.deepStrictEqual([it.list, it.author, it.done, typeof it.at], ['general', { id: '397478613559148545', name: 'Prime Ilias' }, false, 'string']);
+  assert.strictEqual(roles.roleOf(member('397478613559148545')), 'admin'); // a note never grants anything (admin = .env default here)
+  await go([{ type: 'todo_add', text: 'acheter du pain', list: 'moi' }], alex);
+  assert.strictEqual(load('todo', [])[1].list, 'Alex');
+  await assert.rejects(run(resolve([{ type: 'todo_add', text: 'x', list: 'Ilias' }], alex), io), /liste générale ou à ta liste/);
+  await assert.rejects(run(resolve([{ type: 'todo_done', text: 'droits' }], alex), io), /tes propres points/); // Ilias's item
+  assert.strictEqual(await go([{ type: 'todo_done', text: 'pain' }], alex), 'Fait : acheter du pain');
+  assert.strictEqual(await go([{ type: 'todo_done', text: 'dernier', list: 'general' }], wak), 'Fait : Ilias doit avoir absolument tous les droits sur le bot'); // super edits everything
+  await go([{ type: 'todo_add', text: 'Mettre des fondus dans la musique' }, { type: 'todo_add', text: 'Une voix différente pour Claude' }, { type: 'todo_add', text: 'Nettoyer dev-bot-test' }, { type: 'todo_add', text: 'Quatrième point' }], wak);
+  posts.length = 0;
+  const said = await go([{ type: 'todo_list' }], wak);
+  assert.match(said, /^La liste générale : 4 points\. Mettre des fondus dans la musique ; Une voix différente pour Claude ; Nettoyer dev-bot-test ; et la suite\. Tout est dans dev-bot-test\.$/);
+  assert.match(posts[0], /Liste générale\*\* \(4 à faire, 1 fait\)/);
+  assert.match(posts[0], /~~Ilias doit avoir.*~~ ✅ — \*Prime Ilias, \d\d\/\d\d/);
+  assert.match(await go([{ type: 'todo_list', list: 'moi' }], alex), /^Ta liste est vide\.$/); // only done items left
+  assert.strictEqual(await go([{ type: 'todo_move', text: 'quatrième', to: 'moi' }], wak), 'Je déplace « Quatrième point » dans ta liste.');
+  assert.strictEqual(load('todo', []).find((x) => x.text === 'Quatrième point').list, '261531632589078528');
+  assert.strictEqual(await go([{ type: 'todo_remove', text: '3' }], wak), 'Je supprime : Une voix différente pour Claude'); // numbers as posted, done items included
+  assert.match(await go([{ type: 'todo_remove', text: 'inexistant truc' }], wak), /Je ne trouve pas/);
+  // Old format (plain strings) still reads
+  save('todo', ['ancien point']);
+  assert.match(await go([{ type: 'todo_list' }], wak), /1 point\. ancien point/);
+  console.log('to-do lists: ok');
+
+  // Notes: "retiens / note / il faudrait que tu / rajoute dans la liste" keep the full text, before the LLM
+  const NOTES = [
+    ["il faut que tu retiennes pour la prochaine fois. On va vouloir mettre des fondus là, ça va pas.", 'On va vouloir mettre des fondus là, ça va pas.', 'general'],
+    ["il faudrait que tu gardes l'historique des quelques dernières demandes qui t'ont été faites, parce que des fois tu ne comprends pas, et il faudrait que tu réessayes.", "Il faudrait que tu gardes l'historique des quelques dernières demandes qui t'ont été faites, parce que des fois tu ne comprends pas, et il faudrait que tu réessayes.", 'general'],
+    ["est-ce que tu peux noter dans la liste des choses à faire ? Il faut que tu aies absolument en connaissance, un beau contexte, que ce soit sur toi ce que tu es capable de faire, que ce soit sur le fait que tu puisses, par exemple, gérer une to-do list ou que tu puisses répondre à des questions te concernant.", "Il faut que tu aies absolument en connaissance, un beau contexte, que ce soit sur toi ce que tu es capable de faire, que ce soit sur le fait que tu puisses, par exemple, gérer une to-do list ou que tu puisses répondre à des questions te concernant.", 'general'],
+    ["tu peux rajouter à la to-do list que Ilias doit avoir absolument tous les droits à partir de maintenant sur le bot ?", 'Ilias doit avoir absolument tous les droits à partir de maintenant sur le bot', 'general'],
+    ["j'aimerais que quand Claude me réponde, ça soit une voix différente. Est-ce que tu peux le noter dans la liste ?", "J'aimerais que quand Claude me réponde, ça soit une voix différente.", 'general'],
+    ["est-ce que tu peux noter dans ta liste que tu dois être capable d'éditer tes propres messages que tu as envoyés sur Discord ? Que ça soit les supprimer, les modifier, enfin voilà, tout ce qui est pour l'édit de tes messages personnels à toi.", "Tu dois être capable d'éditer tes propres messages que tu as envoyés sur Discord ? Que ça soit les supprimer, les modifier, enfin voilà, tout ce qui est pour l'édit de tes messages personnels à toi.", 'general'],
+    ["note qu'il faut une voix différente pour Claude", 'Il faut une voix différente pour Claude', 'general'],
+    ['ajoute acheter du pain à ma liste', 'Acheter du pain', 'moi'],
+    ['retiens que la soirée est samedi', 'La soirée est samedi', 'general'],
+    ['add buy milk to my list', 'Buy milk', 'moi'],
+  ];
+  for (const [phrase, text, list] of NOTES) assert.deepStrictEqual(quick(phrase), [{ type: 'todo_add', text, list }], `note: "${phrase}"`);
+  for (const phrase of ["qu'est-ce que j'ai sur ma liste", 'enlève le pain de ma liste', 'joue Notre Dame', 'mute Kévin']) assert(!quick(phrase)?.some((a) => a.type === 'todo_add'), `not a note: "${phrase}"`);
+  for (const phrase of ['montre-moi la liste de tout ce que tu as retenu.', "montre ce que tu as retenu", 'affiche la liste']) assert.deepStrictEqual(quick(phrase), [{ type: 'todo_list', list: 'general' }], phrase);
+  assert.deepStrictEqual(quick('peux-tu afficher ma liste ?'), [{ type: 'todo_list', list: 'moi' }]);
+  assert.strictEqual(quick('qui a quel surnom')[0].type, 'alias_list');
+  console.log('notes: ok');
+
+  // Never a fake "noté": a reply claiming it saved something, with no saving step, becomes the offer
+  assert.deepStrictEqual(noteGuard("J'ai bien noté : on va vouloir mettre des fondus.", [], 'fr'), { text: "Tu veux que je l'ajoute à la liste ?", offer: true });
+  assert.deepStrictEqual(noteGuard('Noted, I will remember that.', [], 'en'), { text: 'Do you want me to add it to the list?', offer: true });
+  assert.deepStrictEqual(noteGuard("Merci ! Tu veux que je l'ajoute à la liste ?", [], 'fr'), { text: "Merci ! Tu veux que je l'ajoute à la liste ?", offer: true });
+  assert.deepStrictEqual(noteGuard('Il est 23 h.', [], 'fr'), { text: 'Il est 23 h.' });
+  assert.deepStrictEqual(noteGuard("C'est noté dans la liste générale.", resolve([{ type: 'todo_add', text: 'x' }], wak), 'fr'), { text: "C'est noté dans la liste générale." });
+  console.log('no fake "noted": ok');
+
+  // Confirmation: a long yes passes, any "non" / "pas" cancels
+  for (const t of ['Oui je confirme Bobby je confirme', 'oui vas-y tu peux le déconnecter maintenant']) assert(confirms(t), t);
+  for (const t of ['oui enfin non', "ok mais pas lui"]) assert(!confirms(t), t);
+  console.log('long confirmation: ok');
+
+  // Guards on the LLM output
+  const g = (actions, q, history = []) => guard({ actions, say: '' }, q, ctx, history).actions;
+  assert.deepStrictEqual(g([{ type: 'leave' }], 'BOBBY STOP'), [{ type: 'music_stop', quiet: true }]);
+  assert.deepStrictEqual(g([{ type: 'leave' }], 'quitte le salon'), [{ type: 'leave' }]);
+  assert.deepStrictEqual(g([{ type: 'pc_launch', text: 'Apex Legends' }], 'ferme Apex Legends'), [{ type: 'pc_close', text: 'Apex Legends' }]);
+  assert.deepStrictEqual(g([{ type: 'alias_list' }], 'montre-moi la liste de tout ce que tu as retenu.'), [{ type: 'todo_list', list: 'general' }]);
+  assert.deepStrictEqual(g([{ type: 'admin_add', who: ['Marie'] }], 'passe Marie super admin'), [{ type: 'super_admin' }]);
+  for (const q of ["est-ce que tu penses que tu es meilleur que Iris ?", "est-ce que tu peux expliquer à Ilias en une phrase, c'est quoi les permissions qu'il y a sur toi ?", "je trouve que ta détection n'est pas encore parfaite sur ton mode d'activation."]) {
+    assert.strictEqual(g([{ type: 'ask', text: q }], q)[0].type, 'about', q);
+  }
+  assert.strictEqual(g([{ type: 'ask', text: 'x' }], 'Pourquoi il était perdu ?', [{ query: 'lance Apex', reply: 'Je lance Apex Legends.' }])[0].type, 'about');
+  for (const q of ["c'est quoi la capitale de l'Australie", 'est-ce que tu peux me dire la population de la République démocratique du Congo ?', 'raconte-moi une blague', 'pourquoi le ciel est bleu']) {
+    assert(!aboutBobby(q, ctx), `world question stays with Claude: "${q}"`);
+  }
+  const long = "est-ce que tu peux noter dans la liste des choses à faire ? Il faut que tu aies absolument en connaissance, un beau contexte, que ce soit sur toi";
+  assert.match(g([{ type: 'todo_add', text: 'gérer une to-do list' }], long)[0].text, /^Il faut que tu aies absolument en connaissance/);
+  console.log('LLM guards: ok');
+
+  // Stop alone: stops the music if it plays, otherwise silence; leaving only on "pars"
+  assert.deepStrictEqual(quick('stop'), [{ type: 'music_stop', text: '', quiet: true }]);
+  assert.deepStrictEqual(quick('Bobby stop'.replace(/^bobby\s*/i, '')), [{ type: 'music_stop', text: '', quiet: true }]);
+  for (const phrase of ['pars', 'quitte le salon', 'tu peux partir']) assert.strictEqual(quick(phrase)?.[0].type, 'leave', phrase);
+  const idle = { nowPlaying: () => null, stop() { throw new Error('nothing to stop'); } };
+  const st = resolve(quick('stop'), ctx);
+  await run(st, { music: idle });
+  assert.strictEqual(describe(st), '');
+  const busy = { nowPlaying: () => ({ title: 'x' }), stop: () => ({ stopped: { title: 'x' }, cleared: 0 }) };
+  const st2 = resolve(quick('stop'), ctx);
+  await run(st2, { music: busy });
+  assert.strictEqual(describe(st2), 'Musique arrêtée.');
+  console.log('stop: ok');
+
+  // Close an app or game (super admin), never mistaken for launching it
+  assert.deepStrictEqual(quick('ferme Apex Legends'), [{ type: 'pc_close', text: 'apex legends' }]);
+  assert.strictEqual(quick('ferme le micro de Kévin')[0].type, 'mute');
+  assert(!quick('quitte le salon').some((a) => a.type === 'pc_close'));
+  const cl = resolve(quick('ferme Apex Legends'), ctx);
+  assert.strictEqual(needed(cl), 'super');
+  pc._test.calls.length = 0;
+  await run(cl, io);
+  assert.match(pc._test.calls[0].join(' '), /^taskkill\.exe/);
+  assert.strictEqual(describe(cl), 'Je ferme apex legends.');
+  console.log('close app: ok');
+
+  // Super admin untouchable: no promotion, no removal, by anyone
+  for (const phrase of ['passe Marie super admin', 'nomme Lucas super admin', 'retire le super admin à WakandeX']) {
+    const p = resolve(quick(phrase), wak);
+    assert.strictEqual(p[0].type, 'super_admin', phrase);
+    await assert.rejects(run(p, io), /fichier \.env/);
+  }
+  await assert.rejects(run(plan("retire l'admin à WakandeX"), io), /super admin/);
+  await assert.rejects(run(plan('enlève les permissions de WakandeX'), io), /super admin/);
+  assert.strictEqual(roles.roleOf(member(WAKANDEX)), 'super');
+  assert.strictEqual(roles.roleOf(member('Marie')), 'other');
+  console.log('super admin untouchable: ok');
+
+  // Self-knowledge follows live state: rights of X before / after "passe X admin" and a blacklist
+  const rights = async (name) => { const p = resolve(quick(`quels sont les droits de ${name}`), alex); await run(p, io); return describe(p); };
+  assert.match(await rights('Marie'), /^Marie n'a aucun rôle/);
+  await run(plan('passe Marie admin'), io);
+  assert.match(await rights('Marie'), /^Marie est admin : .*la modération.*la musique/);
+  assert.match(await info.facts({ by: { name: 'Alex', role: 'prime' }, ctx }, io), /Admins : .*Marie/);
+  await run(plan('enlève les permissions de Marie'), io);
+  assert.match(await rights('Marie'), /^Marie est sur liste noire/);
+  assert.match(await info.facts({ by: { name: 'Alex', role: 'prime' }, ctx }, io), /liste noire\) : .*Marie/);
+  assert.doesNotMatch((await info.facts({ by: {}, ctx }, io)).split('\n').find((l) => l.startsWith('Super admin')), /Admins : [^.]*Marie/);
+  assert.match(await rights('WakandeX'), /^WakandeX est super admin/);
+  assert.strictEqual(needed(resolve(quick('quels sont les droits de Lucas'), alex)), 'prime');
+  console.log('self-knowledge in sync: ok');
+
+  // History: last 5 requests within 10 minutes, per person
+  const { remember, historyOf } = require('./brain');
+  for (let i = 1; i <= 7; i++) remember('h1', `demande ${i}`, `réponse ${i}`);
+  assert.deepStrictEqual(historyOf('h1').map((h) => h.query), ['demande 3', 'demande 4', 'demande 5', 'demande 6', 'demande 7']);
+  assert.deepStrictEqual(historyOf('h2'), []);
+  console.log('history: ok');
+
+  // Own messages: clean needs a "oui", is admin, and defaults to the text channel
+  const cp = resolve(quick('nettoie dev-bot-test'.replace('dev-bot-test', 'memes')), alex);
+  assert.deepStrictEqual([cp[0].type, cp[0].channel.name, needed(cp)], ['clean', 'memes', 'admin']);
+  assert.strictEqual(require('./actions/discord').actions.clean.confirm, true);
+  assert.strictEqual(quick('supprime ton dernier message')[0].type, 'msg_delete');
+  console.log('own messages: ok');
+  void intent;
+}

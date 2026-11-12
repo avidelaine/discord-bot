@@ -51,11 +51,16 @@ const DOWN = { fr: "Je n'arrive pas à joindre Claude.", en: "I can't reach Clau
 
 module.exports = {
   help: { fr: 'poser les questions de culture générale à Claude', en: 'forward general knowledge questions to Claude' },
-  prompt: ['- ask : transmettre la question "text" (reformulée clairement, complète) à un assistant plus savant'],
-  rules: ['- Question de connaissance, d\'actualité, de calcul, d\'explication ou de conseil : action ask, même si tu crois connaître la réponse. Ne réponds toi-même ("actions" vide, réponse courte dans "say") qu\'aux salutations et aux questions sur toi.'],
+  short: { fr: 'les questions à Claude', en: 'questions to Claude' },
+  prompt: ['- ask : transmettre à Claude, un assistant plus savant, une vraie question de culture générale "text" (reformulée clairement, complète)'],
+  rules: [
+    '- ask seulement pour une vraie question sur le monde : culture, actualité, sciences, calcul, explication, recette, conseil général. Jamais pour une question sur toi (Bobby), le serveur, les gens présents, les droits, la conversation en cours, une demande de noter, une remarque ou un avis sur toi : ça, c\'est about, todo_add ou une autre action locale.',
+    '- Ne réponds toi-même ("actions" vide, réponse courte dans "say") qu\'aux salutations et aux politesses.',
+  ],
   examples: [
     '"c\'est quoi la capitale de l\'Australie" -> {"actions":[{"type":"ask","text":"Quelle est la capitale de l\'Australie ?"}],"say":""}',
     '"who won the last world cup" -> {"actions":[{"type":"ask","text":"Who won the last FIFA World Cup?"}],"say":""}',
+    '"qui est le meilleur entre toi et Alexa" -> {"actions":[{"type":"about","text":"qui est le meilleur entre toi et Alexa"}],"say":""}',
   ],
   quick: [],
   actions: {
@@ -67,7 +72,7 @@ module.exports = {
       async run(s, io, lang) {
         if (!ready) { s.answer = OFF[lang] || OFF.fr; check(); return; } // re-check for next time, without waiting
         const t0 = performance.now();
-        try { s.answer = await ask(s.text, lang); } catch (e) { console.error('[claude]', e.message); s.answer = DOWN[lang] || DOWN.fr; }
+        try { s.answer = await ask(s.text, lang); s.voice = 'claude'; } catch (e) { console.error('[claude]', e.message); s.answer = DOWN[lang] || DOWN.fr; }
         console.log(`[claude] ${Math.round(performance.now() - t0)} ms: ${s.answer}`);
       },
       say: { fr: (s) => s.answer, en: (s) => s.answer },

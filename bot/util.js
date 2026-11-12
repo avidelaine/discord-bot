@@ -26,4 +26,26 @@ function sim(q, c) {
   return 1 - lev(a, b) / Math.max(a.length, b.length);
 }
 
-module.exports = { Say, norm, sim };
+// One call to llama-server with a JSON schema; throws a spoken "brain down" error when it cannot be reached.
+const LLM_URL = process.env.LLM_URL || 'http://127.0.0.1:8080';
+async function llm(messages, schema, maxTokens = 300) {
+  let res;
+  try {
+    res = await fetch(`${LLM_URL}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      // a JSON cut short by max_tokens fails to parse: keep "say" short in the prompts
+      body: JSON.stringify({ messages, temperature: 0, max_tokens: maxTokens, response_format: { type: 'json_schema', json_schema: { name: 'plan', schema } } }),
+    });
+  } catch (e) {
+    // fetch only throws when the server cannot be reached (ECONNREFUSED: llama-server is down or restarting)
+    console.error(`[llm] llama-server unreachable at ${LLM_URL}: ${e.cause?.code || e.message}`);
+    throw Object.assign(new Say('Mon cerveau ne répond pas.', "My brain isn't responding."), { code: 'LLM_DOWN' });
+  }
+  if (!res.ok) throw new Error(`LLM ${res.status}`);
+  return JSON.parse((await res.json()).choices[0].message.content);
+}
+
+const words = (t) => (t || '').split(/\s+/).filter(Boolean).length;
+
+module.exports = { Say, norm, sim, llm, words };

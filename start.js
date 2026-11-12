@@ -22,7 +22,7 @@ fs.writeFileSync(pidFile, String(process.pid)); // lets stop.cmd find us
 let PARTS = [
   {
     name: 'llm', color: 35, cmd: path.join(ROOT, '_bin', 'llama', 'llama-server.exe'),
-    args: ['-m', 'models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf', '-ngl', '99', '-c', '4096', '-np', '1', '-fa', 'on', '--host', '127.0.0.1', '--port', '8080', '--log-file', '_logs/llm.log'],
+    args: ['-m', 'models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf', '-ngl', '99', '-c', '8192', '-np', '1', '-fa', 'on', '--host', '127.0.0.1', '--port', '8080', '--log-file', '_logs/llm.log'],
     keep: /listening|error|failed|out of memory/i, // llama-server logs every request; keep what matters
   },
   { name: 'voice', color: 36, cmd: path.join(ROOT, 'voice', '.venv', 'Scripts', 'python.exe'), args: ['voice/server.py'] },

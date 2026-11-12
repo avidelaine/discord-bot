@@ -81,6 +81,19 @@ function find(q) {
     .sort((a, b) => b.s - a.s || a.e.name.length - b.e.name.length)[0]?.e;
 }
 
+// Windows that are open right now: [{ pid, name, title, product }]. Bobby's own parts are never listed.
+const SELF = /^(?:node|python|pythonw|llama-server|explorer|powershell|pwsh|cmd|conhost|windowsterminal|dwm|svchost|csrss|winlogon)$/i;
+function windows() {
+  const out = execFileSync('powershell.exe', ['-NoProfile', '-Command', 'Get-Process | Where-Object { $_.MainWindowHandle -ne 0 } | ForEach-Object { "$($_.Id)|$($_.ProcessName)|$($_.MainWindowTitle)|$($_.Product)" }'], { windowsHide: true, timeout: 15000, encoding: 'utf8' });
+  return out.split(/\r?\n/).map((l) => l.split('|')).filter(([pid, name]) => pid && name && !SELF.test(name)).map(([pid, name, title, product]) => ({ pid, name, title, product }));
+}
+// Best open window for a spoken name ("Apex Legends" matches the window title, "r5apex" the process).
+function openWindow(q) {
+  const name = q.toLowerCase().replace(ART, '').replace(ART, '');
+  return windows().map((w) => ({ w, s: Math.max(...[w.title, w.name, w.product].filter(Boolean).map((c) => sim(name, c))) }))
+    .filter((x) => x.s >= 0.75).sort((a, b) => b.s - a.s)[0]?.w;
+}
+
 const gpu = () => new Promise((ok, ko) => execFile('nvidia-smi', ['--query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total', '--format=csv,noheader'], { windowsHide: true, timeout: 5000 }, (e, out) => {
   if (e) return ko(e);
   const [name, temp, load, used, total] = out.trim().split(/,\s*/);
@@ -107,19 +120,21 @@ const act = (type, text = '') => [{ type, text }];
 
 module.exports = {
   help: {
-    fr: 'piloter le PC (musique, volume, lancer des jeux et applications, verrouiller, veille, éteindre)',
-    en: 'control the PC (music, volume, launch games and apps, lock, sleep, shut down)',
+    fr: 'piloter le PC (musique, volume, lancer et fermer des jeux et applications, verrouiller, veille, éteindre)',
+    en: 'control the PC (music, volume, launch and close games and apps, lock, sleep, shut down)',
   },
+  short: { fr: 'le PC', en: 'the PC' },
   prompt: [
     '- pc_media : contrôler la musique du PC (Spotify, YouTube Music, navigateur), "text" vaut play, pause, next ou previous',
     '- pc_music : dire quelle musique joue sur le PC',
     '- pc_volume : volume de Windows (le PC, pas Discord), "text" vaut up, down, mute, unmute ou un nombre de 0 à 100',
     '- pc_launch : lancer le jeu ou l\'application nommé dans "text" (Valorant, Steam, Epic, Claude, ChatGPT...)',
+    '- pc_close : fermer le jeu ou l\'application nommé dans "text" ("ferme Apex", "quitte Spotify")',
     '- pc_lock / pc_sleep / pc_shutdown : verrouiller, mettre en veille ou éteindre le PC',
     '- pc_gpu : température, charge et mémoire de la carte graphique',
   ],
   rules: [
-    '- pc_media et pc_volume seulement si on parle du PC, de Windows, de Spotify ou de YouTube Music. "lance" ou "ouvre" suivi d\'un jeu ou d\'une application, c\'est pc_launch.',
+    '- pc_media et pc_volume seulement si on parle du PC, de Windows, de Spotify ou de YouTube Music. "lance" ou "ouvre" suivi d\'un jeu ou d\'une application, c\'est pc_launch. "ferme", "quitte" ou "close" suivi d\'un jeu ou d\'une application, c\'est pc_close, jamais pc_launch.',
   ],
   examples: [
     '"mets la musique en pause sur le PC" -> {"actions":[{"type":"pc_media","text":"pause"}],"say":""}',
@@ -127,6 +142,7 @@ module.exports = {
     '"baisse le son du PC à 30" -> {"actions":[{"type":"pc_volume","text":"30"}],"say":""}',
     '"ouvre ChatGPT" -> {"actions":[{"type":"pc_launch","text":"ChatGPT"}],"say":""}',
     '"launch Valorant" -> {"actions":[{"type":"pc_launch","text":"Valorant"}],"say":""}',
+    '"ferme Apex Legends" -> {"actions":[{"type":"pc_close","text":"Apex Legends"}],"say":""}',
     '"mets le PC en veille" -> {"actions":[{"type":"pc_sleep"}],"say":""}',
     '"what song is playing on the PC" -> {"actions":[{"type":"pc_music"}],"say":""}',
     '"mute the PC volume" -> {"actions":[{"type":"pc_volume","text":"mute"}],"say":""}',
@@ -143,6 +159,7 @@ module.exports = {
     [new RegExp(`^(?:remets|rétablis|réactive|redonne|unmute|démute) ${VOL}$`), () => act('pc_volume', 'unmute')],
     // Only taken when the name is really a game or app on this PC, so "lance de la musique" and the like go elsewhere.
     [/^(?:lance|ouvre|démarre|demarre|launch|open|start) (?!(?:de la |la |une? |some |the )?(?:musique|chanson|music|song|playlist|morceau))(.+)$/, (m) => (find(m[1]) ? act('pc_launch', m[1]) : null)],
+    [/^(?:ferme|quitte|close|quit|kill) (?!(?:le |la |the )?(?:salon|vocal|channel|voice|musique|music|radio|micro|mic|son)\b)(.+)$/, (m) => act('pc_close', m[1])],
     [/^(?:verrouille|bloque) (?:le pc|l'ordi(?:nateur)?|mon pc|la session)$|^lock (?:the |my )?pc$/, () => act('pc_lock')],
     [/^mets? (?:le pc|l'ordi(?:nateur)?|mon pc) en (?:veille|sommeil)$|^(?:put|set) (?:the |my )?pc (?:to sleep|in sleep mode)$/, () => act('pc_sleep')],
     [/^(?:éteins|eteins|arrête|arrete|shut ?down|turn off|shut down) (?:le pc|l'ordi(?:nateur)?|mon pc|the pc|my pc)$/, () => act('pc_shutdown')],
@@ -182,6 +199,15 @@ module.exports = {
         fr: (s) => (s.found ? `Je lance ${s.found}.` : `Je ne trouve pas « ${s.text} » sur le PC.`),
         en: (s) => (s.found ? `Launching ${s.found}.` : `I can't find "${s.text}" on the PC.`),
       },
+    },
+    pc_close: {
+      role: 'super', text: true,
+      run: safe((s) => {
+        if (DRY()) { s.found = s.text; return sh('taskkill.exe', ['/IM', s.text, '/T', '/F']); }
+        const w = openWindow(s.text);
+        if (w) { s.found = w.title || w.name; sh('taskkill.exe', ['/PID', w.pid, '/T', '/F']); }
+      }),
+      say: say((s) => (s.found ? `Je ferme ${s.found}.` : `Je ne trouve pas « ${s.text} » ouvert sur le PC.`), (s) => (s.found ? `Closing ${s.found}.` : `I can't find "${s.text}" open on the PC.`)),
     },
     pc_lock: { role: 'super', confirm: true, run: () => sh('rundll32.exe', ['user32.dll,LockWorkStation']), say: { fr: () => 'Je verrouille le PC.', en: () => 'Locking the PC.' } },
     // ponytail: SetSuspendState gives real sleep (rundll32 powrprof would hibernate if hibernation is enabled).

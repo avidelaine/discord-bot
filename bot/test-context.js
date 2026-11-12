@@ -13,6 +13,6 @@ module.exports = {
     m('WakandeX', 'Gaming', '261531632589078528'),
   ],
   voiceChannels: ['Général', 'Gaming', 'AFK', 'Réunion'].map((name) => ({ name })),
-  textChannels: ['général', 'annonces', 'memes'].map((name) => ({ name })),
+  textChannels: ['général', 'annonces', 'memes', 'dev-bot-test'].map((name) => ({ name })),
 };
 module.exports.speaker = module.exports.members[0];

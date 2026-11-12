@@ -1,19 +1,19 @@
 const assert = require('assert');
 const { findWake } = require('./wake');
 
-// Doit détecter (variantes réelles produites par Whisper FR/EN)
+// Must trigger (real variants produced by Whisper in French and English)
 for (const s of ['Bobby ajoute du lait', 'hey bobbie', 'Boby raconte une blague',
                  'BOBI mets la musique', 'Bobé tu es là', "d'accord Bobby."]) {
-  assert(findWake(s), `raté: ${s}`);
+  assert(findWake(s), `missed: ${s}`);
 }
 
-// Ne doit PAS déclencher (faux amis)
+// Must NOT trigger (look-alike words)
 for (const s of ['un hobby sympa', 'le lobby de l hotel', 'mon baby dort',
                  'il a un beau body', 'rien a signaler']) {
-  assert(findWake(s) === null, `faux positif: ${s}`);
+  assert(findWake(s) === null, `false positive: ${s}`);
 }
 
-// Le token rendu sert à nettoyer la requête
+// The returned token is used to strip the wake word from the request
 assert.strictEqual(findWake('Bobby mets la musique'), 'Bobby');
 
-console.log('ok');
+console.log('wake word: ok');

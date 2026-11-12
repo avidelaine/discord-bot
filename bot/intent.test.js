@@ -1,9 +1,9 @@
-// Jeu de test de compréhension : phrase -> actions attendues, contre le vrai LLM (llama-server lancé).
-// Lancer : node bot/intent.test.js   Ajoute ici chaque phrase que Bobby a mal comprise en vrai.
+// Comprehension test set: sentence -> expected actions, against the real LLM (llama-server running).
+// Run: node bot/intent.test.js   Add every sentence Bobby gets wrong in real use.
 const assert = require('assert');
 const { understand, resolve, quick, pick, sim } = require('./brain');
 
-// Résolution des noms : pure, testée sans LLM.
+// Name resolution: pure, tested without the LLM.
 const roster = [{ name: 'Zyklon' }, { name: 'Kévin', aliases: ['kev_du_93'] }, { name: 'Marie' }, { name: 'Mario' }];
 assert.strictEqual(pick('ziklone', roster, 'x').name, 'Zyklon');
 assert.strictEqual(pick('kevin', roster, 'x').name, 'Kévin');
@@ -11,7 +11,7 @@ assert.strictEqual(pick('kev du 93', roster, 'x').name, 'Kévin');
 assert.throws(() => pick('Mari', roster, 'x'), /tu veux dire/);
 assert.throws(() => pick('Bernard', roster, 'x'), /Je ne trouve pas/);
 assert(sim('🎮 Gaming', 'gaming') === 1);
-console.log('résolution des noms : ok');
+console.log('name resolution: ok');
 
 const m = (name, channel) => ({ id: name, name, channel });
 const ctx = {
@@ -21,7 +21,7 @@ const ctx = {
   textChannels: ['général', 'annonces', 'memes'].map((name) => ({ name })),
 };
 
-// [phrase, résultat attendu] ; résultat = "type:cibles>salon" par action, séparés par " | ". [] = aucune action.
+// [sentence, expected] ; expected = "type:targets>channel" per action, joined by " | ". [] = no action.
 const CASES = [
   ['coupe le micro de Kévin', 'mute:Kévin'],
   ['mute ziklone', 'mute:Zyklon'],
@@ -50,7 +50,7 @@ const CASES = [
   ['euh coupe le micro de... de Marie', 'mute:Marie'],
 ];
 
-// Raccourci sans LLM : ce qu'il prend doit être juste, ce qu'il laisse passe au LLM (null).
+// LLM-free shortcut: what it takes must be right, what it leaves goes to the LLM (null).
 const QUICK_CASES = [
   ['Coupe le micro de Kévin.', 'mute:Kévin'],
   ['mute ziklone', 'mute:Zyklon'],
@@ -70,10 +70,10 @@ const fmt = (plan) => plan.map((s) => `${s.type}:${(s.targets || []).map((t) => 
 for (const [phrase, want] of QUICK_CASES) {
   const a = quick(phrase);
   let got = null;
-  try { got = a && fmt(resolve(a, ctx)); } catch { got = null; } // nom introuvable : bascule sur le LLM
-  assert.strictEqual(got, want, `raccourci : « ${phrase} »`);
+  try { got = a && fmt(resolve(a, ctx)); } catch { got = null; } // name not found: falls back to the LLM
+  assert.strictEqual(got, want, `shortcut: "${phrase}"`);
 }
-console.log('raccourci sans LLM : ok');
+console.log('LLM-free shortcut: ok');
 
 (async () => {
   let ok = 0;
@@ -85,16 +85,16 @@ console.log('raccourci sans LLM : ok');
       const out = await understand(phrase, ctx);
       got = out.actions.length ? fmt(resolve(out.actions, ctx)) : [];
     } catch (e) {
-      if (e.code === 'ECONNREFUSED' || e.cause?.code === 'ECONNREFUSED') throw new Error('llama-server ne répond pas sur le port 8080');
+      if (e.code === 'ECONNREFUSED' || e.cause?.code === 'ECONNREFUSED') throw new Error('llama-server is not answering on port 8080');
       got = 'ERR';
     }
     times.push(performance.now() - t0);
     const pass = Array.isArray(want) ? Array.isArray(got) : got === want;
     if (pass) ok++;
-    else console.log(`ÉCHEC  « ${phrase} »\n   attendu ${JSON.stringify(want)}\n   obtenu  ${JSON.stringify(got)}`);
+    else console.log(`FAIL  "${phrase}"\n   expected ${JSON.stringify(want)}\n   got      ${JSON.stringify(got)}`);
   }
   times.sort((a, b) => a - b);
   const med = Math.round(times[times.length >> 1]);
-  console.log(`\nCompréhension : ${ok}/${CASES.length}  ·  temps LLM médian ${med} ms, max ${Math.round(times.at(-1))} ms`);
+  console.log(`\nComprehension: ${ok}/${CASES.length}  ·  LLM latency median ${med} ms, max ${Math.round(times.at(-1))} ms`);
   process.exit(ok / CASES.length >= 0.9 ? 0 : 1);
 })();

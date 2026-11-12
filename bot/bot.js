@@ -10,13 +10,13 @@ const prism = require('prism-media');
 const brain = require('./brain');
 
 const VOICE_URL = process.env.VOICE_URL || 'http://127.0.0.1:3000';
-// Silence qui clôt une phrase. Plus court = plus réactif, mais coupe si tu hésites en parlant.
+// Silence that ends a sentence. Shorter is snappier, but cuts you off if you pause mid-sentence.
 const SILENCE_MS = parseInt(process.env.RECORD_SILENCE_MS || '600');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
-const player = createAudioPlayer(); // ponytail: un seul lecteur, Bobby est sur un seul serveur
+const player = createAudioPlayer(); // ponytail: one player, Bobby lives on a single server
 
-// Bip de 120 ms à 880 Hz, PCM 48 kHz stéréo, généré une fois.
+// 120 ms beep at 880 Hz, 48 kHz stereo PCM, generated once.
 const BEEP = (() => {
   const n = 5760, b = Buffer.alloc(n * 4);
   for (let i = 0; i < n; i++) {
@@ -60,7 +60,7 @@ function listen(connection, guild, io) {
       const { text, ms } = await res.json();
       if (text) await brain.hear({ text, member, guild, tEnd, sttMs: ms, io });
     } catch (e) {
-      console.error('[voix]', e.message);
+      console.error('[voice]', e.message);
     } finally {
       busy.delete(userId);
     }
@@ -68,7 +68,7 @@ function listen(connection, guild, io) {
 }
 
 client.once(Events.ClientReady, async () => {
-  console.log(`Bobby en ligne : ${client.user.tag}`);
+  console.log(`Bobby online: ${client.user.tag}`);
   await client.guilds.cache.get(process.env.GUILD_ID)?.commands.set([
     { name: 'join', description: 'Bobby rejoint ton salon vocal' },
     { name: 'leave', description: 'Bobby quitte le vocal' },

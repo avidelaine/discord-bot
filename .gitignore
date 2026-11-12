@@ -53,12 +53,12 @@ build/
 *.sqlite3
 *.db
 
-# Données persistées du bot (todo, alarmes...)
+# Bot data (to-do list)
 /data/
 
 # Temp
 *.swp
 *~
 
-# Binaires locaux (llama.cpp)
+# Local binaries (llama.cpp)
 /_bin/

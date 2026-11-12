@@ -1,7 +1,7 @@
-// Détection tolérante du wake word "bobby" sur le texte transcrit.
-// ponytail: cette liste EST le bouton de réglage. hotwords côté STT corrige déjà
-// l'orthographe ; ces variantes rattrapent ce que Whisper écrit encore de travers.
-// On évite volontairement "baby/hobby/lobby" (faux positifs).
+// Tolerant detection of the wake word "bobby" in the transcribed text.
+// ponytail: this list IS the tuning knob. Whisper hotwords already fix most spellings;
+// these variants catch what Whisper still gets wrong.
+// "baby", "hobby" and "lobby" are left out on purpose (false positives).
 const VARIANTS = new Set([
   'bobby', 'bobbie', 'bobie', 'bobbi', 'bobi',
   'boby', 'bobbys', 'bobbey', 'bobbee', 'bobe',
@@ -9,7 +9,7 @@ const VARIANTS = new Set([
 
 const norm = (t) => t.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 
-// Retourne le token original qui matche le wake word, sinon null.
+// Returns the original token that matches the wake word, or null.
 function findWake(text) {
   for (const w of text.match(/\p{L}+/gu) || []) {
     if (VARIANTS.has(norm(w))) return w;

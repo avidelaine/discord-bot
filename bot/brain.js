@@ -1,4 +1,4 @@
-// Cerveau de Bobby : phrase transcrite -> intention (LLM local) -> noms résolus -> actions Discord.
+// Bobby's brain: transcribed sentence -> intent (local LLM) -> resolved names -> Discord actions.
 const { findWake } = require('./wake');
 const { load, save } = require('./store');
 
@@ -29,7 +29,8 @@ const SCHEMA = {
   required: ['actions', 'say'],
 };
 
-// Fixe et en premier : llama-server garde ce préfixe en cache, seule la fin est relue à chaque phrase.
+// Fixed and first: llama-server caches this prefix, so only the tail is processed for each sentence.
+// The prompt stays in French, the language Bobby is spoken to in.
 const SYSTEM = `Tu es Bobby, l'assistant vocal d'un serveur Discord. Tu reçois une phrase transcrite à l'oral (parfois avec des fautes) et le contexte du serveur. Tu réponds uniquement en JSON.
 
 Actions possibles (champ "type") :
@@ -62,9 +63,9 @@ Exemples :
 "c'est bon tu peux y aller" -> {"actions":[{"type":"leave"}],"say":""}
 "t'es qui toi" -> {"actions":[],"say":"Je suis Bobby, l'assistant vocal du serveur."}`;
 
-// ---------- Contexte ----------
+// ---------- Context ----------
 
-// Photo du serveur en objets simples (ref = objet Discord), pour que le reste soit testable sans Discord.
+// Snapshot of the server as plain objects (ref = Discord object), so the rest is testable without Discord.
 function context(member, guild) {
   const members = [...guild.voiceStates.cache.values()]
     .filter((v) => v.channel && v.member && !v.member.user.bot)
@@ -112,8 +113,8 @@ async function understand(query, ctx) {
   return JSON.parse((await res.json()).choices[0].message.content);
 }
 
-// Raccourci sans LLM pour les commandes simples (~1 s de gagnée). Phrase plus complexe : null, le LLM s'en charge.
-// ponytail: une poignée de tournures ; ajouter ici celles qui reviennent souvent dans les logs.
+// LLM-free shortcut for simple commands (saves ~1 s). Anything more complex returns null and goes to the LLM.
+// ponytail: a handful of phrasings; add the ones that keep showing up in the logs.
 const QUICK = [
   [/^(?:coupe|ferme|mute)(?: le)? micro (?:de|à|a) (.+)$/, 'mute'],
   [/^mute (.+)$/, 'mute'],
@@ -128,7 +129,7 @@ const QUICK = [
 
 function quick(query) {
   const q = query.toLowerCase().replace(/[.!?,]+$/, '').trim();
-  if (/ et | puis |sauf|,/.test(q)) return null; // plusieurs demandes, personnes ou exclusions : le LLM
+  if (/ et | puis |sauf|,/.test(q)) return null; // several requests, people or exclusions: leave it to the LLM
   for (const [re, type] of QUICK) {
     const m = q.match(re);
     if (!m) continue;
@@ -140,9 +141,9 @@ function quick(query) {
   return null;
 }
 
-// ---------- Résolution des noms ----------
+// ---------- Name resolution ----------
 
-class Say extends Error {} // erreur à dire telle quelle à l'utilisateur
+class Say extends Error {} // error spoken to the user as is
 
 const norm = (s) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
@@ -164,7 +165,7 @@ function sim(q, c) {
   return 1 - lev(a, b) / Math.max(a.length, b.length);
 }
 
-// ponytail: seuil 0.6 et écart 0.1 choisis à la main ; à régler sur les vrais pseudos du serveur.
+// ponytail: 0.6 threshold and 0.1 gap picked by hand; tune them on the server's real nicknames.
 function pick(q, items, what) {
   const ranked = items
     .map((it) => ({ it, s: Math.max(...[it.name, ...(it.aliases || [])].map((c) => sim(q, c))) }))
@@ -183,7 +184,7 @@ function targets(step, ctx) {
   for (const w of step.who || []) {
     const n = norm(w);
     if (ME.has(n)) out.push(ctx.speaker);
-    // « tous » : pour un déplacement, tout le vocal du serveur ; sinon, les autres personnes du salon de celui qui parle.
+    // "tous" (everyone): for a move, everyone in voice on the server; otherwise, the other people in the speaker's channel.
     else if (ALL.has(n)) out.push(...ctx.members.filter((m) => (step.type === 'move' ? true : m.channel === ctx.speaker.channel && m.id !== ctx.speaker.id)));
     else out.push(pick(w, ctx.members, 'la personne'));
   }
@@ -211,7 +212,7 @@ function resolve(actions, ctx) {
 
 const needsConfirm = (plan) => plan.some((s) => s.type === 'disconnect') || plan.reduce((n, s) => n + (s.targets?.length || 0), 0) >= 3;
 
-// ---------- Exécution ----------
+// ---------- Execution ----------
 
 const names = (ts) => ts.map((t) => t.name).join(', ').replace(/, ([^,]*)$/, ' et $1');
 let lastUndo = null;
@@ -273,9 +274,9 @@ async function run(plan, io) {
   else if (plan.some((s) => s.type === 'undo')) lastUndo = null;
 }
 
-// ---------- Point d'entrée ----------
+// ---------- Entry point ----------
 
-const pending = new Map(); // userId -> { until, plan? } : « Bobby » seul, ou confirmation attendue
+const pending = new Map(); // userId -> { until, plan? }: "Bobby" said alone, or a pending confirmation
 
 async function hear({ text, member, guild, tEnd, sttMs, io }) {
   let p = pending.get(member.id);
@@ -283,7 +284,7 @@ async function hear({ text, member, guild, tEnd, sttMs, io }) {
   const wake = findWake(text);
   if (!wake && !p) return;
   if (!(ALLOWED.length ? ALLOWED.includes(member.id) : member.id === guild.ownerId)) {
-    return console.log(`[bobby] ${member.displayName} n'est pas autorisé`);
+    return console.log(`[bobby] ${member.displayName} is not allowed to give commands`);
   }
   pending.delete(member.id);
   const t = { stt: sttMs };
@@ -303,11 +304,11 @@ async function hear({ text, member, guild, tEnd, sttMs, io }) {
     let t0 = performance.now();
     let plan = null;
     const fast = quick(query);
-    if (fast) try { plan = resolve(fast, ctx); t.raccourci = 0; } catch { /* nom introuvable : le LLM retentera */ }
+    if (fast) try { plan = resolve(fast, ctx); t.shortcut = 0; } catch { /* name not found: let the LLM try */ }
     if (!plan) {
       const out = await understand(query, ctx);
       t.llm = Math.round(performance.now() - t0);
-      console.log(`[bobby] « ${query} » -> ${JSON.stringify(out)}`);
+      console.log(`[bobby] "${query}" -> ${JSON.stringify(out)}`);
       if (!out.actions.length) return io.say(out.say || "Je n'ai pas compris.");
       plan = resolve(out.actions, ctx);
     }
@@ -325,7 +326,7 @@ async function hear({ text, member, guild, tEnd, sttMs, io }) {
     io.say(e.code === 50013 ? "Je n'ai pas les droits Discord pour ça." : "Ça n'a pas marché.");
   } finally {
     t.total = Math.round(performance.now() - tEnd);
-    console.log(`[temps] ${Object.entries(t).filter(([, v]) => v != null).map(([k, v]) => `${k} ${v} ms`).join(' · ')}  (total = de la fin de ta phrase à la réponse)`);
+    console.log(`[timing] ${Object.entries(t).filter(([, v]) => v != null).map(([k, v]) => `${k} ${v} ms`).join(' · ')}  (total = from end of speech to reply)`);
   }
 }
 

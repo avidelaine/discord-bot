@@ -1,8 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 
-// ponytail: persistance = fichier JSON. Un assistant perso a une todo de
-// quelques items ; on passe à SQLite le jour où il y a des requêtes/concurrence.
+// ponytail: persistence is a JSON file. A personal assistant keeps a few to-do items;
+// move to SQLite the day there are real queries or concurrent writes.
 const DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 fs.mkdirSync(DIR, { recursive: true });
 

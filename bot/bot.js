@@ -72,6 +72,7 @@ function listen(connection, guild, io) {
 
 client.once(Events.ClientReady, async () => {
   console.log(`Bobby online: ${client.user.tag}`);
+  await client.application.commands.set([]); // drop global commands left by older versions: only the server ones below remain
   await client.guilds.cache.get(process.env.GUILD_ID)?.commands.set([
     { name: 'join', description: 'Bobby rejoint ton salon vocal' },
     { name: 'leave', description: 'Bobby quitte le vocal' },

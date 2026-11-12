@@ -64,8 +64,8 @@ function makeIo(guild, textChannel) {
     beep: () => { mixer.overlay(new PassThrough().end(BEEP)); },
     // voice 'claude': Claude's answers, spoken with the second pair of Piper voices
     async say(text, lang = 'fr', voice = 'bobby') {
+      // Voice only: replies are spoken, never echoed in a text channel (lists still go to TEXT_CHANNEL via post).
       console.log(`[${voice}] ${text}`);
-      textChannel.send(voice === 'claude' ? `🤖 Claude : ${text}` : `🗣️ ${text}`).catch(() => {});
       try {
         const res = await fetch(`${VOICE_URL}/tts?lang=${lang}&voice=${voice}&text=${encodeURIComponent(text)}`);
         mixer.overlay(decode(Readable.fromWeb(res.body)));

@@ -2,6 +2,7 @@
 import io
 import os
 import site
+import sys
 import time
 import wave
 from pathlib import Path
@@ -24,6 +25,28 @@ from piper import PiperVoice
 from scipy.signal import resample_poly
 
 MODELS = Path(__file__).resolve().parent.parent / "models"
+
+# Mirror everything printed (including server errors) to _logs/voice.log, so it can be reviewed later.
+(MODELS.parent / "_logs").mkdir(exist_ok=True)
+_logfile = open(MODELS.parent / "_logs" / "voice.log", "a", encoding="utf-8", buffering=1)
+
+
+class _Tee:
+    def __init__(self, stream):
+        self.stream = stream
+
+    def write(self, s):
+        self.stream.write(s)
+        _logfile.write(s)
+
+    def flush(self):
+        self.stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
+sys.stdout, sys.stderr = _Tee(sys.stdout), _Tee(sys.stderr)
 
 print("Loading Whisper...", flush=True)
 whisper = WhisperModel(
@@ -60,7 +83,8 @@ def bobby_score(audio: np.ndarray) -> float:
     pad = np.zeros(8000, np.float32)  # Discord sends no audio during silence; give the model some on both sides
     pcm = (np.clip(np.concatenate([pad, audio, pad]), -1, 1) * 32767).astype(np.int16)
     wake.reset()
-    return max((max(wake.predict(pcm[i : i + 1280]).values()) for i in range(0, len(pcm) - 1279, 1280)), default=0.0)
+    # float(): the model returns numpy floats, which FastAPI cannot turn into JSON
+    return float(max((max(wake.predict(pcm[i : i + 1280]).values()) for i in range(0, len(pcm) - 1279, 1280)), default=0.0))
 
 
 print("Voice service ready.", flush=True)

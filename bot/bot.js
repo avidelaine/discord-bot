@@ -1,6 +1,19 @@
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env'), quiet: true });
+const fs = require('fs');
 const { Readable } = require('stream');
+
+// Mirror the console to _logs/bot.log, so errors can be reviewed later.
+fs.mkdirSync(path.join(__dirname, '..', '_logs'), { recursive: true });
+const LOG = fs.createWriteStream(path.join(__dirname, '..', '_logs', 'bot.log'), { flags: 'a' });
+for (const level of ['log', 'error']) {
+  const original = console[level];
+  console[level] = (...args) => {
+    original(...args);
+    LOG.write(`${new Date().toISOString()} ${args.map((a) => (a instanceof Error ? a.stack : typeof a === 'string' ? a : JSON.stringify(a))).join(' ')}
+`);
+  };
+}
 const { Client, GatewayIntentBits, Events } = require('discord.js');
 const {
   joinVoiceChannel, getVoiceConnection, entersState, EndBehaviorType, VoiceConnectionStatus,

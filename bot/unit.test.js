@@ -115,9 +115,9 @@ assert.strictEqual(needed(resolve([{ type: 'alias_add', who: ['Kévin'], text: '
 
 // ---------- PC control: shortcuts, rights, confirmations, dry run ----------
 const PC_CASES = [
-  ['mets pause', 'pc_media', 'pause'], ['Mets la musique en pause.', 'pc_media', 'pause'], ['pause sur le PC', 'pc_media', 'pause'],
-  ['pause the music on Spotify', 'pc_media', 'pause'], ['reprends la musique', 'pc_media', 'play'],
-  ['musique suivante', 'pc_media', 'next'], ['next song on youtube music', 'pc_media', 'next'], ['musique précédente', 'pc_media', 'previous'],
+  ['mets pause sur le PC', 'pc_media', 'pause'], ['Mets la musique en pause sur Spotify.', 'pc_media', 'pause'], ['pause sur le PC', 'pc_media', 'pause'],
+  ['pause the music on Spotify', 'pc_media', 'pause'], ['reprends la musique sur le PC', 'pc_media', 'play'],
+  ['musique suivante sur Spotify', 'pc_media', 'next'], ['next song on youtube music', 'pc_media', 'next'], ['musique précédente sur le PC', 'pc_media', 'previous'],
   ["c'est quoi la musique sur le PC", 'pc_music', ''], ["what's playing on the PC", 'pc_music', ''],
   ['monte le son du PC', 'pc_volume', 'up'], ['baisse le volume Windows', 'pc_volume', 'down'], ['mets le son du PC à 30', 'pc_volume', '30'],
   ['set the PC volume to 40 percent', 'pc_volume', '40'], ['coupe le son du PC', 'pc_volume', 'mute'], ['remets le son du PC', 'pc_volume', 'unmute'],
@@ -133,7 +133,7 @@ for (const [phrase, type, text] of PC_CASES) {
 for (const phrase of ['pause', 'skip', 'suivant', 'volume 50', 'monte le son', 'lance de la musique', 'play despacito', 'ouvre un truc inconnu xyz']) {
   assert(!quick(phrase)?.some((s) => s.type.startsWith('pc_')), `not a PC shortcut: "${phrase}"`);
 }
-for (const phrase of ['mets pause', 'monte le son du PC', 'lance Valorant', 'mets le PC en veille', 'éteins le PC', 'verrouille le PC', 'température du GPU']) {
+for (const phrase of ['mets pause sur le PC', 'monte le son du PC', 'lance Valorant', 'mets le PC en veille', 'éteins le PC', 'verrouille le PC', 'température du GPU']) {
   const p = plan(phrase);
   assert.strictEqual(needed(p), 'super');
   assert(!roles.allowed('admin', needed(p)) && !roles.allowed('prime', needed(p)) && roles.allowed('super', needed(p)));
@@ -212,10 +212,64 @@ console.log('PC shortcuts and rights: ok');
   assert.match((await dry('éteins le PC'))[0], /^shutdown\.exe \/s/);
   assert.match((await dry('verrouille le PC'))[0], /^rundll32\.exe user32\.dll,LockWorkStation/);
   assert.deepStrictEqual(await dry('mets le son du PC à 30'), ['POST /pc/volume?level=30', 'Volume du PC à 30.']);
-  assert.strictEqual((await dry('musique suivante'))[0], 'POST /pc/media/next');
+  assert.strictEqual((await dry('musique suivante sur le PC'))[0], 'POST /pc/media/next');
   if (idx.some((e) => e.name === 'Valorant')) assert.match((await dry('lance Valorant'))[0], /RiotClientServices\.exe --launch-product=valorant --launch-patchline=live/);
   assert.match((await dry('ouvre Claude'))[0], /explorer\.exe/);
   console.log('PC dry run: ok');
+
+  // Music: fake player, shortcuts, rights, spoken lines, no collision with the PC shortcuts
+  const MUSIC_CASES = [
+    ['pause', 'music_pause', ''], ['mets pause', 'music_pause', ''], ['mets la musique en pause', 'music_pause', ''],
+    ['reprends la musique', 'music_resume', ''], ['resume', 'music_resume', ''], ['skip', 'music_skip', ''], ['suivant', 'music_skip', ''],
+    ['musique suivante', 'music_skip', ''], ['next song', 'music_skip', ''], ['stop la musique', 'music_stop', ''], ['stop', 'music_stop', ''],
+    ['rejoue', 'music_replay', ''], ['monte le son', 'music_volume', 'up'], ['baisse le volume', 'music_volume', 'down'],
+    ['volume 50', 'music_volume', '50'], ['mets le volume à 40', 'music_volume', '40'], ['set the volume to 70', 'music_volume', '70'],
+    ["c'est quoi ce son", 'music_now', ''], ["what's this song", 'music_now', ''], ["c'est quoi la file d'attente", 'music_queue', ''],
+    ['lance de la musique', 'music_play', 'pop'], ['joue Bohemian Rhapsody', 'music_play', 'bohemian rhapsody'], ['play Daft Punk', 'music_play', 'daft punk'],
+    ['joue du hardstyle', 'music_play', 'hardstyle'], ['mets une radio jazz', 'music_play', 'jazz'], ['play some lofi', 'music_play', 'lofi'],
+  ];
+  for (const [phrase, type, text] of MUSIC_CASES) {
+    const a = quick(phrase);
+    assert(a && a.length === 1 && a[0].type === type && a[0].text === text, `music shortcut: "${phrase}" -> ${JSON.stringify(a)}`);
+  }
+  assert.strictEqual(quick('joue du hardstyle')[0].kind, 'radio');
+  assert.strictEqual(quick('joue Bohemian Rhapsody')[0].kind, 'youtube');
+  for (const phrase of ['mets pause sur le PC', 'monte le son du PC', 'musique suivante sur Spotify', 'lance Valorant']) assert(!quick(phrase)?.some((s) => s.type.startsWith('music_')), `not music: "${phrase}"`);
+  assert.strictEqual(quick('mets pause sur le PC')[0].type, 'pc_media');
+  for (const phrase of ['pause', 'joue Despacito', 'volume 20']) {
+    assert.strictEqual(needed(plan(phrase)), 'prime');
+    assert(roles.allowed('prime', needed(plan(phrase))) && roles.allowed('admin', needed(plan(phrase))) && roles.allowed('super', needed(plan(phrase))));
+    assert(!roles.allowed('other', needed(plan(phrase))));
+  }
+  const fake = {
+    vol: 30, cur: { title: 'Bohemian Rhapsody', kind: 'youtube' }, queue: [{ label: 'Blinding Lights' }, { label: 'x' }], calls: [],
+    playNow(i) { this.calls.push(i); return i.kind === 'radio' ? { title: 'Jazz FM', kind: 'radio', station: 'Jazz FM' } : { title: i.query, kind: 'youtube' }; },
+    add(i) { this.calls.push(i); return { started: false, position: 3, label: i.query }; },
+    pause() { return { paused: true }; }, resume() { return { error: 'nothing is playing' }; }, stop() { return { stopped: this.cur, cleared: 2 }; },
+    skip() { return { skipped: this.cur, nowPlaying: { title: 'Blinding Lights' } }; }, replay() { return { nowPlaying: this.cur }; },
+    list() { return { nowPlaying: this.cur, queue: this.queue }; }, nowPlaying() { return this.cur; },
+    setVolume(n) { this.vol = n; return { volume: n }; }, volumeUp() { return this.setVolume(this.vol + 10); }, volumeDown() { return this.setVolume(this.vol - 10); },
+  };
+  const say = async (steps, lang = 'fr') => { const p = resolve(steps, ctx); await run(p, { music: fake }, lang); return describe(p, lang); };
+  assert.strictEqual(await say([{ type: 'music_play', text: 'Bohemian Rhapsody', kind: 'youtube' }]), 'Je lance Bohemian Rhapsody.');
+  assert.deepStrictEqual(fake.calls.pop(), { kind: 'youtube', query: 'Bohemian Rhapsody' });
+  assert.strictEqual(await say([{ type: 'music_play', text: 'jazz', kind: 'radio' }]), 'Radio jazz : Jazz FM.');
+  assert.deepStrictEqual(fake.calls.pop(), { kind: 'radio', style: 'jazz' });
+  assert.strictEqual(await say([{ type: 'music_play', text: 'jazz', kind: 'radio' }], 'en'), 'jazz radio: Jazz FM.');
+  assert.strictEqual(await say([{ type: 'music_add', text: 'Blinding Lights', kind: 'youtube' }]), "J'ajoute Blinding Lights à la file, position 3.");
+  assert.strictEqual(await say([{ type: 'music_queue' }]), 'File : 2 titres, prochain : Blinding Lights.');
+  assert.strictEqual(await say([{ type: 'music_queue' }], 'en'), 'Queue: 2 tracks, next: Blinding Lights.');
+  assert.strictEqual(await say([{ type: 'music_volume', text: 'up' }]), 'Volume à 40.');
+  assert.strictEqual(await say([{ type: 'music_volume', text: '25' }], 'en'), 'Volume at 25.');
+  assert.strictEqual(await say([{ type: 'music_skip' }]), 'Suivant : Blinding Lights.');
+  assert.strictEqual(await say([{ type: 'music_now' }]), "C'est Bohemian Rhapsody.");
+  assert.strictEqual(await say([{ type: 'music_resume' }]), 'Rien ne joue.');
+  assert.strictEqual(await say([{ type: 'music_resume' }], 'en'), 'Nothing is playing.');
+  assert.strictEqual(await say([{ type: 'music_stop' }], 'en'), 'Stopped.');
+  const none = resolve([{ type: 'music_pause' }], ctx);
+  await run(none, {});
+  assert.match(describe(none), /Ça n'a pas marché/);
+  console.log('music: ok');
 
   // Claude not logged in: immediate answer, no wait
   ask.setReady(false);

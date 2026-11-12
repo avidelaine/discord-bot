@@ -33,6 +33,18 @@ const CASES = [
   ['déplace Bernard dans gaming', 'ERR'],
   ['mute Zyklon et Kévin', 'mute:Kévin,Zyklon'],
   ['euh coupe le micro de... de Marie', 'mute:Marie'],
+  // Music (Bobby's own player)
+  ['mets du hard rock', 'music_play:'],
+  ['est-ce que tu peux jouer Alors on danse de Stromae', 'music_play:'],
+  ['ajoute Blinding Lights à la file', 'music_add:'],
+  ['la chanson suivante', 'music_skip:'],
+  ['mets le volume un peu moins fort à 30', 'music_volume:'],
+  ['play Around the World by Daft Punk', 'music_play:'],
+  ['put on some chill lofi', 'music_play:'],
+  ['add Starboy to the queue', 'music_add:'],
+  ['what song is playing right now', 'music_now:'],
+  ['turn the music down', 'music_volume:'],
+  ['pause the music on Spotify', 'pc_media:'],
   // English
   ['mute Kevin', 'mute:Kévin'],
   ['give Zyklon his mic back', 'unmute:Zyklon'],

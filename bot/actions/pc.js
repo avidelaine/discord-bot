@@ -84,8 +84,9 @@ function find(q) {
 // Windows that are open right now: [{ pid, name, title, product }]. Bobby's own parts are never listed.
 const SELF = /^(?:node|python|pythonw|llama-server|explorer|powershell|pwsh|cmd|conhost|windowsterminal|dwm|svchost|csrss|winlogon)$/i;
 function windows() {
-  const out = execFileSync('powershell.exe', ['-NoProfile', '-Command', 'Get-Process | Where-Object { $_.MainWindowHandle -ne 0 } | ForEach-Object { "$($_.Id)|$($_.ProcessName)|$($_.MainWindowTitle)|$($_.Product)" }'], { windowsHide: true, timeout: 15000, encoding: 'utf8' });
-  return out.split(/\r?\n/).map((l) => l.split('|')).filter(([pid, name]) => pid && name && !SELF.test(name)).map(([pid, name, title, product]) => ({ pid, name, title, product }));
+  const out = execFileSync('powershell.exe', ['-NoProfile', '-Command', 'Get-Process | Where-Object { $_.MainWindowHandle -ne 0 } | ForEach-Object { "$($_.Id)`t$($_.ProcessName)`t$($_.MainWindowTitle)`t$($_.Product)" }'], { windowsHide: true, timeout: 15000, encoding: 'utf8' });
+  // tab-separated: window titles often contain "|" ("Video | YouTube")
+  return out.split(/\r?\n/).map((l) => l.split('\t')).filter(([pid, name]) => pid && name && !SELF.test(name)).map(([pid, name, title, product]) => ({ pid, name, title, product }));
 }
 // Best open window for a spoken name ("Apex Legends" matches the window title, "r5apex" the process).
 function openWindow(q) {

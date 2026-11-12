@@ -32,7 +32,7 @@ class Mixer {
     if (!m) return false;
     if (!fade || this.paused) { m.stop(); return false; }
     this.fading?.ch.stop();
-    this.fading = { ch: m, f: 1, per: 1 / frames(fade === true ? FADE_OUT : fade) };
+    this.fading = { ch: m, f: this.mf, /* a track still fading in fades out from where it is */ per: 1 / frames(fade === true ? FADE_OUT : fade) };
     return true;
   }
   pause(on) { this.paused = on; if (!on) this._ensure(); }

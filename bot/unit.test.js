@@ -384,7 +384,7 @@ async function batch2() {
   assert.deepStrictEqual(quick('stop'), [{ type: 'music_stop', text: '', quiet: true }]);
   assert.deepStrictEqual(quick('Bobby stop'.replace(/^bobby\s*/i, '')), [{ type: 'music_stop', text: '', quiet: true }]);
   for (const phrase of ['pars', 'quitte le salon', 'tu peux partir']) assert.strictEqual(quick(phrase)?.[0].type, 'leave', phrase);
-  const idle = { nowPlaying: () => null, stop() { throw new Error('nothing to stop'); } };
+  const idle = { nowPlaying: () => null, stop: () => ({ stopped: null, cleared: 0 }) };
   const st = resolve(quick('stop'), ctx);
   await run(st, { music: idle });
   assert.strictEqual(describe(st), '');
@@ -445,5 +445,28 @@ async function batch2() {
   assert.strictEqual(require('./actions/discord').actions.clean.confirm, true);
   assert.strictEqual(quick('supprime ton dernier message')[0].type, 'msg_delete');
   console.log('own messages: ok');
+
+  // After review: undo is per person and per item; "dernier" counts in the general list; claims in answers stay
+  save('todo', []);
+  const bob = as('prime', 'Lucas');
+  await go([{ type: 'todo_add', text: 'point de Alex' }], alex);
+  await go([{ type: 'todo_add', text: 'point de Lucas' }], bob);
+  await run(resolve([{ type: 'undo' }], bob), io); // Lucas undoes his own add only
+  assert.deepStrictEqual(texts(), ['point de Alex']);
+  const u2 = resolve([{ type: 'undo' }], bob);
+  await run(u2, io);
+  assert.strictEqual(describe(u2), "Il n'y a rien à annuler.");
+  assert.deepStrictEqual(texts(), ['point de Alex']); // Lucas cannot undo Alex's add
+  await go([{ type: 'todo_add', text: 'perso de Lucas', list: 'moi' }], bob);
+  await go([{ type: 'todo_remove', text: 'point de Alex' }], alex);
+  await go([{ type: 'todo_add', text: 'encore Lucas' }], bob);
+  const u3 = resolve([{ type: 'undo' }], alex);
+  await run(u3, io); // Alex's delete is undone, Lucas's later add survives
+  assert.strictEqual(describe(u3), "J'annule.");
+  assert.deepStrictEqual(texts(), ['point de Alex', 'perso de Lucas', 'encore Lucas']);
+  assert.match(await go([{ type: 'todo_remove', text: 'dernier' }], wak), /encore Lucas/); // not Lucas's personal item
+  assert.deepStrictEqual(noteGuard('Les ingrédients sont ajoutés un par un.', resolve([{ type: 'ask', text: 'x' }], wak), 'fr').offer, undefined);
+  assert(confirms('Bobby. Oui.'));
+  console.log('review fixes: ok');
   void intent;
 }

@@ -8,7 +8,6 @@ const { Say, norm, sim } = require('../util');
 const GENERAL = 'general';
 // Old format (plain strings) is read as unsigned items of the general list.
 const items = () => load('todo', []).map((x, i) => (typeof x === 'string' ? { id: i + 1, text: x, list: GENERAL, author: { id: null, name: '?' }, at: null, done: false } : x));
-const keep = () => { const prev = load('todo', []); return () => save('todo', prev); };
 
 const isGeneral = (raw) => !raw || /^(?:general|générale?|generale?|commune?|partag[ée]e|shared|la liste|the list|todo|to-?do(?: list)?)$/i.test(raw.trim());
 const isMine = (raw) => /^(?:moi|me|mine|my|ma liste|my list|perso|personnelle?|personal|la mienne)$/i.test((raw || '').trim());
@@ -38,23 +37,34 @@ function findItem(s, all) {
   const scope = all.filter((it) => (s.list ? it.list === s.list.id : it.list === GENERAL || it.list === s.by?.id || s.by?.role === 'super'));
   const ref = (s.text || '').trim().toLowerCase().replace(/^(?:le |la |l'|the )?(?:point|élément|item|tâche|task|numéro|number|n°)\s*/, '');
   if (/^\d+$/.test(ref)) return (s.list ? scope : scope.filter((it) => it.list === GENERAL))[+ref - 1];
-  if (/^(?:dernier|derni[eè]re|last)(?: point| item)?$/.test(ref)) return scope.at(-1);
-  if (/^(?:premier|premi[eè]re|first)(?: point| item)?$/.test(ref)) return scope[0];
+  // numbers, "dernier" and "premier" without a list name count in the general list, as it is posted
+  const listed = s.list ? scope : scope.filter((it) => it.list === GENERAL);
+  if (/^(?:dernier|derni[eè]re|last)(?: point| item)?$/.test(ref)) return listed.at(-1);
+  if (/^(?:premier|premi[eè]re|first)(?: point| item)?$/.test(ref)) return listed[0];
   const q = norm(ref);
   const score = (t) => (q.length >= 4 && norm(t).includes(q) ? 0.9 : sim(ref, t));
   const best = scope.map((it) => ({ it, s: score(it.text) })).sort((a, b) => b.s - a.s)[0];
   return best && best.s >= 0.6 ? best.it : null;
 }
 
-// Runs fn(all, step) -> item touched (null: not found); saves, undo restores the file.
+// Runs fn(all, step) -> item touched (null: not found) and saves. Undo reverts only that item, so it never
+// erases what someone else added meanwhile.
 const edit = (fn) => (s) => {
-  const undo = keep();
   const all = items();
+  const before = new Map(all.map((x, i) => [x.id, { x: { ...x }, i }]));
   const it = fn(all, s);
   s.item = it;
   if (!it) return null;
   save('todo', all);
-  return undo;
+  const was = before.get(it.id);
+  return () => {
+    const cur = items();
+    const i = cur.findIndex((x) => x.id === it.id);
+    if (!was) { if (i >= 0) cur.splice(i, 1); } // added: remove it
+    else if (i < 0) cur.splice(Math.min(was.i, cur.length), 0, was.x); // deleted: put it back
+    else cur[i] = was.x; // ticked or moved: previous state
+    save('todo', cur);
+  };
 };
 const touch = (fn) => edit((all, s) => {
   const it = findItem(s, all);

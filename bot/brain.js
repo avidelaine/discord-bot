@@ -29,7 +29,7 @@ const journal = (rec) => fs.appendFile(JOURNAL, `${JSON.stringify(rec)}\n`, () =
 
 // A confirmation starts with a yes and has no "no" in it, however long ("oui je confirme Bobby je confirme"):
 // "non, pas ok" or "ok mais attends" must never confirm a disconnect or a shutdown.
-const YES = /^(?:bobby[\s,]*)?(?:oui|ouais|vas-y|confirme|je confirme|ok|okay|d'accord|go|yes|yeah|yep|sure|confirm)\b/i;
+const YES = /^(?:bobby[\s,.!?:;-]*)?(?:oui|ouais|vas-y|confirme|je confirme|ok|okay|d'accord|go|yes|yeah|yep|sure|confirm)\b/i;
 const NO = /\b(?:non|no|pas|nope|don't|annule|cancel|stop|attends|wait)\b/i;
 const confirms = (text) => {
   const t = text.trim().replace(/[.!?…]+$/, '');
@@ -285,8 +285,10 @@ function resolve(actions, ctx) {
 const needsConfirm = (plan) => plan.some((s) => ACTIONS[s.type].confirm) || plan.reduce((n, s) => n + (s.targets?.length || 0), 0) >= 3;
 
 // Highest role the plan needs; undo needs the role of what it undoes.
-let lastUndo = null; // { run, role }
-const needed = (plan) => plan.map((s) => (s.type === 'undo' ? lastUndo?.role || 'prime' : ACTIONS[s.type].role || 'admin'))
+// One undo per person: "annule" only ever undoes your own last action.
+const UNDO = new Map(); // userId -> { run, role }
+const undoOf = (plan) => UNDO.get(plan[0]?.by?.id ?? '');
+const needed = (plan) => plan.map((s) => (s.type === 'undo' ? undoOf(plan)?.role || 'prime' : ACTIONS[s.type].role || 'admin'))
   .reduce((a, b) => (roles.LEVEL[b] > roles.LEVEL[a] ? b : a), 'prime');
 
 // Which role each action needs, for the startup log and the README.
@@ -298,8 +300,10 @@ const CLAIM = /(?:^|[^\p{L}])(?:not[ée]e?s?|retenu|enregistr[ée]e?s?|ajout[ée
 const OFFER = /(?:tu veux|veux-tu|vous voulez|voulez-vous) que je (?:l'|le |la )?(?:ajoute|note|rajoute)|want me to (?:add|note|write)/i;
 const OFFER_LINE = { fr: "Tu veux que je l'ajoute à la liste ?", en: 'Do you want me to add it to the list?' };
 // A reply with no saving step that claims to have noted something becomes the offer; an offer waits for a "oui".
+// Only free text is checked (the LLM's own reply, or an "about" answer): Claude's answers, list readouts or
+// song titles may legitimately contain "ajouté" or "saved".
 function noteGuard(text, plan, lang) {
-  if (plan.some((s) => ACTIONS[s.type]?.saves)) return { text };
+  if (plan.some((s) => s.type !== 'about')) return { text };
   if (OFFER.test(text)) return { text, offer: true };
   if (CLAIM.test(text)) return { text: OFFER_LINE[lang === 'en' ? 'en' : 'fr'], offer: true };
   return { text };
@@ -335,7 +339,7 @@ const LINES = {
 function describe(plan, lang = 'fr') {
   const L = lang === 'en' ? LINES.en : LINES.fr;
   return plan.map((s) => {
-    if (s.type === 'undo') return L.undo(Boolean(lastUndo));
+    if (s.type === 'undo') return L.undo(s.done ?? Boolean(undoOf(plan)));
     return ACTIONS[s.type].say[lang === 'en' ? 'en' : 'fr'](s, s.targets && names(s.targets, lang));
   }).filter(Boolean).join(' ');
 }
@@ -344,14 +348,15 @@ function describe(plan, lang = 'fr') {
 
 async function run(plan, io, lang = 'fr') {
   const undos = [];
+  const who = plan[0]?.by?.id ?? '';
   for (const s of plan) {
-    if (s.type === 'undo') { if (lastUndo) await lastUndo.run(); continue; }
+    if (s.type === 'undo') { const u = UNDO.get(who); s.done = Boolean(u); if (u) await u.run(); continue; }
     const undo = await ACTIONS[s.type].run(s, io, lang);
     if (typeof undo === 'function') undos.push(undo);
   }
   if (undos.length) {
-    lastUndo = { role: needed(plan), run: () => Promise.all(undos.reverse().map((u) => u())).then(() => { lastUndo = null; }) };
-  } else if (plan.some((s) => s.type === 'undo')) lastUndo = null;
+    UNDO.set(who, { role: needed(plan), run: () => Promise.all(undos.reverse().map((u) => u())).then(() => UNDO.delete(who)) });
+  } else if (plan.some((s) => s.type === 'undo')) UNDO.delete(who);
 }
 
 // ---------- Entry point ----------

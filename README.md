@@ -26,7 +26,7 @@ Requirements: Windows, an NVIDIA GPU, Node 22+, Python 3.11, ffmpeg on the PATH.
 
 - `_bin/llama/`: llama.cpp Windows CUDA 12.4 build (`llama-bXXXX-bin-win-cuda-12.4-x64.zip` + `cudart-…zip`, from the llama.cpp GitHub releases).
 - `models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf`: from `unsloth/Qwen3-4B-Instruct-2507-GGUF` on Hugging Face.
-- `models/piper/fr_FR-siwis-medium.onnx`, `models/piper/en_US-lessac-medium.onnx` and their `.onnx.json`: from `rhasspy/piper-voices`.
+- `models/piper/fr_FR-siwis-medium.onnx`, `models/piper/en_US-lessac-medium.onnx` (Bobby's voices), `models/piper/fr_FR-tom-medium.onnx`, `models/piper/en_US-ryan-medium.onnx` (Claude's voices) and their `.onnx.json`: from `rhasspy/piper-voices`.
 - Python: `py -3.11 -m venv voice/.venv`, then `voice/.venv/Scripts/pip install faster-whisper fastapi "uvicorn[standard]" scipy piper-tts openwakeword==0.6.0 nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"`, then `voice/.venv/Scripts/python -c "from openwakeword.utils import download_models; download_models(['hey_jarvis'])"` (fetches openWakeWord's shared feature models).
 - `models/wakeword/bobby.onnx` and `bobby.onnx.data`: the custom "Bobby" wake word model (see below). Without it, every sentence goes through Whisper.
 - PC control: `voice/.venv/Scripts/pip install -r voice/requirements-pc.txt` (Windows media sessions and volume).
@@ -42,14 +42,14 @@ Whisper downloads itself into `models/whisper_models` on first start.
 |---|---|
 | `DISCORD_TOKEN`, `GUILD_ID` | Bot token and server ID |
 | `SUPER_ADMINS` | Discord IDs with every right, including PC control and managing rights by voice. |
-| `ADMINS` | Discord IDs of admins (moderation, Claude questions, to-do list). Super admins are admins too. |
-| `PRIME_ROLE` | Discord role (name or ID) whose members get music and simple questions (default `Team Prime`). |
+| `ADMINS` | Discord IDs of admins (moderation, Bobby's messages, Claude questions). Super admins are admins too. |
+| `PRIME_ROLE` | Discord role (name or ID) whose members get music, the to-do lists and questions about Bobby (default `Team Prime`). |
 | `RECORD_SILENCE_MS` | Silence that ends a sentence (default 600). Lower is faster but cuts you off if you pause. |
 | `CLAUDE_MODEL` | Claude model for those questions (default `haiku`). |
 | `TEXT_CHANNEL` | Text channel (name or ID) where Bobby writes what it says. Empty: the channel where `/join` was typed. |
 | `WAKE_THRESHOLD` | Wake word score needed to wake Whisper (default 0.12). Higher means fewer wasted transcriptions but more missed "Bobby". |
 
-The bot needs the **Connect**, **Speak**, **Mute Members**, **Deafen Members**, **Move Members** and **Send Messages** permissions. No privileged intent is required.
+The bot needs the **Connect**, **Speak**, **Mute Members**, **Deafen Members**, **Move Members**, **Send Messages** and **Read Message History** permissions (the last one to find its own messages to edit or delete). It deliberately does not have **Manage Messages**: it can only delete its own messages. No privileged intent is required.
 
 ## Run
 
@@ -68,28 +68,31 @@ Each action needs a role (printed at startup as `[rights] role needed per action
 
 | Role | Who | Can |
 |---|---|---|
-| super | `SUPER_ADMINS` | everything below, PC control, nicknames, rights by voice |
-| admin | super admins + `ADMINS` | mute, deafen, move, disconnect, messages, Claude questions, to-do list |
-| prime | members with the `PRIME_ROLE` Discord role | music, the time, "what can you do" |
+| super | `SUPER_ADMINS` | everything below, PC control, nicknames, rights by voice, every to-do item |
+| admin | super admins + `ADMINS` | mute, deafen, move, disconnect, messages (and Bobby's own), Claude questions |
+| prime | members with the `PRIME_ROLE` Discord role | music, the time, questions about Bobby and who has which rights, the to-do lists (add to the general list and their own, manage their own items) |
 | others | everyone else | nothing: Bobby says "Je n'ai pas le droit de te répondre" (at most once per 30 s per person) |
 
-The super admin changes rights by voice, stored in `data/permissions.json`: "enlève les permissions de X" (X falls to "others", whatever their Discord role), "redonne les permissions à X", "passe X admin", "retire l'admin à X". "Annule" undoes it.
+The super admin changes rights by voice, stored in `data/permissions.json`: "enlève les permissions de X" (X falls to "others", whatever their Discord role), "redonne les permissions à X", "passe X admin", "retire l'admin à X". "Annule" undoes it. "Quels sont les droits de X ?" answers from the live state. Nobody can make or remove a super admin by voice, the super admin included: that only changes by editing `SUPER_ADMINS` in `.env` by hand. Asking for rights ("donne-moi tous les droits") never grants any; asked to note it, Bobby adds it to the list, signed by whoever asked.
 
 ## What Bobby understands
 
 - **Moderation:** mute and unmute ("dé-mute" too), deafen and undeafen, move, drag someone to your channel ("drague X"), disconnect, post a message in a text channel. "Moi", "ici", "tout le monde", "sauf X" and several requests in one sentence all work.
-- **Music (Prime):** "joue Bohemian Rhapsody" (YouTube), "joue du hardstyle" / "mets une radio jazz" (web radios from Radio Browser), pause, resume, skip, stop, replay, "ajoute X à la file", the queue, volume up/down/to N, "c'est quoi ce son". Music ducks while Bobby speaks.
-- **PC (super admin):** media on the PC ("mets pause sur le PC", "musique suivante sur Spotify", through Windows media sessions, no simulated keys), Windows volume ("monte le son du PC"), launch games (Steam, Valorant through the Riot Client, Epic) and apps from the Start menu ("ouvre Claude"), GPU info, lock / sleep / shut down after a spoken "oui". Only launching an app takes the focus.
-- **Nicknames (super admin):** "appelle Zyklon le Grec", then "vire le Grec"; "renomme le surnom X en Y", "supprime le surnom X", "qui a quel surnom ?" (list posted in the text channel), and the `/surnoms` slash command. Stored in `data/aliases.json`.
-- **To-do list**, "quelle heure est-il", "qu'est-ce que tu sais faire", "tu peux partir".
+- **Bobby's own messages (admin):** "modifie ton dernier message en …", "supprime ton dernier message", "nettoie dev-bot-test" (deletes every message Bobby wrote there, after a "oui"). Never other people's messages.
+- **Music (Prime):** "joue Bohemian Rhapsody" (YouTube), "joue du hardstyle" / "mets une radio jazz" (web radios from Radio Browser), pause, resume, skip, stop, replay, "ajoute X à la file", the queue, volume up/down/to N, "c'est quoi ce son". Music ducks while Bobby speaks, crossfades between tracks (2 s) and fades out on skip and stop (1 s). "Stop" alone stops the music if any and otherwise does nothing; Bobby only leaves on "pars", "quitte le salon", "tu peux partir".
+- **PC (super admin):** media on the PC ("mets pause sur le PC", "musique suivante sur Spotify", through Windows media sessions, no simulated keys), Windows volume ("monte le son du PC"), launch games (Steam, Valorant through the Riot Client, Epic) and apps from the Start menu ("ouvre Claude"), close them ("ferme Apex Legends": the open window whose title or process matches), GPU info, lock / sleep / shut down after a spoken "oui". Only launching an app takes the focus.
+- **Nicknames (super admin):** "appelle Zyklon le Grec", then "vire le Grec"; "renomme le surnom X en Y", "supprime le surnom X", "qui a quel surnom ?" (list posted in the text channel, only when "surnom" is said), and the `/surnoms` slash command. Stored in `data/aliases.json`.
+- **To-do lists (Prime):** one shared general list and one personal list per person, in `data/todo.json`; each item keeps its author, date, list and done flag. "Retiens …", "note …", "pour la prochaine fois …", "il faudrait que tu …", "rajoute dans la liste …" add the full sentence, untruncated. "Montre ce que tu as retenu" / "la liste d'Ilias" / "ma liste" post the full list (author and date) in the text channel and say the count and the first 3 items; "le point 2 est fait", "supprime le dernier point", "mets le dernier point dans ma liste". Bobby never says it noted something unless an item was really saved: otherwise it asks "Tu veux que je l'ajoute à la liste ?" and a "oui" adds it.
+- **About Bobby (Prime):** questions about Bobby, its voice, wake word, who has which rights, the people on the server or the conversation are answered locally from facts rebuilt at each question (capabilities declared by the action modules, roles, `.env`, `data/permissions.json`, nicknames, lists), never sent to Claude. "Quelle heure est-il", "qu'est-ce que tu sais faire".
+- **Short memory:** the last 5 requests of each person (10 minutes) go to the LLM, so "réessaie", "pourquoi il était perdu ?" or "le dernier point de la liste" make sense.
 - **Undo and cancel:** "annule" undoes the last action (moderation, nicknames, to-do list, rights); a sentence that ends in "annule" or "laisse tomber" is dropped entirely.
-- **Claude:** knowledge questions ("c'est quoi la capitale de l'Australie ?") are forwarded to Claude Haiku through the Claude Code CLI, for admins. Claude runs in an empty folder with every tool disabled except web search, no MCP servers and no user settings. Bobby checks `claude auth status` at startup; while Claude Code is not logged in, it answers "Claude n'est pas encore branché" at once.
+- **Claude:** genuine world-knowledge questions ("c'est quoi la capitale de l'Australie ?": culture, news, science, maths, explanations) are forwarded to Claude Haiku through the Claude Code CLI, for admins, and the answer is spoken with a different voice (Piper tom / ryan) and posted as "🤖 Claude". Everything else stays local: a question about Bobby, the server, the people present or the conversation, a note request, feedback or an opinion about Bobby never goes to Claude. Claude runs in an empty folder with every tool disabled except web search, no MCP servers and no user settings. Bobby checks `claude auth status` at startup; while Claude Code is not logged in, it answers "Claude n'est pas encore branché" at once.
 
-Polite wrappers ("est-ce que tu peux …", "s'il te plaît", "can you … please") are ignored by the LLM-free shortcuts. Disconnecting someone, acting on three people or more, and lock / sleep / shutdown wait for a "oui". If a name is ambiguous, Bobby asks which one you meant. If the LLM is down, Bobby says "Mon cerveau ne répond pas".
+Polite wrappers ("est-ce que tu peux …", "s'il te plaît", "can you … please") are ignored by the LLM-free shortcuts. Disconnecting someone, acting on three people or more, cleaning a channel, and lock / sleep / shutdown wait for a "oui": any sentence that starts with a yes and contains neither "non" nor "pas" ("oui je confirme Bobby je confirme"), with rights checked again at that moment. If a name is ambiguous, Bobby asks which one you meant. If the LLM is down, Bobby says "Mon cerveau ne répond pas".
 
 ## Code layout
 
-`bot/brain.js` is the core (shortcuts, LLM, names, rights, confirm, undo). Each feature is a module in `bot/actions/` that brings its action types, prompt lines, examples, shortcuts, required role, `run` and spoken reply (contract at the top of `brain.js`): adding a feature means adding a file. `bot/music/` is the player (PCM mixer with ducking, radios, yt-dlp). `voice/pc.py` serves Windows media and volume to the bot.
+`bot/brain.js` is the core (shortcuts, LLM, guards on the LLM's choice, names, rights, confirm, undo, per-person history, the "never a fake noted" rule). Each feature is a module in `bot/actions/` that brings its action types, prompt lines, examples, shortcuts, required role, `run` and spoken reply (contract at the top of `brain.js`): adding a feature means adding a file. `bot/music/` is the player (PCM mixer with ducking, radios, yt-dlp). `voice/pc.py` serves Windows media and volume to the bot.
 
 ## The wake word model
 
@@ -107,6 +110,6 @@ The model is kept out of git because it was trained partly on a personal voice.
 ## Tests
 
 - `node bot/wake.test.js`: detection of "Bobby" in the transcript, including the spellings Whisper produces ("Bobbie", "Dibobby"...).
-- `node bot/unit.test.js`: shortcuts, names, rights, cancel, undo, nicknames, music and PC commands (dry run: nothing is launched, locked or shut down), without the LLM.
-- `node bot/music/music.test.js`: the mixer's ducking, and a radio and a YouTube track streamed to a sink without Discord (needs the network).
-- `node bot/intent.test.js` (llama-server running): comprehension score on French and English sentences, and LLM latency. Add every sentence Bobby gets wrong in real use.
+- `node bot/unit.test.js`: shortcuts, names, rights, cancel, undo, nicknames, music and PC commands (dry run: nothing is launched, closed, locked or shut down), to-do lists and their rights, note requests, the "never a fake noted" rule, long confirmations, guards on the LLM's choice, the untouchable super admin, rights answers that follow "passe X admin" and blacklists, history, without the LLM.
+- `node bot/music/music.test.js`: the mixer's ducking and fades, and a radio and a YouTube track streamed to a sink without Discord (needs the network).
+- `node bot/intent.test.js` (llama-server running): comprehension score on French and English sentences, a routing set (sentences that must stay local, including every wrong Claude routing seen in the journal, and some that must go to Claude), sentences with history, and LLM latency. Add every sentence Bobby gets wrong in real use.

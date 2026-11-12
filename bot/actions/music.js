@@ -83,7 +83,8 @@ module.exports = {
     },
     music_pause: simple('Pause.', 'Paused.', (p) => p.pause()),
     music_resume: simple('Je reprends.', 'Resuming.', (p) => p.resume()),
-    music_stop: { role: 'prime', run: go((p) => (p.nowPlaying() ? p.stop() : { error: 'nothing is playing' })), say: say(() => 'Musique arrêtée.', () => 'Stopped.') },
+    music_stop: { role: 'prime', // always stop: a track still being looked up (current not set yet) must not start after "stop"
+    run: go((p) => { const r = p.stop(); return r.stopped || r.cleared ? r : { error: 'nothing is playing' }; }), say: say(() => 'Musique arrêtée.', () => 'Stopped.') },
     music_skip: {
       role: 'prime', run: go((p) => p.skip()),
       say: say((r) => (r.nowPlaying ? `Suivant : ${r.nowPlaying.title}.` : 'Plus rien dans la file.'), (r) => (r.nowPlaying ? `Next: ${r.nowPlaying.title}.` : 'Nothing left in the queue.')),

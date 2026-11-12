@@ -22,6 +22,9 @@ const {
 const { OpusEncoder } = require('@discordjs/opus');
 const brain = require('./brain');
 const claude = require('./actions/ask');
+const { Mixer } = require('./music/mixer');
+const { Player } = require('./music/player');
+const { decode } = require('./music/sources');
 
 const VOICE_URL = process.env.VOICE_URL || 'http://127.0.0.1:3000';
 // Silence that ends a sentence. Shorter is snappier, but cuts you off if you pause mid-sentence.
@@ -31,6 +34,9 @@ const TEXT_CHANNEL = process.env.TEXT_CHANNEL || '';
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
 const player = createAudioPlayer(); // ponytail: one player, Bobby lives on a single server
+// Everything audible goes through the mixer: music underneath, beep/TTS on top (music ducks meanwhile).
+const mixer = new Mixer((out) => player.play(createAudioResource(out, { inputType: StreamType.Raw })));
+const music = new Player(mixer);
 
 // 120 ms beep at 880 Hz, 48 kHz stereo PCM, generated once.
 const BEEP = (() => {
@@ -42,16 +48,15 @@ const BEEP = (() => {
   return b;
 })();
 
-const play = (stream, inputType) => player.play(createAudioResource(stream, { inputType }));
-
 function makeIo(guild, textChannel) {
   return {
-    beep: () => play(Readable.from([BEEP]), StreamType.Raw),
+    music,
+    beep: () => { mixer.overlay(new PassThrough().end(BEEP)); },
     async say(text, lang = 'fr') {
       console.log(`[bobby] ${text}`);
       textChannel.send(`🗣️ ${text}`).catch(() => {});
       const res = await fetch(`${VOICE_URL}/tts?lang=${lang}&text=${encodeURIComponent(text)}`);
-      play(Readable.fromWeb(res.body), StreamType.Arbitrary);
+      mixer.overlay(decode(Readable.fromWeb(res.body)));
     },
     leave: () => getVoiceConnection(guild.id)?.destroy(),
   };

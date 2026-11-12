@@ -12,6 +12,8 @@ const brain = require('./brain');
 const VOICE_URL = process.env.VOICE_URL || 'http://127.0.0.1:3000';
 // Silence that ends a sentence. Shorter is snappier, but cuts you off if you pause mid-sentence.
 const SILENCE_MS = parseInt(process.env.RECORD_SILENCE_MS || '600');
+// Text channel (name or ID) where Bobby writes what it says. Empty: the channel where /join was typed.
+const TEXT_CHANNEL = process.env.TEXT_CHANNEL || '';
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
 const player = createAudioPlayer(); // ponytail: one player, Bobby lives on a single server
@@ -98,7 +100,8 @@ client.on(Events.InteractionCreate, async (it) => {
     connection.destroy();
     return it.followUp('Connexion vocale impossible.');
   }
-  listen(connection, channel.guild, makeIo(channel.guild, it.channel));
+  const text = channel.guild.channels.cache.find((c) => c.isTextBased() && (c.id === TEXT_CHANNEL || c.name === TEXT_CHANNEL)) || it.channel;
+  listen(connection, channel.guild, makeIo(channel.guild, text));
 });
 
 client.login(process.env.DISCORD_TOKEN);

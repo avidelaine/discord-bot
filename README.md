@@ -40,6 +40,7 @@ Whisper downloads itself into `models/whisper_models` on first start.
 | `DISCORD_TOKEN`, `GUILD_ID` | Bot token and server ID |
 | `ALLOWED_USERS` | Discord IDs allowed to command Bobby, comma-separated. Empty: server owner only. |
 | `RECORD_SILENCE_MS` | Silence that ends a sentence (default 600). Lower is faster but cuts you off if you pause. |
+| `TEXT_CHANNEL` | Text channel (name or ID) where Bobby writes what it says. Empty: the channel where `/join` was typed. |
 | `WAKE_THRESHOLD` | Wake word score needed to wake Whisper (default 0.2). Higher means fewer wasted transcriptions but more missed "Bobby". |
 
 The bot needs the **Connect**, **Speak**, **Mute Members**, **Deafen Members**, **Move Members** and **Send Messages** permissions. No privileged intent is required.

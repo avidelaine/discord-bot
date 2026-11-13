@@ -451,6 +451,15 @@ async function batch4() {
   assert.deepStrictEqual([conversation().at(-1).confirm, conversation().at(-1).did.startsWith('ping')], [true, true]);
   io = await go(SUPER, 'Bobby, refais', true);
   assert.deepStrictEqual(io.said, ["Je ne peux pas passer d'appel, mais je peux te mentionner dans le salon texte. Tu veux ?"]);
+  // 2026-11-13: "Bobby ?" while an offer waits is a new order, never "D'accord, j'annule."
+  await go(SUPER, "Bobby, est-ce que tu peux m'appeler sur Discord ?", true);
+  io = await go(SUPER, 'Bobby ?', true);
+  assert.deepStrictEqual(io.said, []); // waits for the command
+  io = await go(SUPER, 'quelle heure est-il ?');
+  assert.match(io.said[0], /^Nous sommes/);
+  await go(SUPER, "Bobby, est-ce que tu peux m'appeler sur Discord ?", true);
+  io = await go(SUPER, 'Non.');
+  assert.deepStrictEqual(io.said, ["D'accord, j'annule."]); // a plain "non" still cancels
   console.log('batch 4, coworker tone through hear: ok');
 }
 

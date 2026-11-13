@@ -53,9 +53,10 @@ async function facts(s, io) {
 async function aboutMe(s, io, lang) {
   const system = `${await facts(s, io)}
 
-Réponds à la question ou à la remarque sur toi en une ou deux phrases courtes, à dire à voix haute, en ${lang === 'en' ? 'anglais' : 'français'}, à partir de ces faits uniquement. Si on te fait une remarque, une critique ou une suggestion, remercie et termine par « Tu veux que je l'ajoute à la liste ? » (en anglais : « Do you want me to add it to the list? »). Ne dis jamais que tu as noté ou retenu quelque chose. Réponds en JSON {"say": "..."}.`;
+Réponds à la question ou à la remarque sur toi en une ou deux phrases courtes, à dire à voix haute, en ${lang === 'en' ? 'anglais' : 'français'}, à partir de ces faits uniquement. Si (et seulement si) on te fait une critique ou une suggestion d'amélioration, pas une question, remercie et termine par « Tu veux que je l'ajoute à la liste ? » (en anglais : « Do you want me to add it to the list? »). Ne dis jamais que tu as noté ou retenu quelque chose. Réponds en JSON {"say": "..."}.`;
   const out = await llm([{ role: 'system', content: system }, { role: 'user', content: s.text }], { type: 'object', properties: { say: { type: 'string' } }, required: ['say'] }, 200);
-  return out.say;
+  // ponytail: a question never gets the "add it to the list?" offer, whatever the model thought (2026-11-13).
+  return /\?\s*$/.test(s.text) ? out.say.replace(/\s*(?:Tu veux que je l'ajoute à la liste|Do you want me to add it to the list)\s*\?\s*$/i, '') : out.say;
 }
 
 const now = (lang) => new Date().toLocaleString(lang === 'en' ? 'en-GB' : 'fr-FR', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });

@@ -603,6 +603,8 @@ async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttM
   };
   const t = { stt: sttMs, ack: ackMs };
   try {
+    // "Bobby, …" while a yes is awaited: a new order, not a "no". The pending plan is dropped silently.
+    if (p?.plan && wake && !confirms(text) && !NO.test(text)) { console.log(`[confirm] dropped "${planText(p.plan)}": new order`); p = null; }
     if (p?.plan) {
       rec.plan = planText(p.plan);
       rec.query = text;

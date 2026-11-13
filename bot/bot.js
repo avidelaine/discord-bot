@@ -137,7 +137,7 @@ function checkAlone() {
 // Leaves voice now: music, Bobby's voice and the alone timers stop with it.
 function disconnect(guildId) {
   music.stop();
-  speech = null; ring = null; mixer.stopOverlay();
+  speech = null; ring?.stream.destroy(); ring = null; mixer.stopOverlay();
   clearTimeout(leaveTimer); leaveTimer = null; autoPaused = null;
   getVoiceConnection(guildId)?.destroy();
 }
@@ -145,7 +145,10 @@ function disconnect(guildId) {
 const memberName = (guild) => async (id) => (guild.members.cache.get(id) ?? (await guild.members.fetch(id).catch(() => null)))?.displayName ?? id;
 
 let speech = null, speechGen = 0; // Bobby's voice playing now: { id (whom it answers), gen }
-let ring = null; // near-silent overlay that lights Bobby's speaking ring while someone is being heard
+let ring = null; // { stream, owner }: near-silent overlay that lights Bobby's speaking ring while someone is being heard
+let clip = Promise.resolve(); // the short clip (ack, beep, low sound) playing now: a reply waits for its end
+// Wake score needed for the ack at the gate (below it, the brain acks once the transcript holds "Bobby").
+const ACK_SCORE = parseFloat(process.env.ACK_SCORE || "0.3");
 
 function makeIo(guild, textChannel) {
   const io = {
@@ -155,25 +158,35 @@ function makeIo(guild, textChannel) {
     follow,
     // content: text, { embeds } or a list of those, split to Discord's limits. ch: another text channel ("écris-le dans général").
     post: async (content, ch = textChannel) => { for (const m of messages(content)) await ch.send(m); return ch.name; },
-    beep: () => { io.ringStop(); mixer.overlay(new PassThrough().end(BEEP)); },
-    nope: () => { io.ringStop(); mixer.overlay(new PassThrough().end(NOPE)); },
+    // Short clips (beep, nope, ack): a reply that follows waits for the clip's end instead of cutting it.
+    beep: () => io.clip(BEEP),
+    nope: () => io.clip(NOPE),
+    clip(pcm) { io.ringStop(); clip = mixer.overlay(new PassThrough().end(pcm)); },
     // Spoken "got it", before Whisper. False while the clips are not synthesized yet (caller falls back to the beep).
     ack() {
       const pool = ACKS.filter((t) => t !== lastAck && ackPcm.has(t));
       if (!pool.length) return false;
       lastAck = pool[Math.floor(Math.random() * pool.length)];
-      io.ringStop();
-      mixer.overlay(new PassThrough().end(ackPcm.get(lastAck)));
+      io.clip(ackPcm.get(lastAck));
       return true;
     },
     // Speaking ring: Discord only shows it while audio flows, so send +-2 noise (not zeros) until ringStop.
-    ring(on) {
-      if (!on) return io.ringStop();
+    // ponytail: one ring for everyone (one overlay channel); a second speaker heard meanwhile shares the first one's.
+    ring(on, owner) {
+      if (!on) return io.ringStop(owner);
       if (ring || speech || mixer.over) return;
-      const me = (ring = new Readable({ read() { const b = Buffer.alloc(3840); for (let i = 0; i < 3840; i += 2) b.writeInt16LE(Math.floor(Math.random() * 5) - 2, i); this.push(b); } }));
-      mixer.overlay(me).then(() => { if (ring === me) ring = null; });
+      const me = new Readable({ read() { const b = Buffer.alloc(3840); for (let i = 0; i < 3840; i += 2) b.writeInt16LE(Math.floor(Math.random() * 5) - 2, i); this.push(b); } });
+      ring = { stream: me, owner };
+      mixer.overlay(me).then(() => { if (ring?.stream === me) ring = null; });
     },
-    ringStop() { const r = ring; ring = null; if (r) { mixer.stopOverlay(); r.destroy(); } },
+    // owner given: only that speaker's ring stops (another speaker's end of sentence leaves it on)
+    ringStop(owner) {
+      const r = ring;
+      if (!r || (owner && r.owner !== owner)) return;
+      ring = null;
+      if (mixer.over) mixer.stopOverlay();
+      r.stream.destroy();
+    },
     // voice 'claude': Claude's answers, spoken with the second pair of Piper voices.
     // forId: the person this answers, who may interrupt it with a plain "stop" (see brain.js).
     async say(text, lang = 'fr', voice = 'bobby', forId = null) {
@@ -183,16 +196,22 @@ function makeIo(guild, textChannel) {
       try {
         const res = await fetch(`${VOICE_URL}/tts?lang=${lang}&voice=${voice}&text=${encodeURIComponent(text)}`);
         if (speech !== me) return res.body?.cancel(); // interrupted, or another reply started, while it was synthesized
-        const pcm = new PassThrough(), voice = decode(Readable.fromWeb(res.body));
-        voice.pipe(pcm, { end: false }).on('error', () => {});
-        voice.once('end', () => pcm.end(TAIL));
+        await clip; // the ack or the low sound just played ends first
+        if (speech !== me) return res.body?.cancel();
+        const pcm = new PassThrough(), tts = decode(Readable.fromWeb(res.body));
+        tts.pipe(pcm, { end: false });
+        // the silence tail also ends a broken stream, so the overlay always resolves and `speech` is released
+        let tail = false;
+        const end = () => { if (!tail) { tail = true; pcm.end(TAIL); } };
+        tts.once('end', end).once('close', end).on('error', end);
+        pcm.once('close', () => tts.destroy()); // interrupted: stop decoding too
         io.ringStop();
         await mixer.overlay(pcm);
       } catch (e) { console.error(`[tts] ${e.cause?.code || e.message}`); }
       if (speech === me) speech = null;
     },
     speaking: () => speech, // { id } while Bobby's voice plays, else null
-    hush: () => { speech = null; ring = null; mixer.stopOverlay(); },
+    hush: () => { speech = null; io.ringStop(); mixer.stopOverlay(); },
     // Music stops now; the connection goes after the farewell has been spoken.
     // ponytail: fixed 3 s delay, enough for "À plus."; wait for the overlay's end if longer goodbyes appear.
     leave: () => { music.stop(); setTimeout(() => disconnect(guild.id), 3000); },
@@ -236,13 +255,14 @@ function listen(connection, guild, io) {
       const result = await new Promise((resolve, reject) => {
         ws.addEventListener('message', (ev) => {
           const m = JSON.parse(ev.data);
-          if (m.type === 'wake') { io.ring(true); return; }
+          if (m.type === 'wake') { io.ring(true, userId); return; }
           if (m.type === 'gate') {
             gate = m;
-            io.ringStop();
+            io.ringStop(userId);
             if (m.wake === false) return resolve(null);
-            // no ack over a reply Bobby is giving, nor for someone without rights (the brain answers them)
-            if (m.wake && !io.speaking() && roles.roleOf(member) !== 'other') { acked = io.ack(); if (!acked) io.beep(); ackMs = Math.round(performance.now() - tEnd); }
+            // No ack over a reply Bobby is giving, nor for someone without rights (the brain answers them), nor on a
+            // weak score: the rare false triggers scored 0.16 and real "Bobby" are mostly above 0.35; the brain acks those.
+            if (m.wake && m.score >= ACK_SCORE && !io.speaking() && roles.roleOf(member) !== 'other') { acked = io.ack(); if (!acked) io.beep(); ackMs = Math.round(performance.now() - tEnd); }
             return;
           }
           if (m.type === 'text') resolve(m);
@@ -259,7 +279,7 @@ function listen(connection, guild, io) {
         console.log(`
 [heard] ${member.displayName}: "${text}" (${lang}, whisper ${ms} ms${gate?.wake ? ', wake word heard' : ''}${ackMs != null ? `, ack ${ackMs} ms` : ''})`);
         await brain.hear({ text, lang, score: gate?.score ?? null, member, guild, tEnd, sttMs: ms, io, acked, ackMs });
-      }
+      } else if (acked) io.nope(); // acked, then nothing came back (empty transcript, service restarted): say so
     } catch (e) {
       console.error(`[voice] ${e.cause?.code === 'ECONNREFUSED' ? `voice service not reachable at ${VOICE_URL} (is it running?)` : e.message}`);
     } finally {

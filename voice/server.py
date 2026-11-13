@@ -23,7 +23,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from faster_whisper import WhisperModel
 from piper import PiperVoice
-from scipy.signal import resample_poly
+from wakescan import WakeScan, to_16k  # live wake word scoring (testable without Whisper)
 
 try:  # PC control is optional: without its packages (requirements-pc.txt), STT and TTS still work
     import pc
@@ -113,32 +113,6 @@ if pc:
     app.include_router(pc.router)
 
 
-def to_16k(raw: bytes) -> np.ndarray:
-    """s16le PCM at 48 kHz stereo (decoded Discord audio) -> float32 at 16 kHz mono."""
-    pcm = np.frombuffer(raw[: len(raw) // 4 * 4], np.int16).reshape(-1, 2).mean(axis=1) / 32768
-    return resample_poly(pcm, 1, 3).astype(np.float32)
-
-
-class WakeScan:
-    """bobby_score, fed while the sentence is still being spoken."""
-
-    PAD = np.zeros(8000, np.float32)
-
-    def __init__(self, model):
-        self.model, self.fed, self.score = model, 0, 0.0
-        model.reset()
-
-    def feed(self, raw: bytes, final: bool = False) -> float:
-        # ponytail: re-converts the whole buffer on every chunk (sentences are short, so the quadratic cost is fine)
-        audio = to_16k(raw) if len(raw) >= 4 else np.zeros(0, np.float32)
-        parts = [self.PAD, audio] + ([self.PAD] if final else [])
-        pcm = (np.clip(np.concatenate(parts), -1, 1) * 32767).astype(np.int16)
-        while self.fed + 1280 <= len(pcm):
-            self.score = max(self.score, float(max(self.model.predict(pcm[self.fed : self.fed + 1280]).values())))
-            self.fed += 1280
-        return self.score
-
-
 def run_whisper(audio: np.ndarray, hotwords: str | None):
     opts = dict(
         beam_size=1,  # greedy search: faster, near-identical quality on short sentences
@@ -198,7 +172,7 @@ async def listen(ws: WebSocket, force: str = "0", hotwords: str = ""):
                 return
             if msg.get("bytes"):
                 raw += msg["bytes"]
-                if scan and not woke and scan.feed(bytes(raw)) >= WAKE_THRESHOLD:
+                if scan and not woke and scan.feed(raw) >= WAKE_THRESHOLD:
                     woke = True  # the green ring can light up while the person is still talking
                     await ws.send_json({"type": "wake", "score": round(scan.score, 3)})
             elif msg.get("text") == "end":
@@ -208,7 +182,7 @@ async def listen(ws: WebSocket, force: str = "0", hotwords: str = ""):
         seconds = round(len(audio) / 16000, 1)
         score = None
         if scan:
-            score = round(scan.feed(bytes(raw), final=True), 3)
+            score = round(scan.feed(raw, final=True), 3)
         ms = round((time.perf_counter() - t) * 1000)
         passed = None if score is None else score >= WAKE_THRESHOLD
         await ws.send_json({"type": "gate", "wake": passed, "score": score, "seconds": seconds, "ms": ms})

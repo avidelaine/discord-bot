@@ -69,12 +69,14 @@ const NOPE = (() => {
 
 // Spoken acks, synthesized once by the voice service (retried while it was not up yet).
 const ACKS = ["D'accord.", 'Ça marche.', "Je m'en occupe.", "C'est parti.", 'Entendu.'];
+const YES = 'Oui ?'; // "Bobby ?" alone: Bobby answers, then listens to the next sentence
+const CLIPS = [...ACKS, YES];
 const ackPcm = new Map();
 let lastAck = null, ackLoading = false;
 async function loadAcks() {
-  if (ackLoading || ackPcm.size === ACKS.length) return;
+  if (ackLoading || ackPcm.size === CLIPS.length) return;
   ackLoading = true;
-  for (const t of ACKS) {
+  for (const t of CLIPS) {
     if (ackPcm.has(t)) continue;
     try {
       const res = await fetch(`${VOICE_URL}/tts?lang=fr&voice=bobby&text=${encodeURIComponent(t)}`);
@@ -85,7 +87,7 @@ async function loadAcks() {
     } catch { break; }
   }
   ackLoading = false;
-  if (ackPcm.size < ACKS.length) setTimeout(loadAcks, 10_000);
+  if (ackPcm.size < CLIPS.length) setTimeout(loadAcks, 10_000);
 }
 
 // 0.4 s of silence after a spoken reply: Discord cuts the end of a stream, this keeps it off the last syllable.
@@ -147,8 +149,6 @@ const memberName = (guild) => async (id) => (guild.members.cache.get(id) ?? (awa
 let speech = null, speechGen = 0; // Bobby's voice playing now: { id (whom it answers), gen }
 let ring = null; // { stream, owner }: near-silent overlay that lights Bobby's speaking ring while someone is being heard
 let clip = Promise.resolve(); // the short clip (ack, beep, low sound) playing now: a reply waits for its end
-// Wake score needed for the ack at the gate (below it, the brain acks once the transcript holds "Bobby").
-const ACK_SCORE = parseFloat(process.env.ACK_SCORE || "0.3");
 
 function makeIo(guild, textChannel) {
   const io = {
@@ -162,7 +162,9 @@ function makeIo(guild, textChannel) {
     beep: () => io.clip(BEEP),
     nope: () => io.clip(NOPE),
     clip(pcm) { io.ringStop(); clip = mixer.overlay(new PassThrough().end(pcm)); },
-    // Spoken "got it", before Whisper. False while the clips are not synthesized yet (caller falls back to the beep).
+    // "Oui ?" when called alone. False while the clip is not synthesized yet (caller says it instead).
+    yes: () => ackPcm.has(YES) && (io.clip(ackPcm.get(YES)), true),
+    // Spoken "got it" once the transcript is an order. False while the clips are not synthesized yet (caller falls back to the beep).
     ack() {
       const pool = ACKS.filter((t) => t !== lastAck && ackPcm.has(t));
       if (!pool.length) return false;
@@ -251,7 +253,7 @@ function listen(connection, guild, io) {
       ws.addEventListener('open', flush);
       pcm.on('data', (b) => { queue.push(b); flush(); });
       pcm.on('end', () => { queue.push('end'); flush(); });
-      let gate = null, acked = false, ackMs = null;
+      let gate = null;
       const result = await new Promise((resolve, reject) => {
         ws.addEventListener('message', (ev) => {
           const m = JSON.parse(ev.data);
@@ -259,11 +261,9 @@ function listen(connection, guild, io) {
           if (m.type === 'gate') {
             gate = m;
             io.ringStop(userId);
-            if (m.wake === false) return resolve(null);
-            // No ack over a reply Bobby is giving, nor for someone without rights (the brain answers them), nor on a
-            // weak score: the rare false triggers scored 0.16 and real "Bobby" are mostly above 0.35; the brain acks those.
-            if (m.wake && m.score >= ACK_SCORE && !io.speaking() && roles.roleOf(member) !== 'other') { acked = io.ack(); if (!acked) io.beep(); ackMs = Math.round(performance.now() - tEnd); }
-            return;
+            // No ack here: before Whisper, Bobby cannot tell "Bobby ?" (-> "Oui ?") from an order (-> "Ça marche"),
+            // and Whisper answers ~0.1 s after this point anyway (2026-11-13). The brain acks once it has the text.
+            return m.wake === false ? resolve(null) : undefined;
           }
           if (m.type === 'text') resolve(m);
         });
@@ -277,9 +277,9 @@ function listen(connection, guild, io) {
       } else if (result?.text) {
         const { text, lang, ms } = result;
         console.log(`
-[heard] ${member.displayName}: "${text}" (${lang}, whisper ${ms} ms${gate?.wake ? ', wake word heard' : ''}${ackMs != null ? `, ack ${ackMs} ms` : ''})`);
-        await brain.hear({ text, lang, score: gate?.score ?? null, member, guild, tEnd, sttMs: ms, io, acked, ackMs });
-      } else if (acked) io.nope(); // acked, then nothing came back (empty transcript, service restarted): say so
+[heard] ${member.displayName}: "${text}" (${lang}, whisper ${ms} ms${gate?.wake ? ', wake word heard' : ''})`);
+        await brain.hear({ text, lang, score: gate?.score ?? null, member, guild, tEnd, sttMs: ms, io });
+      }
     } catch (e) {
       console.error(`[voice] ${e.cause?.code === 'ECONNREFUSED' ? `voice service not reachable at ${VOICE_URL} (is it running?)` : e.message}`);
     } finally {

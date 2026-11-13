@@ -428,6 +428,7 @@ const LINES = {
     undo: (done) => (done ? "J'annule." : "Il n'y a rien à annuler."),
     confirm: 'Tu confirmes ?',
     cancelled: "D'accord, j'annule.",
+    yes: 'Oui ?',
     notUnderstood: "Je n'ai pas compris.",
     noRights: "Je n'ai pas les droits Discord pour ça.",
     failed: "Ça n'a pas marché.",
@@ -443,6 +444,7 @@ const LINES = {
     undo: (done) => (done ? 'Undone.' : 'Nothing to undo.'),
     confirm: 'Confirm?',
     cancelled: 'Okay, cancelled.',
+    yes: 'Yes?',
     notUnderstood: "Sorry, I didn't get that.",
     noRights: "I don't have the Discord permissions for that.",
     failed: "That didn't work.",
@@ -625,10 +627,11 @@ async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttM
     rec.query = query;
     console.log(`[query] "${query}" (${lang})`);
     if (query.replace(/[^\p{L}]/gu, '').length < 2) {
-      if (!acked) io.beep();
-      pending.set(member.id, { until: Date.now() + 6000 });
+      // "Bobby ?": like a coworker, "Oui ?", then the next sentence is the order (no "Bobby" needed).
+      if (!io.yes?.()) say(L.yes);
+      pending.set(member.id, { until: Date.now() + 8000 });
       rec.outcome = 'waiting';
-      return console.log('[waiting] "Bobby" alone: next sentence is the command (6 s)');
+      return console.log('[waiting] "Bobby" alone: next sentence is the command (8 s)');
     }
     const ctx = { ...context(member, guild), role, history };
     // "dis-moi par écrit…": the request without its writing words; the answer is posted, Bobby only says where.

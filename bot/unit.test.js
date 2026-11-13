@@ -454,7 +454,7 @@ async function batch4() {
   // 2026-11-13: "Bobby ?" while an offer waits is a new order, never "D'accord, j'annule."
   await go(SUPER, "Bobby, est-ce que tu peux m'appeler sur Discord ?", true);
   io = await go(SUPER, 'Bobby ?', true);
-  assert.deepStrictEqual(io.said, []); // waits for the command
+  assert.deepStrictEqual(io.said, ['Oui ?']); // answers like a coworker, then waits for the command
   io = await go(SUPER, 'quelle heure est-il ?');
   assert.match(io.said[0], /^Nous sommes/);
   await go(SUPER, "Bobby, est-ce que tu peux m'appeler sur Discord ?", true);

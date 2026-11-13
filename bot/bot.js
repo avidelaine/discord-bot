@@ -243,7 +243,8 @@ function listen(connection, guild, io) {
       const member = guild.members.cache.get(userId) ?? (await guild.members.fetch(userId));
       if (member.user.bot) return opus.destroy();
       // waiting for a "yes" or a command, or Bobby is answering this person (who may say "stop"): skip the wake word gate
-      const force = brain.expecting(userId) || io.speaking()?.id === userId ? '1' : '0';
+      const expected = brain.expecting(userId); // judged when the sentence starts: a long order must not outlive the window
+      const force = expected || io.speaking()?.id === userId ? '1' : '0';
       const hotwords = encodeURIComponent(brain.hotwords(brain.context(member, guild)));
       // The sentence streams to the voice service while it is spoken: the wake word is heard mid-sentence.
       ws = new WebSocket(`${VOICE_URL.replace(/^http/, 'ws')}/listen?force=${force}&hotwords=${hotwords}`);
@@ -278,7 +279,7 @@ function listen(connection, guild, io) {
         const { text, lang, ms } = result;
         console.log(`
 [heard] ${member.displayName}: "${text}" (${lang}, whisper ${ms} ms${gate?.wake ? ', wake word heard' : ''})`);
-        await brain.hear({ text, lang, score: gate?.score ?? null, member, guild, tEnd, sttMs: ms, io });
+        await brain.hear({ text, lang, score: gate?.score ?? null, member, guild, tEnd, sttMs: ms, io, expected });
       }
     } catch (e) {
       console.error(`[voice] ${e.cause?.code === 'ECONNREFUSED' ? `voice service not reachable at ${VOICE_URL} (is it running?)` : e.message}`);

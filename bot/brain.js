@@ -563,9 +563,10 @@ const planText = (plan) => plan.map((x) => `${x.type}${x.targets ? ` -> ${x.targ
 
 // The wake word model upstream is a cheap, lenient filter; the transcript must still contain "Bobby",
 // so a false trigger ("beau bilan") costs one transcription and never an action.
-async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttMs, io, acked = false, ackMs = null }) {
+async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttMs, io, acked = false, ackMs = null, expected = false }) {
   let p = pending.get(member.id);
-  if (p && Date.now() > p.until) p = null;
+  // expected: the window was open when the sentence started (bot.js), even if it closed while the person was talking
+  if (p && Date.now() > p.until && !expected) p = null;
   const wake = findWake(text);
   const rec = { at: new Date().toISOString(), who: member.displayName, id: member.id, lang, wakeScore: score, heard: text };
   // Bobby is speaking: the person it answers stops it with a plain "stop"; an admin needs "Bobby, stop";

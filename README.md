@@ -64,6 +64,10 @@ In Discord, join a voice channel and type `/join`. Bobby then follows the group:
 
 Each command prints its timings: `[temps] stt … · llm … · action … · total …`.
 
+## GPU memory
+
+Measured on an RTX 4060 (8 GB): the LLM takes 3.2 GB (context cache stored in 8 bits, `-ctk q8_0 -ctv q8_0`: 0.6 GB less, same test scores and speed) and Whisper 1.2 GB, so about 4.4 GB in all. A game that fills the rest pushes both into shared memory and answers go from under a second to minutes; Bobby then says its brain is too slow after 20 s instead of hanging. On the CPU alone (Ryzen 9 7900X) the LLM answers in 3.9 s instead of 0.6 s and Whisper turbo in 3.6 s instead of 0.2 s.
+
 ## Rights
 
 Each action needs a role (printed at startup as `[rights] role needed per action`):

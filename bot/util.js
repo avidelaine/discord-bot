@@ -35,10 +35,17 @@ async function llm(messages, schema, maxTokens = 300) {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       // a JSON cut short by max_tokens fails to parse: keep "say" short in the prompts
+      // 20 s: a normal answer takes under 2 s. Past that the GPU is saturated (a game filled the VRAM, 2026-11-13:
+      // answers took 5 minutes); aborting also frees llama-server's single slot.
+      signal: AbortSignal.timeout(20_000),
       body: JSON.stringify({ messages, temperature: 0, max_tokens: maxTokens, response_format: { type: 'json_schema', json_schema: { name: 'plan', schema } } }),
     });
   } catch (e) {
     // fetch only throws when the server cannot be reached (ECONNREFUSED: llama-server is down or restarting)
+    if (e.name === 'TimeoutError') {
+      console.error('[llm] no answer after 20 s: the GPU is probably saturated (a game using the VRAM?)');
+      throw Object.assign(new Say('Mon cerveau est trop lent, la carte graphique est saturée.', 'My brain is too slow, the graphics card is full.'), { code: 'LLM_DOWN' });
+    }
     console.error(`[llm] llama-server unreachable at ${LLM_URL}: ${e.cause?.code || e.message}`);
     throw Object.assign(new Say('Mon cerveau ne répond pas.', "My brain isn't responding."), { code: 'LLM_DOWN' });
   }

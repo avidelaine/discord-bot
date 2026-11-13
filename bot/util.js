@@ -43,9 +43,16 @@ async function llm(messages, schema, maxTokens = 300) {
     throw Object.assign(new Say('Mon cerveau ne répond pas.', "My brain isn't responding."), { code: 'LLM_DOWN' });
   }
   if (!res.ok) throw new Error(`LLM ${res.status}`);
-  return JSON.parse((await res.json()).choices[0].message.content);
+  const text = (await res.json()).choices[0].message.content;
+  // a JSON cut by max_tokens (a reply far too long): not understood, never "ça n'a pas marché"
+  try { return JSON.parse(text); } catch { console.error(`[llm] invalid JSON: ${text.slice(0, 200)}`); throw Object.assign(new Say("Je n'ai pas compris.", "Sorry, I didn't get that."), { code: 'LLM_JSON' }); }
 }
 
 const words = (t) => (t || '').split(/\s+/).filter(Boolean).length;
 
-module.exports = { Say, norm, sim, llm, words };
+// The recent conversation as prompt lines, for the local LLM, the "about" answers and Claude:
+// who said what to Bobby, what Bobby did (plan) and what it answered. h: { at, who, query, did, reply }.
+const ago = (at) => { const m = Math.round((Date.now() - at) / 60_000); return m < 1 ? "à l'instant" : `il y a ${m} min`; };
+const talk = (history = []) => history.map((h) => `- ${h.at ? `${ago(h.at)}, ` : ''}${h.who || '?'} : "${h.query}"${h.did ? ` -> fait : ${h.did}` : ''}${h.reply ? ` -> Bobby : "${h.reply}"` : ''}`);
+
+module.exports = { Say, norm, sim, llm, words, talk };

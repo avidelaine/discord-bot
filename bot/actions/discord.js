@@ -6,6 +6,7 @@ const who = (w) => [ALL.test(w) ? 'tous' : w];
 const voiceSet = (key, on) => ({
   role: 'admin',
   who: true,
+  echo: true, // done silently after the ack (see brain.js report)
   async run(s) {
     const ms = s.targets.map((t) => t.ref);
     const set = (m, v) => (key === 'serverMute' ? m.voice.setMute(v) : m.voice.setDeaf(v));
@@ -41,10 +42,16 @@ function whenAlone({ botChannel, joinerId, voice }) {
   return joiner ? { follow: joiner.channel } : 'wait';
 }
 
+// "Appelle-moi sur Discord": a bot cannot call. Bobby says so and offers a mention instead (offer: see brain.js).
+// Never "appelle-moi le Boss", which gives a nickname.
+const CALL = /(?:appelle[- ]moi|m'appeler|call me|passe[- ]moi un (?:appel|coup de fil))(?: (?:sur|on|via) discord| en (?:appel|vocal|privé|mp)| au téléphone)|(?:passe|lance|fais)[- ](?:moi |nous )?un appel(?: discord)?/i;
+const call = (query) => (CALL.test(query.replace(/[’`]/g, "'")) ? [{ type: 'ping', who: ['moi'], text: "📞 Tu m'as demandé de t'appeler : je ne peux pas, mais me voilà.", offer: 'call' }] : null);
+
 module.exports = {
+  early: call,
   help: {
-    fr: 'couper ou rétablir le micro et le son, déplacer, ramener ou déconnecter des gens, écrire dans un salon, modifier ou supprimer mes propres messages',
-    en: 'mute, deafen, move, drag or disconnect people, post in a channel, edit or delete my own messages',
+    fr: 'couper ou rétablir le micro et le son, déplacer, ramener ou déconnecter des gens, écrire dans un salon, mentionner quelqu\'un, modifier ou supprimer mes propres messages',
+    en: 'mute, deafen, move, drag or disconnect people, post in a channel, mention someone, edit or delete my own messages',
   },
   short: { fr: 'la modération et les messages', en: 'moderation and messages' },
   prompt: [
@@ -56,6 +63,7 @@ module.exports = {
     '- msg_edit : remplacer le texte de ton dernier message écrit par "text" ("channel" facultatif)',
     '- msg_delete : supprimer ton dernier message écrit ("channel" facultatif)',
     '- clean : supprimer tous tes propres messages d\'un salon texte ("channel" facultatif)',
+    '- ping : mentionner (notifier, arrobase, @, tag, ping) "who" dans le salon texte "channel" (facultatif), avec le message "text" (facultatif)',
     '- leave : Bobby quitte le salon vocal',
   ],
   rules: [
@@ -65,6 +73,9 @@ module.exports = {
     '- "nettoie" un salon ou "supprime les messages" d\'un salon : clean (tu ne supprimes que tes propres messages).',
     '- Bobby, c\'est toi : tu ne peux pas te muter ("actions" vide, dis-le dans "say").',
     '- "ici" désigne le salon vocal de celui qui parle : mets son nom exact dans "channel".',
+    '- Tu ne supprimes que tes propres messages : supprimer ceux des autres ("mes messages", "ceux que j\'ai mis") n\'est pas faisable.',
+    '- Un salon texte n\'est jamais la destination d\'un move : "arrobase-moi dans X", "ping-moi sur X", c\'est ping.',
+    '- Tu ne peux pas passer d\'appel Discord : propose de mentionner la personne (ping) à la place.',
   ],
   examples: [
     '"coupe le micro de Kevin" -> {"actions":[{"type":"mute","who":["Kévin"]}],"say":""}',
@@ -80,6 +91,8 @@ module.exports = {
     '"kick Lucas from voice" -> {"actions":[{"type":"disconnect","who":["Lucas"]}],"say":""}',
     '"fais un clean-up du salon memes" -> {"actions":[{"type":"clean","channel":"memes"}],"say":""}',
     '"corrige ton dernier message en : rendez-vous à 21 h" -> {"actions":[{"type":"msg_edit","text":"rendez-vous à 21 h"}],"say":""}',
+    '"arrobase-moi dans annonces pour me rappeler de lancer Apex" -> {"actions":[{"type":"ping","who":["moi"],"channel":"annonces","text":"pense à lancer Apex"}],"say":""}',
+    '"supprime les messages que j\'ai mis dans memes" -> {"analyse":{"genre":"ordre","faisable":false,"pourquoi":"je ne supprime que mes propres messages"},"actions":[],"say":"Je ne peux supprimer que mes propres messages."}',
   ],
   // LLM-free shortcuts. ponytail: a handful of phrasings per language; add the ones that keep showing up in the logs.
   quick: [
@@ -108,6 +121,7 @@ module.exports = {
       role: 'admin',
       who: true,
       channel: 'voice',
+      echo: true,
       // A move that includes the speaker ("déplace-nous", "mets-moi", "tout le monde") takes Bobby along.
       async run(s, io) {
         const ms = s.targets.map((t) => t.ref);
@@ -122,6 +136,7 @@ module.exports = {
       role: 'admin',
       who: true,
       confirm: true,
+      echo: true,
       run: (s) => Promise.all(s.targets.map((t) => t.ref.voice.disconnect())),
       say: { fr: (s, n) => `Je déconnecte ${n}.`, en: (s, n) => `Disconnecting ${n}.` },
     },
@@ -129,16 +144,17 @@ module.exports = {
       role: 'admin',
       channel: 'text',
       text: true,
+      echo: true,
       run: (s) => s.channel.ref.send(s.text),
       say: { fr: (s) => `J'envoie le message dans ${s.channel.name}.`, en: (s) => `Message sent to ${s.channel.name}.` },
     },
     msg_edit: {
-      role: 'admin', channel: 'text?', text: true,
+      role: 'admin', channel: 'text?', text: true, echo: (s) => s.found,
       async run(s, io) { const [m] = await own(chan(s, io)); s.found = Boolean(m); if (m) await m.edit(s.text); },
       say: { fr: (s) => (s.found ? 'Message modifié.' : "Je n'ai pas de message à modifier ici."), en: (s) => (s.found ? 'Message edited.' : 'I have no message to edit here.') },
     },
     msg_delete: {
-      role: 'admin', channel: 'text?',
+      role: 'admin', channel: 'text?', echo: (s) => s.found,
       async run(s, io) { const [m] = await own(chan(s, io)); s.found = Boolean(m); if (m) await m.delete(); },
       say: { fr: (s) => (s.found ? 'Message supprimé.' : "Je n'ai pas de message à supprimer ici."), en: (s) => (s.found ? 'Message deleted.' : 'I have no message to delete here.') },
     },
@@ -157,6 +173,15 @@ module.exports = {
         fr: (s) => (s.where ? (s.count ? `Je supprime mes ${s.count} messages dans ${s.where}.` : `Je n'ai aucun message dans ${s.where}.`) : `Je nettoie ${s.channel?.name || 'le salon'}.`),
         en: (s) => (s.where ? (s.count ? `Deleting my ${s.count} messages in ${s.where}.` : `I have no messages in ${s.where}.`) : `Cleaning ${s.channel?.name || 'the channel'}.`),
       },
+    },
+    // Mentions people in a text channel: users only, never @everyone / @here (allowedMentions lists the users).
+    ping: {
+      role: 'admin', who: true, channel: 'text?', echo: true, // admin, like posting a message
+      async run(s, io) {
+        const ids = s.targets.map((t) => t.id);
+        await chan(s, io).send({ content: `${ids.map((id) => `<@${id}>`).join(' ')} ${s.text.replace(/@(everyone|here)/gi, '$1')}`.trim(), allowedMentions: { users: ids } });
+      },
+      say: { fr: (s, n) => `Je mentionne ${n} dans ${s.channel?.name || 'le salon'}.`, en: (s, n) => `Mentioning ${n} in ${s.channel?.name || 'the channel'}.` },
     },
     leave: {
       role: 'admin',

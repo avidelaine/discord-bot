@@ -75,14 +75,26 @@ const touch = (fn) => edit((all, s) => {
 });
 
 const date = (iso) => (iso ? new Date(iso).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '?');
-// A list as an embed: one field per item, with its done mark, author and date.
-function card(l, mine) {
+// A list as an embed: one field per item, with its done mark, author and date. Numbers stay the list's own
+// ("le point 3"), even when a filter shows only some items.
+function card(l, mine, shown = mine, filter = '') {
   const open = mine.filter((it) => !it.done).length, done = mine.length - open;
-  const fields = mine.map((it, i) => {
+  const fields = shown.map((it) => {
     const long = it.text.length > 200;
-    return { name: `${it.done ? '✅' : '⬜'} ${i + 1}. ${long ? `${it.text.slice(0, 199)}…` : it.text}`, value: `${long ? `${it.text}\n` : ''}*${it.author?.name || '?'} · ${date(it.at)}*` };
+    return { name: `${it.done ? '✅' : '⬜'} ${mine.indexOf(it) + 1}. ${long ? `${it.text.slice(0, 199)}…` : it.text}`, value: `${long ? `${it.text}\n` : ''}*${it.author?.name || '?'} · ${date(it.at)}*` };
   });
-  return { embeds: embed({ title: `📝 ${l.id === GENERAL ? 'Liste générale' : `Liste de ${l.name}`}`, color: COLOR.todo, description: `**${open}** à faire · **${done}** fait${done > 1 ? 's' : ''}`, fields }) };
+  return { embeds: embed({ title: `📝 ${l.id === GENERAL ? 'Liste générale' : `Liste de ${l.name}`}${filter}`, color: COLOR.todo, description: `**${open}** à faire · **${done}** fait${done > 1 ? 's' : ''}`, fields }) };
+}
+
+// "Qu'est-ce qui a déjà été fait ?", "ce qui reste à faire", "les points de Lucas": which items a readout shows.
+const FILTER = { done: [' · faits', ' · done'], open: [' · à faire', ' · to do'] };
+function filtered(s, mine) {
+  let out = mine;
+  if (s.filter === 'done') out = out.filter((it) => it.done);
+  if (s.filter === 'open') out = out.filter((it) => !it.done);
+  const a = (s.author || '').trim();
+  if (a) out = out.filter((it) => (isMine(a) ? it.author?.id === s.by?.id : sim(a, it.author?.name || '') >= 0.7));
+  return out;
 }
 // ponytail: spoken items are cut to 10 words, the full text is posted in the text channel.
 const short = (t) => { const w = t.split(/\s+/); return w.length > 10 ? `${w.slice(0, 10).join(' ')}…` : t; };
@@ -145,7 +157,7 @@ module.exports = {
   short: { fr: 'les listes de tâches', en: 'the to-do lists' },
   prompt: [
     '- todo_add : ajouter "text" (le texte complet, jamais résumé) à une liste',
-    '- todo_list : lire une liste (le détail est posté dans le salon texte)',
+    '- todo_list : lire une liste (le détail est posté dans le salon texte) ; "filter" = done (seulement ce qui est fait) ou open (ce qui reste à faire), "author" = seulement les points écrits par cette personne',
     '- todo_done / todo_remove : cocher comme fait, ou supprimer, le point "text" (son numéro, "dernier", ou ses mots)',
     '- todo_move : déplacer le point "text" vers la liste "to"',
     '- Champ "list" des todo_* : "general" (liste commune, par défaut, aussi "ta liste" ou "la liste" quand on parle de la liste de Bobby), "moi" (ma liste, la liste perso de celui qui parle) ou le nom d\'une personne ("la liste d\'Ilias")',
@@ -159,16 +171,20 @@ module.exports = {
     '"ajoute acheter du pain à ma liste" -> {"actions":[{"type":"todo_add","text":"acheter du pain","list":"moi"}],"say":""}',
     '"montre-moi ce que tu as retenu" -> {"actions":[{"type":"todo_list","list":"general"}],"say":""}',
     '"qu\'est-ce qu\'il y a sur la liste d\'Ilias" -> {"actions":[{"type":"todo_list","list":"Ilias"}],"say":""}',
+    '"quels points de la liste ont été ajoutés par Marie" -> {"actions":[{"type":"todo_list","list":"general","author":"Marie"}],"say":""}',
     '"le point 2 est fait" -> {"actions":[{"type":"todo_done","text":"2"}],"say":""}',
     '"retire les courses de ma liste" -> {"actions":[{"type":"todo_remove","text":"les courses","list":"moi"}],"say":""}',
     '"mets le dernier point dans ma liste" -> {"actions":[{"type":"todo_move","text":"dernier","to":"moi"}],"say":""}',
   ],
   early: note,
   quick: [
+    // "est-ce que tu peux me dire ce qui a déjà été fait dans cette liste ?" read the whole list (2026-11-12)
+    [/(?:qu'est-ce qui|ce qui|quels? (?:points?|trucs?|choses?)) (?:a|ont|est|sont) (?:déjà |deja )?(?:été )?(?:fait|coché|terminé|fini)e?s?(?: dans (?:cette|la|ta) (?:liste|to-?do(?: list)?))?$/, () => [{ type: 'todo_list', list: GENERAL, filter: 'done' }]],
+    [/(?:qu'est-ce qui|ce qui|qu'est-ce qu'il) (?:me |nous |te )?reste (?:encore )?à faire(?: dans (?:cette|la|ta) (?:liste|to-?do(?: list)?))?$/, () => [{ type: 'todo_list', list: GENERAL, filter: 'open' }]],
     [/^(?:montre|montrer|affiche|afficher|lis|lire|donne|donner|dis|dire|liste)(?:-moi| moi)? (?:la liste de )?(?:tout )?ce que tu as (?:retenu|noté)$|^(?:montre|montrer|affiche|afficher|lis|lire|donne|donner)(?:-moi| moi)? (?:ta liste|la liste|la to-?do(?: list)?|ta to-?do(?: list)?)$|^qu'est-ce que tu as (?:retenu|noté)$|^(?:show|read|give)(?: me)? (?:the|your) (?:list|to-?do(?: list)?)$|^what did you (?:note|remember)$/, () => [{ type: 'todo_list', list: GENERAL }]],
     [/^(?:montre|montrer|affiche|afficher|lis|lire|donne|donner)(?:-moi| moi)? ma (?:liste|to-?do(?: list)?)$|^(?:show|read)(?: me)? my (?:list|to-?do(?: list)?)$/, () => [{ type: 'todo_list', list: 'moi' }]],
   ],
-  fields: { list: LIST_FIELD },
+  fields: { list: LIST_FIELD, filter: { enum: ['done', 'open'] }, author: { type: 'string' } },
   promptLines,
   listOf,
   items,
@@ -191,15 +207,30 @@ module.exports = {
         const l = s.list || { id: GENERAL };
         const mine = items().filter((it) => it.list === l.id);
         s.open = mine.filter((it) => !it.done);
+        if (s.filter || s.author) {
+          s.shown = filtered(s, mine);
+          s.where = s.shown.length && io.post ? await io.post(card(l, mine, s.shown, `${FILTER[s.filter]?.[0] || ''}${s.author ? ` · ${s.author}` : ''}`)) : null;
+          return;
+        }
         s.where = mine.length && io.post ? await io.post(card(l, mine)) : null;
       },
       say: say(
         (s, l) => {
+          if (s.shown) {
+            const n = s.shown.length, what = s.filter === 'done' ? `point${n > 1 ? 's' : ''} fait${n > 1 ? 's' : ''}` : s.filter === 'open' ? `point${n > 1 ? 's' : ''} à faire` : `point${n > 1 ? 's' : ''}`;
+            if (!n) return `Aucun ${what.replace(/s\b/g, '')} dans ${listName(l, s, 'fr')}${s.author ? ` de ${s.author}` : ''}.`;
+            return `Dans ${listName(l, s, 'fr')}, ${n} ${what}${s.author ? ` de ${s.author}` : ''} : ${s.shown.slice(0, 3).map((it) => short(it.text)).join(' ; ')}${n > 3 ? ' ; et la suite' : ''}.`;
+          }
           const n = s.open.length, name = listName(l, s, 'fr');
           if (!n) return `${name.replace(/^./, (c) => c.toUpperCase())} est vide.`;
           return `${name.replace(/^./, (c) => c.toUpperCase())} : ${n} point${n > 1 ? 's' : ''}. ${s.open.slice(0, 3).map((it) => short(it.text)).join(' ; ')}${n > 3 ? ' ; et la suite' : ''}.${s.where ? ` Tout est dans ${s.where}.` : ''}`;
         },
         (s, l) => {
+          if (s.shown) {
+            const n = s.shown.length, what = `${s.filter === 'done' ? 'done ' : s.filter === 'open' ? 'open ' : ''}item${n > 1 ? 's' : ''}`;
+            if (!n) return `No ${what.replace(/s$/, '')} in ${listName(l, s, 'en')}${s.author ? ` from ${s.author}` : ''}.`;
+            return `In ${listName(l, s, 'en')}, ${n} ${what}${s.author ? ` from ${s.author}` : ''}: ${s.shown.slice(0, 3).map((it) => short(it.text)).join('; ')}${n > 3 ? '; and more' : ''}.`;
+          }
           const n = s.open.length, name = listName(l, s, 'en');
           if (!n) return `${name.replace(/^./, (c) => c.toUpperCase())} is empty.`;
           return `${name.replace(/^./, (c) => c.toUpperCase())}: ${n} item${n > 1 ? 's' : ''}. ${s.open.slice(0, 3).map((it) => short(it.text)).join('; ')}${n > 3 ? '; and more' : ''}.${s.where ? ` Everything is in ${s.where}.` : ''}`;

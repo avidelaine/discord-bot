@@ -2,7 +2,7 @@
 // (rights, people, voice, wake word, the conversation), from facts rebuilt from live state at each question.
 const fs = require('fs');
 const roles = require('../roles');
-const { llm } = require('../util');
+const { llm, talk } = require('../util');
 const { embed, COLOR } = require('../format');
 
 const modules = () => fs.readdirSync(__dirname).filter((f) => f.endsWith('.js')).sort().map((f) => require(`./${f}`));
@@ -46,7 +46,7 @@ async function facts(s, io) {
     `Listes de tâches : une liste générale partagée et une liste perso par personne. Chacun ajoute à la générale et à la sienne et gère ses propres points ; le super admin gère tout. Liste générale : ${todo.filter((it) => it.list === 'general').length} points à faire.`,
     `Surnoms : ${nick || 'aucun'}.`,
     `Celui qui te parle : ${s.by?.name || '?'} (${ROLE_NAME[s.by?.role] || '?'}).`,
-    ...(ctx.history?.length ? ['Conversation récente avec lui :', ...ctx.history.map((h) => `- "${h.query}" -> toi : "${h.reply}"`)] : []),
+    ...(ctx.history?.length ? ['Conversation récente avec toi (tous ceux qui te parlent) :', ...talk(ctx.history)] : []),
   ].join('\n');
 }
 
@@ -103,6 +103,7 @@ module.exports = {
     come: {
       role: 'prime',
       channel: 'voice',
+      echo: true, // done silently after the ack (see brain.js report)
       normalize: (a) => (a.channel ? null : { ...a, channel: 'ici' }),
       run(s, io) {
         const back = io.follow?.(s.channel.ref);

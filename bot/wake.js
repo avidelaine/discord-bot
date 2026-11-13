@@ -5,6 +5,7 @@
 const VARIANTS = new Set([
   'bobby', 'bobbie', 'bobie', 'bobbi', 'bobi',
   'boby', 'bobbys', 'bobbey', 'bobbee', 'bobe',
+  'moby', // "Moby est-ce que tu peux me redéplacer…" (2026-11-12): the wake model had heard "Bobby"
 ]);
 
 const norm = (t) => t.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();

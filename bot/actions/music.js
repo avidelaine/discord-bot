@@ -20,7 +20,9 @@ const playing = say(
   (r, s) => (radio(r, s) ? `Radio ${s.text} : ${r.station || r.title}.` : `Je lance ${r.title}.`),
   (r, s) => (radio(r, s) ? `${s.text} radio: ${r.station || r.title}.` : `Playing ${r.title}.`),
 );
-const simple = (fr, en, fn) => ({ role: 'prime', run: go(fn), say: say(() => fr, () => en) });
+// echo: done silently after the ack (see brain.js report); errors are always spoken.
+const ok = (s) => !s.res?.error;
+const simple = (fr, en, fn) => ({ role: 'prime', run: go(fn), echo: ok, say: say(() => fr, () => en) });
 
 const UP = /^(?:(?:monte|augmente) (?:le )?(?:son|volume)|monte|plus fort|louder|turn (?:it )?up|(?:raise|increase|turn up) (?:the )?volume)$/;
 const DOWN = /^(?:(?:baisse|diminue|descends) (?:le )?(?:son|volume)|baisse|moins fort|quieter|softer|turn (?:it )?down|(?:lower|decrease|reduce|turn down) (?:the )?volume)$/;
@@ -38,7 +40,7 @@ module.exports = {
     '- music_add : ajouter à la file d\'attente, "text" et "kind" comme music_play',
     '- music_pause / music_resume / music_stop / music_skip / music_replay : pause, reprendre, arrêter (vide la file), passer au suivant, rejouer',
     '- music_queue : dire la file d\'attente',
-    '- music_volume : volume de Bobby, "text" vaut up, down ou un nombre de 0 à 100',
+    '- music_volume : volume de Bobby, de 0 à 100 (100 = le maximum) ; "text" vaut up, down ou le nombre demandé (même au-dessus de 100 : Bobby met le maximum et le dit)',
     '- music_now : dire quel morceau joue',
   ],
   rules: [
@@ -54,6 +56,7 @@ module.exports = {
     '"mets le volume à 40" -> {"actions":[{"type":"music_volume","text":"40"}],"say":""}',
     '"ajoute Blinding Lights à la file" -> {"actions":[{"type":"music_add","text":"Blinding Lights","kind":"youtube"}],"say":""}',
     '"what song is this" -> {"actions":[{"type":"music_now"}],"say":""}',
+    '"quelle est ta plage de volume" -> {"analyse":{"genre":"capacite","faisable":true},"actions":[],"say":"Mon volume va de 0 à 100 %."}',
   ],
   // ponytail: a handful of phrasings per language; the LLM takes the rest (e.g. "add X to the queue").
   quick: [
@@ -83,14 +86,14 @@ module.exports = {
     },
     music_pause: simple('Pause.', 'Paused.', (p) => p.pause()),
     music_resume: simple('Je reprends.', 'Resuming.', (p) => p.resume()),
-    music_stop: { role: 'prime', // always stop: a track still being looked up (current not set yet) must not start after "stop"
+    music_stop: { role: 'prime', echo: ok, // always stop: a track still being looked up (current not set yet) must not start after "stop"
     run: go((p) => { const r = p.stop(); return r.stopped || r.cleared ? r : { error: 'nothing is playing' }; }), say: say(() => 'Musique arrêtée.', () => 'Stopped.') },
     music_skip: {
       role: 'prime', run: go((p) => p.skip()),
       say: say((r) => (r.nowPlaying ? `Suivant : ${r.nowPlaying.title}.` : 'Plus rien dans la file.'), (r) => (r.nowPlaying ? `Next: ${r.nowPlaying.title}.` : 'Nothing left in the queue.')),
     },
     music_replay: {
-      role: 'prime', run: go((p) => p.replay()),
+      role: 'prime', echo: ok, run: go((p) => p.replay()),
       say: say((r) => `Je relance ${r.nowPlaying.title}.`, (r) => `Replaying ${r.nowPlaying.title}.`),
     },
     music_queue: {
@@ -102,8 +105,18 @@ module.exports = {
     },
     music_volume: {
       role: 'prime', text: true,
-      run: go((p, s) => { const t = s.text.toLowerCase().trim(); return t === 'up' ? p.volumeUp() : t === 'down' ? p.volumeDown() : /^\d+$/.test(t) ? p.setVolume(+t) : { error: `unknown volume "${s.text}"` }; }),
-      say: say((r) => `Volume à ${r.volume}.`, (r) => `Volume at ${r.volume}.`),
+      // "200 %" sets the maximum and says so (it used to set 100 without a word); a plain change stays silent
+      echo: (s) => ok(s) && !s.res.clamped,
+      run: go((p, s) => {
+        const t = s.text.toLowerCase().replace(/\s*(?:%|pour ?cent|percent)$/, '').trim();
+        if (t === 'up') return p.volumeUp();
+        if (t === 'down') return p.volumeDown();
+        return /^\d+$/.test(t) ? { ...p.setVolume(+t), clamped: +t > 100 } : { error: `unknown volume "${s.text}"` };
+      }),
+      say: say(
+        (r) => (r.clamped ? "Le maximum c'est 100 %, je le mets à fond." : `Volume à ${r.volume}.`),
+        (r) => (r.clamped ? "100 % is the maximum, so I'm turning it all the way up." : `Volume at ${r.volume}.`),
+      ),
     },
     music_now: {
       role: 'prime', run: go((p) => ({ nowPlaying: p.nowPlaying() })),

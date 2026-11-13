@@ -2,6 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const { talk } = require('../util');
 
 const MODEL = process.env.CLAUDE_MODEL || 'haiku';
 let ready = false; // Claude Code logged in; checked at startup and again while it is not
@@ -20,21 +21,14 @@ function check() {
   });
 }
 
-// No files, no shell, no MCP, no user settings; web search only.
-// written: the answer is posted, not spoken, so it may be longer and use Discord markdown.
-function ask(question, lang, written = false) {
+// One Claude Code call. No files, no shell, no MCP, no user settings; tools: web search at most.
+function cli(prompt, system, tools = 'WebSearch') {
   const dir = path.join(require('os').tmpdir(), 'bobby-claude'); // empty working folder: nothing to read
   fs.mkdirSync(dir, { recursive: true });
-  const style = written
-    ? (lang === 'en' ? 'Answer in English, for a Discord message: complete but concise (under 1500 characters), Discord markdown allowed (bold, bullet lists).'
-      : 'Réponds en français, pour un message Discord : complet mais concis (moins de 1500 caractères), markdown Discord autorisé (gras, listes à puces).')
-    : lang === 'en'
-      ? 'Answer in English, in one or two short spoken sentences, no markdown, no lists.'
-      : 'Réponds en français, en une ou deux phrases courtes à dire à voix haute, sans markdown ni liste.';
   return new Promise((resolve, reject) => {
     const child = spawn('claude', [
-      '-p', question, '--model', MODEL, '--append-system-prompt', `You answer for Bobby, a Discord voice assistant. ${style}`,
-      '--tools', 'WebSearch', '--allowedTools', 'WebSearch', '--setting-sources', '', '--strict-mcp-config',
+      '-p', prompt, '--model', MODEL, '--append-system-prompt', system,
+      '--tools', tools, ...(tools ? ['--allowedTools', tools] : []), '--setting-sources', '', '--strict-mcp-config',
       '--no-session-persistence', '--output-format', 'text',
     ], { cwd: dir, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '';
@@ -50,6 +44,26 @@ function ask(question, lang, written = false) {
   });
 }
 
+// written: the answer is posted, not spoken, so it may be longer and use Discord markdown.
+// history: the recent conversation with Bobby, so "et lui ?" or "explique mieux" make sense to Claude too.
+function ask(question, lang, written = false, history = []) {
+  const style = written
+    ? (lang === 'en' ? 'Answer in English, for a Discord message: complete but concise (under 1500 characters), Discord markdown allowed (bold, bullet lists).'
+      : 'Réponds en français, pour un message Discord : complet mais concis (moins de 1500 caractères), markdown Discord autorisé (gras, listes à puces).')
+    : lang === 'en'
+      ? 'Answer in English, in one or two short spoken sentences, no markdown, no lists.'
+      : 'Réponds en français, en une ou deux phrases courtes à dire à voix haute, sans markdown ni liste.';
+  const convo = history.length ? `Conversation récente avec Bobby dans le salon vocal (contexte seulement) :\n${talk(history).join('\n')}\n\nQuestion : ` : '';
+  return cli(convo + question, `You answer for Bobby, a Discord voice assistant. ${style}`);
+}
+
+// Fallback brain (admins): when the local model is unsure, Claude reads the same prompt and picks among the
+// same actions. -> the parsed JSON plan, or throws.
+async function think(system, user) {
+  const out = await cli(user, `${system}\n\nRéponds uniquement avec l'objet JSON, sans texte autour ni bloc de code.`, '');
+  return JSON.parse(out.slice(out.indexOf('{'), out.lastIndexOf('}') + 1));
+}
+
 const OFF = { fr: "Claude n'est pas encore branché.", en: "Claude isn't connected yet." };
 const DOWN = { fr: "Je n'arrive pas à joindre Claude.", en: "I can't reach Claude right now." };
 
@@ -58,10 +72,11 @@ module.exports = {
   short: { fr: 'les questions à Claude', en: 'questions to Claude' },
   prompt: ['- ask : transmettre à Claude, un assistant plus savant, une vraie question de culture générale "text" (reformulée clairement, complète)'],
   rules: [
-    '- ask seulement pour une vraie question sur le monde : culture, actualité, sciences, calcul, explication, recette, conseil général. Jamais pour une question sur toi (Bobby), le serveur, les gens présents, les droits, la conversation en cours, une demande de noter, une remarque ou un avis sur toi : ça, c\'est about, todo_add ou une autre action locale.',
+    '- ask seulement pour une vraie question sur le monde (Claude cherche sur le web : météo, actualité, sport : toujours faisable) : culture, actualité, sciences, calcul, explication, recette, conseil général. Jamais pour une question sur toi (Bobby), le serveur, les gens présents, les droits, la conversation en cours, une demande de noter, une remarque ou un avis sur toi : ça, c\'est about, todo_add ou une autre action locale.',
     '- Ne réponds toi-même ("actions" vide, réponse courte dans "say") qu\'aux salutations et aux politesses.',
   ],
   examples: [
+    '"raconte-moi une blague" -> {"actions":[{"type":"ask","text":"Raconte une blague courte."}],"say":""}',
     '"c\'est quoi la capitale de l\'Australie" -> {"actions":[{"type":"ask","text":"Quelle est la capitale de l\'Australie ?"}],"say":""}',
     '"who won the last world cup" -> {"actions":[{"type":"ask","text":"Who won the last FIFA World Cup?"}],"say":""}',
     '"qui est le meilleur entre toi et Alexa" -> {"actions":[{"type":"about","text":"qui est le meilleur entre toi et Alexa"}],"say":""}',
@@ -76,12 +91,14 @@ module.exports = {
       async run(s, io, lang) {
         if (!ready) { s.answer = OFF[lang] || OFF.fr; check(); return; } // re-check for next time, without waiting
         const t0 = performance.now();
-        try { s.answer = await ask(s.text, lang, s.written); s.voice = 'claude'; if (s.written) s.card = `❓ **${s.text}**\n\n${s.answer}`; } catch (e) { console.error('[claude]', e.message); s.answer = DOWN[lang] || DOWN.fr; }
+        try { s.answer = await ask(s.text, lang, s.written, s.ctx?.history); s.voice = 'claude'; if (s.written) s.card = `❓ **${s.text}**\n\n${s.answer}`; } catch (e) { console.error('[claude]', e.message); s.answer = DOWN[lang] || DOWN.fr; }
         console.log(`[claude] ${Math.round(performance.now() - t0)} ms: ${s.answer}`);
       },
       say: { fr: (s) => s.answer, en: (s) => s.answer },
     },
   },
   check,
+  think,
+  ready: () => ready,
   setReady: (v) => { ready = v; }, // tests
 };

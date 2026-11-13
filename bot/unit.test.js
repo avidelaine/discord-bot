@@ -291,7 +291,168 @@ console.log('PC shortcuts and rights: ok');
   await batch2();
   await batch3();
   await batch3Written();
+  await batch4();
 })().catch((e) => { console.error(e); process.exit(1); });
+
+// ---------- Batch 4 (test sessions of 2026-11-12/13): context, reasoning, coworker tone, misses ----------
+async function batch4() {
+  const brain = require('./brain');
+  const { hear, writing, guard, report, decide, conversation, reload, remember } = brain;
+  const { findWake } = require('./wake');
+  const { talk } = require('./util');
+
+  // Conversation rebuilt from the journal at startup: other speakers included, skipped speech and old lines left out
+  const at = (min) => new Date(Date.now() - min * 60_000).toISOString();
+  fs.writeFileSync(process.env.JOURNAL_FILE, [
+    { at: at(40), id: 'a', who: 'WakandeX', query: 'trop vieux', outcome: 'done' },
+    { at: at(5), id: 'a', who: 'WakandeX', outcome: 'skipped', wakeScore: 0.01 },
+    { at: at(4), id: 'a', who: 'WakandeX', query: 'explique dans le chat ce que tu sais faire', plan: 'help', reply: "Je t'envoie ça dans dev-bot-test.", outcome: 'done' },
+    { at: at(3), id: 'b', who: 'Prime Ilias', query: 'mute WakandeX', plan: 'mute -> WakandeX', reply: '', outcome: 'done' },
+  ].map((r) => JSON.stringify(r)).join('\n') + '\n{"partial');
+  assert.strictEqual(reload(), 2);
+  assert.deepStrictEqual(conversation().map((h) => h.who), ['WakandeX', 'Prime Ilias']);
+  const lines = talk(conversation());
+  assert.match(lines[0], /^- il y a 4 min, WakandeX : "explique dans le chat ce que tu sais faire" -> fait : help -> Bobby : "Je t'envoie ça/);
+  assert.match(lines[1], /Prime Ilias : "mute WakandeX" -> fait : mute -> WakandeX$/);
+  console.log('batch 4, conversation from the journal: ok');
+
+  // Wake word variant "Moby" ("Moby est-ce que tu peux me redéplacer…" was ignored)
+  assert.strictEqual(findWake('Moby est-ce que tu peux me redéplacer dans le channel PRIME ?'), 'Moby');
+
+  // Capability questions never run: "es-tu capable de supprimer mes messages ?" launched a clean of "privé"
+  const sup = { ...ctx, role: 'super' };
+  const out = (actions, analyse = {}, say = '') => ({ analyse: { genre: 'ordre', faisable: true, sur: true, ...analyse }, actions, say });
+  const g = (o, q) => guard(o, q, sup, [], 'fr');
+  let r = g(out([{ type: 'clean', channel: 'memes' }]), 'es-tu capable de supprimer mes messages à moi ?');
+  assert.deepStrictEqual([r.actions, r.say], [[], 'Je ne peux supprimer que mes propres messages, pas ceux des autres.']);
+  r = g(out([{ type: 'clean', channel: 'memes' }]), 'est-ce que tu peux supprimer aussi tous les messages que j\'ai mis dans memes ?');
+  assert.deepStrictEqual(r.actions, []); // it asked to confirm, then deleted nothing
+  r = g(out([{ type: 'clean', channel: 'memes' }]), 'est-ce que tu peux clean le channel memes de tous les messages que tu envoyais ?');
+  assert.strictEqual(r.actions[0].type, 'clean'); // its own messages: fine
+  r = g(out([{ type: 'music_volume', text: '100' }]), 'quelle est ta range de volume sonore que tu peux atteindre ?');
+  assert.strictEqual(r.analyse.genre, 'capacite');
+  assert.strictEqual(decide(r, resolve(r.actions, sup)), 'offer'); // set the volume to 100 before
+  r = g(out([{ type: 'help' }]), 'est-ce que tu es capable de m\'expliquer ce que tu sais faire ?');
+  assert.strictEqual(decide(r, resolve(r.actions, sup)), 'run'); // a read-only answer is just given
+  r = g(out([{ type: 'mute', who: ['Kévin'] }]), 'peux-tu mute Kévin ?');
+  assert.strictEqual(decide(r, resolve(r.actions, sup)), 'run'); // "peux-tu" stays a polite order
+  // Not feasible: no nearest action; "volume à 200 %" goes through and says the maximum is 100
+  r = g(out([{ type: 'clean' }], { faisable: false, pourquoi: 'x' }, 'Je ne peux pas.'), 'fais un truc impossible');
+  assert.deepStrictEqual([r.actions, r.say], [[], 'Je ne peux pas.']);
+  r = g(out([{ type: 'music_volume', text: '200' }], { faisable: false }), 'augmente le son de la musique à 200 %');
+  assert.strictEqual(r.actions.length, 1);
+  const vol = resolve(r.actions, sup);
+  await run(vol, { music: new (require('./music/player').Player)(new (require('./music/mixer').Mixer)(() => {})) });
+  assert.strictEqual(report(vol), "Le maximum c'est 100 %, je le mets à fond.");
+  // "arrobase-moi dans dev-bot-test" moved the user to the voice channel dev-bot: a mention, never a move
+  r = g(out([{ type: 'move', who: ['moi'], channel: 'dev-bot-test' }]), 'est-ce que tu peux me arrobas dans devbot test pour me demander de lancer Apex ?');
+  assert.deepStrictEqual(r.actions.map((a) => a.type), ['ping']);
+  const devbot = { ...sup, voiceChannels: [...sup.voiceChannels, { name: 'dev-bot' }] };
+  assert.throws(() => resolve([{ type: 'move', who: ['moi'], channel: 'dev-bot-test' }], devbot), /dev-bot-test est un salon texte/);
+  assert.strictEqual(resolve([{ type: 'move', who: ['moi'], channel: 'dev-bot' }], devbot)[0].channel.name, 'dev-bot');
+  assert.strictEqual(resolve([{ type: 'move', who: ['moi'], channel: 'Général' }], sup)[0].channel.name, 'Général'); // same name as a text channel: voice wins
+  // The ping mentions users only, never @everyone / @here
+  const sent = [];
+  const pingStep = resolve([{ type: 'ping', who: ['Kévin'], channel: 'memes', text: 'lance Apex @everyone' }], sup)[0];
+  pingStep.channel.ref = { send: async (m) => sent.push(m) };
+  await require('./actions/discord').actions.ping.run(pingStep, {});
+  assert.deepStrictEqual(sent[0], { content: '<@Kévin> lance Apex everyone', allowedMentions: { users: ['Kévin'] } });
+  // "appelle-moi sur Discord": short answer and an offer of a mention; "appelle-moi le Boss" stays a nickname
+  const call = quick("est-ce que tu peux m'appeler sur Discord ?");
+  assert.deepStrictEqual([call[0].type, call[0].offer], ['ping', 'call']);
+  assert.strictEqual(decide(null, resolve(call, sup)), 'offer');
+  assert.strictEqual(quick('appelle-moi le Boss')?.[0]?.type === 'ping', false);
+  // After review: "Ping Pong" stays a move; the text channel named in the sentence beats the LLM's voice channel
+  const pp = { ...devbot, voiceChannels: [...devbot.voiceChannels, { name: 'Ping Pong' }] };
+  assert.strictEqual(guard(out([{ type: 'move', who: ['Lucas'], channel: 'Ping Pong' }]), 'déplace Lucas dans Ping Pong', pp, [], 'fr').actions[0].type, 'move');
+  r = guard(out([{ type: 'move', who: ['moi'], channel: 'dev-bot' }]), 'est-ce que tu peux me arrobas dans devbot test pour me demander de lancer Apex ?', devbot, [], 'fr');
+  assert.deepStrictEqual([r.actions[0].type, r.actions[0].channel], ['ping', 'dev-bot-test']);
+  assert.notStrictEqual(g(out([{ type: 'music_play', text: 'métal' }]), 'tu sais quoi, mets du métal').analyse.genre, 'capacite');
+  // "mute-moi micro et casque" read as undeafen; "j'aurais voulu des tableaux" redoes the last request in writing
+  assert.deepStrictEqual(g(out([{ type: 'mute', who: ['moi'] }, { type: 'undeafen', who: ['moi'] }]), "est-ce que tu peux me mute micro et casque s'il te plaît ?").actions.map((a) => a.type), ['mute', 'deafen']);
+  assert.strictEqual(g(out([{ type: 'undeafen', who: ['Marie'] }]), 'Marie peut réentendre').actions[0].type, 'undeafen');
+  const fix = writing("quand je te demande ça, j'aurais voulu des tableaux, des trucs comme ça", ctx, [{ query: 'explique dans le chat ce que tu sais faire' }]);
+  assert.deepStrictEqual([fix.query, quick(fix.query)[0].type], ['explique ce que tu sais faire', 'help']);
+  // The fallback brain only for an order the 4B model could not map (a self-reported "sure" flag was noise)
+  assert.strictEqual(brain.unsure(out([])), true);
+  assert.strictEqual(brain.unsure(out([], {}, 'Salut !')), false);
+  assert.strictEqual(brain.unsure(out([], { faisable: false })), false);
+  assert.strictEqual(brain.unsure(out([{ type: 'time' }])), false);
+  console.log('batch 4, reasoning guards: ok');
+
+  // Written mode also on "dans le chat", "montre-moi", "affiche", with a channel anywhere in the sentence
+  const W = (q) => { const w = writing(q, ctx, []); return w && [w.query, w.channel?.name || null]; };
+  assert.deepStrictEqual(W('explique dans le chat ce que tu sais faire'), ['explique ce que tu sais faire', null]);
+  assert.deepStrictEqual(W('est-ce que tu es capable de m\'expliquer dans le chat DevBotTest ce que tu es capable de faire, s\'il te plaît ?'), ['est-ce que tu es capable de m\'expliquer ce que tu es capable de faire, s\'il te plaît', 'dev-bot-test']);
+  assert.deepStrictEqual(W('montre-moi dans le channel devbot test ta liste'), ['montre-moi ta liste', 'dev-bot-test']);
+  assert.deepStrictEqual(W('affiche ma liste'), ['affiche ma liste', null]);
+  assert.strictEqual(quick('explique ce que tu sais faire')?.[0].type, 'help');
+  assert.strictEqual(W('écris dans général que la réunion est à 21 h'), null);
+  // List filters: "qu'est-ce qui a déjà été fait dans cette liste ?" read the whole list
+  assert.deepStrictEqual(quick('est-ce que tu peux me dire ce qui a déjà été fait dans cette liste ?'), [{ type: 'todo_list', list: 'general', filter: 'done' }]);
+  assert.strictEqual(quick("qu'est-ce qui reste à faire")[0].filter, 'open');
+  save('todo', [
+    { id: 1, text: 'fondus', list: 'general', author: { id: 'Marie', name: 'Marie' }, at: null, done: true },
+    { id: 2, text: 'voix de Claude', list: 'general', author: { id: 'Alex', name: 'Alex' }, at: null, done: false },
+    { id: 3, text: 'historique', list: 'general', author: { id: 'Marie', name: 'Marie' }, at: null, done: true },
+  ]);
+  const posted = [];
+  const lio = { post: async (c) => { posted.push(c); return 'dev-bot-test'; } };
+  let lp = resolve([{ type: 'todo_list', list: 'general', filter: 'done' }], sup);
+  await run(lp, lio);
+  assert.strictEqual(describe(lp), 'Dans la liste générale, 2 points faits : fondus ; historique.');
+  assert.deepStrictEqual(posted[0].embeds[0].fields.map((f) => f.name), ['✅ 1. fondus', '✅ 3. historique']); // the list's own numbers
+  lp = resolve([{ type: 'todo_list', list: 'general', author: 'Alex' }], sup);
+  await run(lp, lio);
+  assert.strictEqual(describe(lp), 'Dans la liste générale, 1 point de Alex : voix de Claude.');
+  console.log('batch 4, written mode and list filters: ok');
+
+  // Through hear(): acks, silent actions, offers, the low sound; the conversation goes on across speakers
+  const chans = new Map(['dev-bot-test', 'memes', 'général'].map((name) => [name, { type: 0, name }]));
+  for (const c of chans.values()) c.ref = c;
+  const vs = (m, channel) => ({ id: m.id, channel: { name: channel }, member: { displayName: m.displayName, user: { bot: false, username: m.displayName, globalName: null }, voice: { channel: { name: channel }, setMute: async () => {}, serverMute: false } } });
+  const who = (id, displayName, roleNames = []) => ({ id, displayName, roles: { cache: roleNames.map((name) => ({ name, id: `r-${name}` })) }, user: { bot: false, username: displayName } });
+  const SUPER = who('261531632589078528', 'WakandeX'), KEV = who('kev', 'Kévin', ['Team Prime']), NOBODY = who('x', 'Inconnu');
+  const guild = { voiceStates: { cache: new Map([[SUPER.id, vs(SUPER, 'Général')], [KEV.id, vs(KEV, 'Général')]]) }, channels: { cache: new Map([...chans, ['Général', { type: 2, name: 'Général' }]]) } };
+  const go = async (m, text, acked = false) => {
+    const io = { said: [], sounds: [], posts: [], speaking: () => null, hush() {}, beep() { io.sounds.push('beep'); }, ack() { io.sounds.push('ack'); return true; }, nope() { io.sounds.push('nope'); },
+      say(t) { io.said.push(t); }, memberName: async (id) => id, music: { nowPlaying: () => null },
+      post: async (c, ch = chans.get('dev-bot-test')) => { io.posts.push([c, ch.name]); return ch.name; } };
+    io.textChannel = { name: 'dev-bot-test', send: async (msg) => io.posts.push([msg, 'dev-bot-test']) }; // the ping sends itself
+    await hear({ text, member: m, guild, tEnd: performance.now(), io, acked });
+    return io;
+  };
+  for (const v of guild.voiceStates.cache.values()) v.member.voice.setMute = async () => {};
+  let io = await go(SUPER, 'Bobby, mute Kévin');
+  assert.deepStrictEqual([io.sounds, io.said], [['ack'], []]); // "Ça marche." then done without a word
+  io = await go(SUPER, 'Bobby, mute Kévin', true);
+  assert.deepStrictEqual([io.sounds, io.said], [[], []]); // acked at the wake gate already: no second ack
+  io = await go(SUPER, 'Bobby, quelle heure est-il ?', true);
+  assert.match(io.said[0], /^Nous sommes/); // an answer is spoken
+  io = await go(SUPER, "Bobby, est-ce que tu peux m'appeler sur Discord ?", true);
+  assert.deepStrictEqual(io.said, ["Je ne peux pas passer d'appel, mais je peux te mentionner dans le salon texte. Tu veux ?"]);
+  io = await go(SUPER, 'Oui.');
+  assert.deepStrictEqual([io.sounds, io.posts[0][0].allowedMentions], [['ack'], { users: [SUPER.id] }]); // the "oui" runs the offered ping
+  io = await go(NOBODY, 'Bobby, mute Kévin');
+  assert.deepStrictEqual(io.sounds, ['nope']); // heard, no rights: the low sound
+  io = await go(KEV, 'Bobby, mute WakandeX', true);
+  assert.deepStrictEqual([io.sounds, io.said], [['nope'], ["Tu n'as pas le droit de me demander ça."]]);
+  io = await go(SUPER, 'Bobby, explique dans le chat ce que tu sais faire', true);
+  assert.deepStrictEqual([io.said, io.posts[0][0].embeds[0].title], [["Je t'envoie ça dans dev-bot-test."], '🤖 Ce que je sais faire']);
+  // "refais": the speaker's own last request, even after someone else spoke
+  remember({ at: new Date().toISOString(), id: KEV.id, who: 'Kévin', query: 'quelle heure est-il', outcome: 'done' });
+  io = await go(SUPER, 'Bobby, refais', true);
+  assert.deepStrictEqual([io.posts.length, io.said], [1, ["Je t'envoie ça dans dev-bot-test."]]);
+  assert.deepStrictEqual(conversation().slice(-2).map((h) => h.who), ['Kévin', 'WakandeX']);
+  // After review: only what ran is "done"; a "oui" is never what "refais" replays
+  await go(SUPER, "Bobby, est-ce que tu peux m'appeler sur Discord ?", true);
+  assert.strictEqual(conversation().at(-1).did, ''); // offered, not done
+  await go(SUPER, 'Oui.');
+  assert.deepStrictEqual([conversation().at(-1).confirm, conversation().at(-1).did.startsWith('ping')], [true, true]);
+  io = await go(SUPER, 'Bobby, refais', true);
+  assert.deepStrictEqual(io.said, ["Je ne peux pas passer d'appel, mais je peux te mentionner dans le salon texte. Tu veux ?"]);
+  console.log('batch 4, coworker tone through hear: ok');
+}
 
 // ---------- Batch 2 (journal of 2026-11-12, 22:12-22:24) ----------
 async function batch2() {
@@ -438,11 +599,14 @@ async function batch2() {
   assert.strictEqual(needed(resolve(quick('quels sont les droits de Lucas'), alex)), 'prime');
   console.log('self-knowledge in sync: ok');
 
-  // History: last 5 requests within 10 minutes, per person
-  const { remember, historyOf } = require('./brain');
-  for (let i = 1; i <= 7; i++) remember('h1', `demande ${i}`, `réponse ${i}`);
-  assert.deepStrictEqual(historyOf('h1').map((h) => h.query), ['demande 3', 'demande 4', 'demande 5', 'demande 6', 'demande 7']);
-  assert.deepStrictEqual(historyOf('h2'), []);
+  // History: shared by everyone talking to Bobby, last 10 exchanges within 30 minutes (batch 4)
+  const { remember, conversation } = require('./brain');
+  const at = (min) => new Date(Date.now() - min * 60_000).toISOString();
+  remember({ at: at(31), id: 'h1', who: 'Old', query: 'trop vieux', outcome: 'done' });
+  for (let i = 1; i <= 12; i++) remember({ at: at(0), id: i % 2 ? 'h1' : 'h2', who: i % 2 ? 'Lucas' : 'Marie', query: `demande ${i}`, plan: 'time', reply: `réponse ${i}`, outcome: 'done' });
+  remember({ at: at(0), id: 'h1', query: 'Bobby', outcome: 'waiting' }); // not an exchange
+  assert.deepStrictEqual(conversation().map((h) => h.query), Array.from({ length: 10 }, (_, i) => `demande ${i + 3}`));
+  assert.deepStrictEqual([conversation()[0].who, conversation()[0].did], ['Lucas', 'time']);
   console.log('history: ok');
 
   // Own messages: clean needs a "oui", is admin, and defaults to the text channel

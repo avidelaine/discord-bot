@@ -84,7 +84,7 @@ module.exports = {
     [/^(?:passe|mets|nomme) (.+?) admin$/, (m) => [{ type: 'admin_add', who: [m[1]] }]],
     [/^(?:retire|enlève|enleve) (?:l'|le rôle )?admin (?:de|à|a|au) (.+)$/, (m) => [{ type: 'admin_remove', who: [m[1]] }]],
     [/^(?:(?:dis|donne)[- ]moi )?(?:quels sont |c'est quoi )?(?:les )?(?:droits|permissions) (?:de |d'|du )(.+)$|^(?:(?:dis|donne)[- ]moi )?quels droits (?:a|as) (.+)$|^what are (.+?)'s (?:rights|permissions)$/, (m) => [{ type: 'perm_show', who: [m[1] || m[2] || m[3]] }]],
-    [/^(?:qui a quels droits|(?:liste|montre|affiche|donne)(?:-moi| moi)? (?:les|tous les) droits|(?:la )?liste des droits|who has which rights|(?:list|show|give)(?: me)?(?: all)?(?: the)? rights)$/, () => [{ type: 'rights_list' }]],
+    [/^(?:qui a quels droits|(?:liste|montre|affiche|donne)(?:-moi| moi)? (?:les|tous les) droits|(?:(?:dis|donne)[- ]moi )?(?:la )?liste des droits|who has which rights|(?:list|show|give)(?: me)?(?: all)?(?: the)? rights)$/, () => [{ type: 'rights_list' }]],
   ],
   actions: {
     perm_revoke: {

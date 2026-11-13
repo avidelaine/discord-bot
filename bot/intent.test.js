@@ -12,7 +12,7 @@ fs.writeFileSync(path.join(process.env.DATA_DIR, 'todo.json'), JSON.stringify([
   { id: 1, text: 'Mettre des fondus dans la musique', list: 'general', author: { id: '261531632589078528', name: 'WakandeX' }, at: '2026-11-12T22:15:08.000Z', done: false },
   { id: 2, text: 'Une voix différente pour Claude', list: 'general', author: { id: '261531632589078528', name: 'WakandeX' }, at: '2026-11-12T22:24:03.000Z', done: false },
 ]));
-const { understand, resolve, intent } = require('./brain');
+const { understand, resolve, intent, unsure } = require('./brain');
 
 const ctx = { ...require('./test-context'), role: 'super' };
 
@@ -187,6 +187,31 @@ const WITH_HISTORY = [
   ['le dernier point de la liste est fait', [H('affiche la liste', 'La liste générale : 2 points.')], 'todo_done:'],
 ];
 
+// Batch 4 (test sessions of 2026-11-12/13): the reasoning step and the shared conversation, as hear() decides.
+// check(out, got): out = intent() (analyse, decision 'run' | 'offer' | 'answer', written), got = the plan as fmt.
+const C = (query, did, reply = '', who = 'Alex') => ({ at: Date.now() - 60_000, id: who, who, query, did, reply });
+const notRun = (o) => o.decision !== 'run';
+const BATCH4 = [
+  ['es-tu capable de supprimer mes messages à moi ?', [], notRun],
+  ["est-ce que tu peux supprimer aussi tous les messages que j'ai mis dans le channel memes ?", [], (o) => o.decision === 'answer'],
+  ['quelle est ta range de volume sonore que tu peux atteindre ?', [], notRun],
+  ["est-ce que tu es capable de crier ?", [], notRun],
+  ['est-ce que tu peux augmenter le son de la musique à 200% ?', [], (o, g) => g === 'music_volume:' && o.decision === 'run'],
+  ['explique dans le chat ce que tu sais faire', [], (o, g) => g === 'help:' && o.written],
+  ["est-ce que tu es capable de m'expliquer dans le chat dev-bot-test ce que tu es capable de faire ?", [], (o, g) => g === 'help:' && o.written && o.decision === 'run'],
+  ["quand je te demande ça, c'est la précédente demande que je t'ai faite. Tu es censé être capable de me formater ça autrement qu'en langage naturel, j'aurais voulu des tableaux, des trucs comme ça.",
+    [C('explique dans le chat ce que tu sais faire', 'help', "Je t'envoie ça dans dev-bot-test.")], (o, g) => g === 'help:' && o.written],
+  ['est-ce que tu peux me dire ce qui a déjà été fait dans cette liste ?', [], (o, g) => g === 'todo_list:' && o.actions[0].filter === 'done'],
+  ['est-ce que tu peux me arrobas dans devbot test pour me demander de lancer Apex ?', [], (o, g) => g === 'ping:Alex>dev-bot-test'],
+  ["est-ce que tu peux me ping sur DevBotTest, s'il te plaît ?", [], (o, g) => g === 'ping:Alex>dev-bot-test'],
+  ["est-ce que tu peux m'appeler sur Discord ?", [], (o) => o.decision === 'offer'],
+  ['peux-tu mute Kévin', [], (o, g) => g === 'mute:Kévin' && o.decision === 'run'],
+  ['es-tu capable de couper le micro de Lucas ?', [], notRun],
+  ['non pas lui, Zyklon', [C('mute Kévin', 'mute -> Kévin')], (o, g) => /(?:^| )mute:Zyklon/.test(g)],
+  ['pareil pour Marie', [C('envoie Lucas en AFK', 'move -> Lucas @ AFK', '', 'WakandeX')], (o, g) => g === 'move:Marie>AFK'],
+  ['refais', [C('mute Kévin', 'mute -> Kévin'), C('quelle heure est-il', 'time', 'Nous sommes jeudi.', 'WakandeX')], (o, g) => g === 'mute:Kévin'],
+];
+
 // Adjacent steps of the same type and channel count as one ("mute Zyklon" + "mute Kévin" = "mute Zyklon and Kévin").
 const merge = (plan) => plan.reduce((out, s) => {
   const last = out.at(-1);
@@ -198,26 +223,28 @@ const fmt = (plan) => merge(plan).map((s) => `${s.type}:${(s.targets || []).map(
 
 
 (async () => {
-  let ok = 0;
+  let ok = 0, unsureN = 0;
   const times = [];
   for (const [phrase, want] of CASES) {
     const t0 = performance.now();
     let got;
     try {
       const out = await understand(phrase, ctx);
+      if (unsure(out)) { unsureN++; console.log(`unsure (Claude would rethink): "${phrase}"`); }
       got = out.actions.length ? fmt(resolve(out.actions, ctx)) : [];
     } catch (e) {
       if (e.code === 'LLM_DOWN') throw new Error('llama-server is not answering on port 8080');
       got = 'ERR';
     }
     times.push(performance.now() - t0);
-    const pass = Array.isArray(want) ? Array.isArray(got) : got === want;
+    // 'ERR': no action runs; since the analysis step the model may also say it itself ("je ne trouve pas Bernard")
+    const pass = Array.isArray(want) ? Array.isArray(got) : got === want || (want === 'ERR' && Array.isArray(got));
     if (pass) ok++;
     else console.log(`FAIL  "${phrase}"\n   expected ${JSON.stringify(want)}\n   got      ${JSON.stringify(got)}`);
   }
   times.sort((a, b) => a - b);
   const med = Math.round(times[times.length >> 1]);
-  console.log(`\nComprehension: ${ok}/${CASES.length}  ·  LLM latency median ${med} ms, max ${Math.round(times.at(-1))} ms`);
+  console.log(`\nComprehension: ${ok}/${CASES.length}  ·  LLM latency median ${med} ms, max ${Math.round(times.at(-1))} ms  ·  unsure (Claude fallback) ${unsureN}`);
 
   // Routing and history: run as Bobby does (shortcut first). "!ask" passes for any local answer, not for an error.
   let rok = 0;
@@ -234,5 +261,17 @@ const fmt = (plan) => merge(plan).map((s) => `${s.type}:${(s.targets || []).map(
   }
   const local = ROUTING.filter(([, w]) => w !== 'ask:').length;
   console.log(`Routing: ${rok}/${cases.length} (${local} must stay local, ${ROUTING.length - local} must go to Claude, ${WITH_HISTORY.length} with history)`);
-  process.exit(ok / CASES.length >= 0.9 && rok / cases.length >= 0.9 ? 0 : 1);
+
+  let bok = 0;
+  for (const [phrase, history, check] of BATCH4) {
+    let out, got;
+    try {
+      out = await intent(phrase, ctx, 'fr', history);
+      got = out.actions.length ? fmt(resolve(out.actions, ctx)) : '(answered)';
+    } catch (e) { got = `ERR ${e.message}`; }
+    if (out && check(out, got)) bok++;
+    else console.log(`FAIL  batch 4 "${phrase}"\n   got ${got} · ${JSON.stringify({ analyse: out?.analyse, decision: out?.decision, written: out?.written, say: out?.say })}`);
+  }
+  console.log(`Batch 4 (reasoning, conversation): ${bok}/${BATCH4.length}`);
+  process.exit(ok / CASES.length >= 0.9 && rok / cases.length >= 0.9 && bok / BATCH4.length >= 0.9 ? 0 : 1);
 })();

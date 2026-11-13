@@ -132,12 +132,13 @@ module.exports = {
     '- pc_launch : lancer le jeu ou l\'application nommé dans "text" (Valorant, Steam, Epic, Claude, ChatGPT...)',
     '- pc_close : fermer le jeu ou l\'application nommé dans "text" ("ferme Apex", "quitte Spotify")',
     '- pc_lock / pc_sleep / pc_shutdown : verrouiller, mettre en veille ou éteindre le PC',
-    '- pc_gpu : température, charge et mémoire de la carte graphique',
+    '- pc_gpu : température, charge et mémoire de la carte graphique (GPU) du PC, en français ou en anglais ("graphics card")',
   ],
   rules: [
     '- pc_media et pc_volume seulement si on parle du PC, de Windows, de Spotify ou de YouTube Music. "lance" ou "ouvre" suivi d\'un jeu ou d\'une application, c\'est pc_launch. "ferme", "quitte" ou "close" suivi d\'un jeu ou d\'une application, c\'est pc_close, jamais pc_launch.',
   ],
   examples: [
+    '"what is my GPU temperature" -> {"actions":[{"type":"pc_gpu"}],"say":""}',
     '"mets la musique en pause sur le PC" -> {"actions":[{"type":"pc_media","text":"pause"}],"say":""}',
     '"passe à la musique suivante sur Spotify" -> {"actions":[{"type":"pc_media","text":"next"}],"say":""}',
     '"baisse le son du PC à 30" -> {"actions":[{"type":"pc_volume","text":"30"}],"say":""}',
@@ -168,7 +169,7 @@ module.exports = {
   ],
   actions: {
     pc_media: {
-      role: 'super', text: true,
+      role: 'super', text: true, echo: (s) => !s.fail, // done silently after the ack (see brain.js report)
       run: safe(async (s) => { if (!MEDIA[s.text]) throw new Error(`unknown media command "${s.text}"`); await voice(`/pc/media/${s.text}`, 'POST'); }),
       say: say((s) => MEDIA[s.text][0], (s) => MEDIA[s.text][1]),
     },
@@ -181,7 +182,7 @@ module.exports = {
       ),
     },
     pc_volume: {
-      role: 'super', text: true,
+      role: 'super', text: true, echo: (s) => !s.fail,
       run: safe(async (s) => {
         const t = s.text.toLowerCase().trim();
         const q = /^\d+$/.test(t) ? `level=${Math.min(100, +t)}` : { up: 'delta=10', down: 'delta=-10', mute: 'mute=true', unmute: 'mute=false' }[t];

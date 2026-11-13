@@ -1,4 +1,5 @@
 """Bobby's voice service: speech-to-text (Whisper, GPU) and text-to-speech (Piper, CPU)."""
+import asyncio
 import io
 import os
 import site
@@ -18,7 +19,7 @@ for sp in site.getsitepackages():
 
 import numpy as np
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from faster_whisper import WhisperModel
 from piper import PiperVoice
@@ -83,7 +84,11 @@ wake = None
 if WAKE_MODEL.exists():
     from openwakeword.model import Model
 
-    wake = Model(wakeword_models=[str(WAKE_MODEL)], inference_framework="onnx")
+    def new_wake():
+        return Model(wakeword_models=[str(WAKE_MODEL)], inference_framework="onnx")
+
+    wake = new_wake()
+    wake_pool = [new_wake()]  # idle models for /listen: a Model keeps state, so each live stream needs its own (the global one stays for /transcribe)
     print("Wake word model loaded: Whisper only runs after 'Bobby'.", flush=True)
 else:
     print("No wake word model: every sentence goes through Whisper.", flush=True)
@@ -111,9 +116,48 @@ def to_16k(raw: bytes) -> np.ndarray:
     return resample_poly(pcm, 1, 3).astype(np.float32)
 
 
+class WakeScan:
+    """bobby_score, fed while the sentence is still being spoken."""
+
+    PAD = np.zeros(8000, np.float32)
+
+    def __init__(self, model):
+        self.model, self.fed, self.score = model, 0, 0.0
+        model.reset()
+
+    def feed(self, raw: bytes, final: bool = False) -> float:
+        # ponytail: re-converts the whole buffer on every chunk (sentences are short, so the quadratic cost is fine)
+        audio = to_16k(raw) if len(raw) >= 4 else np.zeros(0, np.float32)
+        parts = [self.PAD, audio] + ([self.PAD] if final else [])
+        pcm = (np.clip(np.concatenate(parts), -1, 1) * 32767).astype(np.int16)
+        while self.fed + 1280 <= len(pcm):
+            self.score = max(self.score, float(max(self.model.predict(pcm[self.fed : self.fed + 1280]).values())))
+            self.fed += 1280
+        return self.score
+
+
+def run_whisper(audio: np.ndarray, hotwords: str | None):
+    opts = dict(
+        beam_size=1,  # greedy search: faster, near-identical quality on short sentences
+        temperature=0,
+        vad_filter=True,
+        condition_on_previous_text=False,
+        hotwords=hotwords or None,
+    )
+    segments, info = whisper.transcribe(audio, **opts)  # language detected by Whisper
+    lang = info.language
+    if lang not in LANGS:  # rare: misdetection on a short sentence, redo it in the likelier of fr/en
+        probs = dict(info.all_language_probs or [])
+        lang = max(LANGS, key=lambda l: probs.get(l, 0.0))
+        segments, _ = whisper.transcribe(audio, language=lang, **opts)
+    # -1.5: lenient, the wake word filter already keeps most chatter away from Whisper ("Dis Bobby" scored -0.95).
+    text = " ".join(s.text for s in segments if s.avg_logprob > -1.5).strip()
+    return text, lang
+
+
 @app.post("/transcribe")
 async def transcribe(request: Request):
-    # ponytail: async endpoint + blocking Whisper = transcriptions run one at a time, no lock needed.
+    # ponytail: blocking Whisper in an async endpoint = one transcription at a time, no lock needed here.
     audio = to_16k(await request.body())
     t = time.perf_counter()
     heard, score = None, None
@@ -126,24 +170,64 @@ async def transcribe(request: Request):
             return {"text": "", "wake": False, "score": round(score, 3), "seconds": round(len(audio) / 16000, 1), "ms": ms}
         print(f"[wake] 'Bobby' heard (score {score:.2f}, {ms} ms)", flush=True)
         heard = True
-    opts = dict(
-        beam_size=1,  # greedy search: faster, near-identical quality on short sentences
-        temperature=0,
-        vad_filter=True,
-        condition_on_previous_text=False,
-        hotwords=unquote(request.headers.get("x-hotwords", "")) or None,
-    )
-    segments, info = whisper.transcribe(audio, **opts)  # language detected by Whisper
-    lang = info.language
-    if lang not in LANGS:  # rare: misdetection on a short sentence, redo it in the likelier of fr/en
-        probs = dict(info.all_language_probs or [])
-        lang = max(LANGS, key=lambda l: probs.get(l, 0.0))
-        segments, _ = whisper.transcribe(audio, language=lang, **opts)
-    # -1.5: lenient, the wake word filter already keeps most chatter away from Whisper ("Dis Bobby" scored -0.95).
-    text = " ".join(s.text for s in segments if s.avg_logprob > -1.5).strip()
+    text, lang = run_whisper(audio, unquote(request.headers.get("x-hotwords", "")))
     ms = round((time.perf_counter() - t) * 1000)
     print(f"[stt] {ms} ms  {len(audio) / 16000:.1f} s of audio  {lang}  {text!r}", flush=True)
     return {"text": text, "lang": lang, "wake": heard, "score": None if score is None else round(score, 3), "ms": ms}
+
+
+whisper_lock = asyncio.Lock()  # one GPU transcription at a time; the event loop keeps scoring the other streams
+
+
+@app.websocket("/listen")
+async def listen(ws: WebSocket, force: str = "0", hotwords: str = ""):
+    """One utterance: binary PCM chunks (s16le 48 kHz stereo) then the text 'end'. Replies: wake, gate, text."""
+    await ws.accept()
+    raw = bytearray()
+    gated = wake is not None and force != "1"
+    model = (wake_pool.pop() if wake_pool else new_wake()) if gated else None
+    scan = WakeScan(model) if gated else None
+    woke = False
+    try:
+        while True:
+            msg = await ws.receive()
+            if msg["type"] == "websocket.disconnect":
+                return
+            if msg.get("bytes"):
+                raw += msg["bytes"]
+                if scan and not woke and scan.feed(bytes(raw)) >= WAKE_THRESHOLD:
+                    woke = True  # the green ring can light up while the person is still talking
+                    await ws.send_json({"type": "wake", "score": round(scan.score, 3)})
+            elif msg.get("text") == "end":
+                break
+        t = time.perf_counter()
+        audio = to_16k(bytes(raw)) if len(raw) >= 4 else np.zeros(0, np.float32)
+        seconds = round(len(audio) / 16000, 1)
+        score = None
+        if scan:
+            score = round(scan.feed(bytes(raw), final=True), 3)
+        ms = round((time.perf_counter() - t) * 1000)
+        passed = None if score is None else score >= WAKE_THRESHOLD
+        await ws.send_json({"type": "gate", "wake": passed, "score": score, "seconds": seconds, "ms": ms})
+        if passed is not None:
+            print(f"[wake] {'Bobby heard' if passed else 'no Bobby'} (score {score:.2f}, gate {ms} ms after the end)", flush=True)
+        if passed is False:
+            return
+        t = time.perf_counter()
+        async with whisper_lock:
+            text, lang = await asyncio.to_thread(run_whisper, audio, hotwords)
+        ms = round((time.perf_counter() - t) * 1000)
+        print(f"[stt] {ms} ms  {seconds:.1f} s of audio  {lang}  {text!r}", flush=True)
+        await ws.send_json({"type": "text", "text": text, "lang": lang, "ms": ms})
+    except (WebSocketDisconnect, RuntimeError):  # client left mid-sentence (RuntimeError: send after close)
+        pass
+    finally:
+        if model:
+            wake_pool.append(model)
+        try:
+            await ws.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 @app.get("/tts")
@@ -156,4 +240,4 @@ def tts(text: str, lang: str = "fr", voice: str = "bobby"):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=3000, log_level="warning")
+    uvicorn.run(app, host="127.0.0.1", port=int(os.getenv("VOICE_PORT", "3000")), log_level="warning")

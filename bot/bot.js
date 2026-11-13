@@ -241,7 +241,8 @@ function listen(connection, guild, io) {
             gate = m;
             io.ringStop();
             if (m.wake === false) return resolve(null);
-            if (m.wake) { acked = io.ack(); if (!acked) io.beep(); ackMs = Math.round(performance.now() - tEnd); }
+            // no ack over a reply Bobby is giving, nor for someone without rights (the brain answers them)
+            if (m.wake && !io.speaking() && roles.roleOf(member) !== 'other') { acked = io.ack(); if (!acked) io.beep(); ackMs = Math.round(performance.now() - tEnd); }
             return;
           }
           if (m.type === 'text') resolve(m);

@@ -77,9 +77,10 @@ claude_voices = {
 
 # Wake word gate: a tiny CPU model listens for "Bobby" so Whisper (GPU) only runs on sentences meant for Bobby.
 WAKE_MODEL = MODELS / "wakeword" / "bobby.onnx"
-# 0.12: 3 real "Bobby" scored 0.15 on 2026-11-12 and were missed at 0.2. A false trigger only costs one
-# transcription, since the bot still checks that the transcript contains "Bobby".
-WAKE_THRESHOLD = float(os.getenv("WAKE_THRESHOLD", "0.12"))
+# 0.10: 3 real "Bobby" scored 0.15 on 2026-11-12 (missed at 0.2) and 5 near-misses scored 0.06-0.12. On
+# _training/recordings (held-out pos_02,05..29 / neg_00..14) 0.10 keeps 9/10 and 1/15; 0.08 lets 2/15 through
+# (neg_03 at 0.081). A false trigger only costs one transcription: the transcript must still contain "Bobby".
+WAKE_THRESHOLD = float(os.getenv("WAKE_THRESHOLD", "0.10"))
 wake = None
 if WAKE_MODEL.exists():
     from openwakeword.model import Model
@@ -88,7 +89,9 @@ if WAKE_MODEL.exists():
         return Model(wakeword_models=[str(WAKE_MODEL)], inference_framework="onnx")
 
     wake = new_wake()
-    wake_pool = [new_wake()]  # idle models for /listen: a Model keeps state, so each live stream needs its own (the global one stays for /transcribe)
+    # idle models for /listen: a Model keeps state, so each live stream needs its own (the global one stays for /transcribe).
+    # ponytail: 3 preloaded (creating one blocks for seconds); a 4th simultaneous speaker pays that once.
+    wake_pool = [new_wake() for _ in range(3)]
     print("Wake word model loaded: Whisper only runs after 'Bobby'.", flush=True)
 else:
     print("No wake word model: every sentence goes through Whisper.", flush=True)

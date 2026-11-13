@@ -47,13 +47,14 @@ async function facts(s, io) {
     `Surnoms : ${nick || 'aucun'}.`,
     `Celui qui te parle : ${s.by?.name || '?'} (${ROLE_NAME[s.by?.role] || '?'}).`,
     ...(ctx.history?.length ? ['Conversation récente avec toi (tous ceux qui te parlent) :', ...talk(ctx.history)] : []),
+    ...(ctx.trouble?.length ? ['Ton journal, ce qui a raté ou attend encore (du plus ancien au plus récent) :', ...ctx.trouble] : ['Ton journal : aucun échec récent.']),
   ].join('\n');
 }
 
 async function aboutMe(s, io, lang) {
   const system = `${await facts(s, io)}
 
-Réponds à la question ou à la remarque sur toi en une ou deux phrases courtes, à dire à voix haute, en ${lang === 'en' ? 'anglais' : 'français'}, à partir de ces faits uniquement. Si (et seulement si) on te fait une critique ou une suggestion d'amélioration, pas une question, remercie et termine par « Tu veux que je l'ajoute à la liste ? » (en anglais : « Do you want me to add it to the list? »). Ne dis jamais que tu as noté ou retenu quelque chose. Réponds en JSON {"say": "..."}.`;
+Réponds à la question ou à la remarque sur toi en une ou deux phrases courtes, à dire à voix haute, en ${lang === 'en' ? 'anglais' : 'français'}, à partir de ces faits uniquement. Si (et seulement si) on te fait une critique ou une suggestion d'amélioration, pas une question, remercie et termine par « Tu veux que je l'ajoute à la liste ? » (en anglais : « Do you want me to add it to the list? »). Si on te demande pourquoi une demande n'est pas partie, n'a pas marché ou n'a pas eu de réponse, explique-le à partir de ton journal ci-dessus, en mots simples ; si le journal ne l'explique pas, dis que tu ne vois aucune erreur dans ton journal, sans rien inventer. Ne dis jamais que tu as noté ou retenu quelque chose. Réponds en JSON {"say": "..."}.`;
   const out = await llm([{ role: 'system', content: system }, { role: 'user', content: s.text }], { type: 'object', properties: { say: { type: 'string' } }, required: ['say'] }, 200);
   // ponytail: a question never gets the "add it to the list?" offer, whatever the model thought (2026-11-13).
   const question = /\?\s*$|^(?:pourquoi|comment|est-ce|qu(?:'|e |oi|el|i )|où|quand|combien|why|how|what|who|when|where|do |does |did |can |are |is )/i.test(s.text.trim());

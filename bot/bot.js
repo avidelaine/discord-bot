@@ -69,14 +69,12 @@ const NOPE = (() => {
 
 // Spoken acks, synthesized once by the voice service (retried while it was not up yet).
 const ACKS = ["D'accord.", 'Ça marche.', "Je m'en occupe.", "C'est parti.", 'Entendu.'];
-const YES = 'Oui ?'; // "Bobby ?" alone: Bobby answers, then listens to the next sentence
-const CLIPS = [...ACKS, YES];
 const ackPcm = new Map();
 let lastAck = null, ackLoading = false;
 async function loadAcks() {
-  if (ackLoading || ackPcm.size === CLIPS.length) return;
+  if (ackLoading || ackPcm.size === ACKS.length) return;
   ackLoading = true;
-  for (const t of CLIPS) {
+  for (const t of ACKS) {
     if (ackPcm.has(t)) continue;
     try {
       const res = await fetch(`${VOICE_URL}/tts?lang=fr&voice=bobby&text=${encodeURIComponent(t)}`);
@@ -87,7 +85,7 @@ async function loadAcks() {
     } catch { break; }
   }
   ackLoading = false;
-  if (ackPcm.size < CLIPS.length) setTimeout(loadAcks, 10_000);
+  if (ackPcm.size < ACKS.length) setTimeout(loadAcks, 10_000);
 }
 
 // 0.4 s of silence after a spoken reply: Discord cuts the end of a stream, this keeps it off the last syllable.
@@ -162,8 +160,6 @@ function makeIo(guild, textChannel) {
     beep: () => io.clip(BEEP),
     nope: () => io.clip(NOPE),
     clip(pcm) { io.ringStop(); clip = mixer.overlay(new PassThrough().end(pcm)); },
-    // "Oui ?" when called alone. False while the clip is not synthesized yet (caller says it instead).
-    yes: () => ackPcm.has(YES) && (io.clip(ackPcm.get(YES)), true),
     // Spoken "got it" once the transcript is an order. False while the clips are not synthesized yet (caller falls back to the beep).
     ack() {
       const pool = ACKS.filter((t) => t !== lastAck && ackPcm.has(t));

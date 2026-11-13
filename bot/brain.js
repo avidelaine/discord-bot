@@ -150,13 +150,22 @@ let CONVO = []; // [{ at, id, who, query, did, reply }]
 const conversation = () => CONVO.filter((h) => Date.now() - h.at < HISTORY_MS).slice(-HISTORY_MAX);
 // Only what really ran counts as done (a plan offered, refused or awaiting a yes is in the reply, never in "did").
 const DID = new Set(["done", "confirmed"]);
+// What went wrong lately, for "pourquoi ça n'a pas marché ?": Bobby answers from its own journal, never from a guess.
+const TROUBLE_WHY = { ignored: "phrase ignorée : pas de « Bobby » dedans, ou dite trop tard après le bip", error: 'action en échec', resolve_error: 'demande non exécutée', forbidden: 'refusé : droits insuffisants', llm_down: 'le cerveau local ne répondait pas', cancelled: 'annulé' };
+let TROUBLE = []; // [{ at, who, query, why }]
+const RUNNING = new Map(); // rec -> started at: requests still being worked on
+const trouble = () => [
+  ...TROUBLE.filter((x) => Date.now() - x.at < HISTORY_MS).map((x) => `- ${x.who} : "${x.query}" -> ${x.why}`),
+  ...[...RUNNING].map(([r, at]) => `- ${r.who} : "${r.query}" -> toujours en cours depuis ${Math.round((Date.now() - at) / 1000)} s, pas encore de résultat`),
+];
 function remember(rec) {
+  if (TROUBLE_WHY[rec.outcome]) TROUBLE = [...TROUBLE, { at: Date.parse(rec.at) || Date.now(), who: rec.who, query: rec.query || rec.heard || '', why: `${TROUBLE_WHY[rec.outcome]}${rec.error ? ` (${rec.error})` : ''}` }].slice(-8);
   if (!rec.query || NOT_EXCHANGES.has(rec.outcome)) return;
   CONVO = [...conversation(), { at: Date.parse(rec.at) || Date.now(), id: rec.id, who: rec.who, query: rec.query, did: DID.has(rec.outcome) ? rec.plan || '' : '', ...(rec.confirm && { confirm: true }), reply: (rec.reply || '').slice(0, 200) }].slice(-HISTORY_MAX);
 }
 // ponytail: reads the journal's last 256 KB, plenty for 10 exchanges among the "skipped" lines of other speech.
 function reload() {
-  CONVO = [];
+  CONVO = []; TROUBLE = [];
   try {
     const fd = fs.openSync(JOURNAL, 'r');
     const size = fs.fstatSync(fd).size, n = Math.min(size, 256 * 1024), buf = Buffer.alloc(n);
@@ -428,7 +437,6 @@ const LINES = {
     undo: (done) => (done ? "J'annule." : "Il n'y a rien à annuler."),
     confirm: 'Tu confirmes ?',
     cancelled: "D'accord, j'annule.",
-    yes: 'Oui ?',
     notUnderstood: "Je n'ai pas compris.",
     noRights: "Je n'ai pas les droits Discord pour ça.",
     failed: "Ça n'a pas marché.",
@@ -444,7 +452,6 @@ const LINES = {
     undo: (done) => (done ? 'Undone.' : 'Nothing to undo.'),
     confirm: 'Confirm?',
     cancelled: 'Okay, cancelled.',
-    yes: 'Yes?',
     notUnderstood: "Sorry, I didn't get that.",
     noRights: "I don't have the Discord permissions for that.",
     failed: "That didn't work.",
@@ -579,7 +586,7 @@ async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttM
     io.hush();
     return console.log(`[stop] ${member.displayName} interrupted Bobby`);
   }
-  if (!wake && !p) { journal({ ...rec, outcome: 'ignored' }); return console.log(`[ignored] no "Bobby" in "${text}"`); }
+  if (!wake && !p) { remember({ ...rec, outcome: 'ignored' }); journal({ ...rec, outcome: 'ignored' }); return console.log(`[ignored] no "Bobby" in "${text}"`); }
   const L = lang === 'en' ? LINES.en : LINES.fr;
   const role = roles.roleOf(member);
   rec.role = role;
@@ -628,13 +635,14 @@ async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttM
     rec.query = query;
     console.log(`[query] "${query}" (${lang})`);
     if (query.replace(/[^\p{L}]/gu, '').length < 2) {
-      // "Bobby ?": like a coworker, "Oui ?", then the next sentence is the order (no "Bobby" needed).
-      if (!io.yes?.()) say(L.yes);
+      // "Bobby ?" alone: a beep, then the next sentence is the order (no "Bobby" needed).
+      io.beep?.(); // the short beep (it also lights Bobby's ring): heard, go on
       pending.set(member.id, { until: Date.now() + 8000 });
       rec.outcome = 'waiting';
       return console.log('[waiting] "Bobby" alone: next sentence is the command (8 s)');
     }
-    const ctx = { ...context(member, guild), role, history };
+    const ctx = { ...context(member, guild), role, history, trouble: trouble() };
+    RUNNING.set(rec, Date.now());
     // "dis-moi par écrit…": the request without its writing words; the answer is posted, Bobby only says where.
     let w = null;
     const written = (x) => {
@@ -717,6 +725,7 @@ async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttM
     console.error('[bobby]', e);
     say(e.code === 50013 ? L.noRights : L.failed);
   } finally {
+    RUNNING.delete(rec);
     remember(rec);
     t.total = Math.round(performance.now() - tEnd);
     rec.timing = t;

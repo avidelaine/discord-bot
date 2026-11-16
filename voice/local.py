@@ -17,6 +17,36 @@ PREROLL = 4  # blocks kept before the voice starts (the "B" of "Bobby")
 MAX_S = 15
 
 
+class Gate:
+    """Energy gate: feed 80 ms blocks, get a whole sentence back when it ends. Pure, so the Rust port is tested on it."""
+
+    def __init__(self):
+        self.noise, self.voiced, self.quiet, self.pre, self.buf = 0.005, False, 0, [], []
+
+    def reset(self):  # Bobby speaks: drop what was heard (the noise floor is kept)
+        self.voiced, self.buf, self.pre = False, [], []
+
+    def feed(self, block):
+        rms = float(np.sqrt(np.mean(block**2)))
+        # ponytail: energy gate with a slow noise floor; a VAD model would cut better in a noisy room
+        if not self.voiced:
+            self.noise = 0.98 * self.noise + 0.02 * rms if rms < self.noise * 3 else self.noise
+        loud = rms > max(0.01, self.noise * 3)
+        if not self.voiced:
+            self.pre = (self.pre + [block])[-PREROLL:]
+            if loud:
+                self.voiced, self.quiet, self.buf = True, 0, list(self.pre)
+            return None
+        self.buf.append(block)
+        self.quiet = 0 if loud else self.quiet + 1
+        if self.quiet * BLOCK / RATE >= SILENCE_S or len(self.buf) * BLOCK / RATE >= MAX_S:
+            audio = np.concatenate(self.buf)
+            self.reset()
+            if len(audio) / RATE >= 0.4:
+                return audio
+        return None
+
+
 class Local:
     """Cuts the microphone into sentences with an energy gate, then hands each one to `on_sentence(audio)`."""
 
@@ -36,32 +66,18 @@ class Local:
     def _run(self):
         import sounddevice as sd  # only imported when local mode is used
 
-        noise, voiced, quiet, pre, buf = 0.005, False, 0, [], []
+        gate = Gate()
         try:
             with sd.InputStream(samplerate=RATE, channels=1, dtype="float32", blocksize=BLOCK) as mic:
                 print(f"[local] listening on the PC microphone ({sd.query_devices(kind='input')['name']})", flush=True)
                 while self.enabled:
                     block = mic.read(BLOCK)[0][:, 0].copy()
                     if self.speaking:
-                        voiced, buf, pre = False, [], []
+                        gate.reset()
                         continue
-                    rms = float(np.sqrt(np.mean(block**2)))
-                    # ponytail: energy gate with a slow noise floor; a VAD model would cut better in a noisy room
-                    if not voiced:
-                        noise = 0.98 * noise + 0.02 * rms if rms < noise * 3 else noise
-                    loud = rms > max(0.01, noise * 3)
-                    if not voiced:
-                        pre = (pre + [block])[-PREROLL:]
-                        if loud:
-                            voiced, quiet, buf = True, 0, list(pre)
-                        continue
-                    buf.append(block)
-                    quiet = 0 if loud else quiet + 1
-                    if quiet * BLOCK / RATE >= SILENCE_S or len(buf) * BLOCK / RATE >= MAX_S:
-                        audio = np.concatenate(buf)
-                        voiced, buf, pre = False, [], []
-                        if len(audio) / RATE >= 0.4:
-                            threading.Thread(target=self.on_sentence, args=(audio,), daemon=True).start()
+                    audio = gate.feed(block)
+                    if audio is not None:
+                        threading.Thread(target=self.on_sentence, args=(audio,), daemon=True).start()
         except Exception as e:  # noqa: BLE001  (no microphone, device unplugged)
             print(f"[local] microphone unavailable: {e}", flush=True)
         print("[local] stopped listening on the PC microphone", flush=True)

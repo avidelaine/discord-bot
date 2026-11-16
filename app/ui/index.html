@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bobby - Contrôle</title>
+<style>
+:root{--bg:#14161b;--panel:#1c1f26;--panel2:#232730;--line:#2d323d;--tx:#e6e8ee;--mu:#8b92a3;--ac:#6aa5ff;
+--grey:#7d8494;--green:#3fb97a;--blue:#4c9aff;--amber:#e0a43a;--red:#e5534b;
+--c1:#6aa5ff;--c2:#3fb97a;--c3:#e0a43a;--c4:#c07cf0;--c5:#e5534b;--hl:#2a3a55}
+@media (prefers-color-scheme:light){:root{--bg:#f2f3f6;--panel:#fff;--panel2:#eceef3;--line:#d8dbe3;--tx:#1b1e25;--mu:#69708a;--ac:#2a6ae0;
+--grey:#7d8494;--green:#1f9a5c;--blue:#2a6ae0;--amber:#b87a0c;--red:#d03a32;--hl:#dce8ff}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--tx);font:13px/1.4 "Segoe UI",system-ui,sans-serif;display:grid;grid-template-columns:176px 1fr;grid-template-rows:auto auto 1fr;overflow:hidden}
+#side{grid-row:1/4;background:var(--panel);border-right:1px solid var(--line);padding:12px 8px;display:flex;flex-direction:column;gap:4px}
+#side h1{font-size:15px;margin:2px 8px 12px}
+#side button{all:unset;cursor:pointer;padding:8px 10px;border-radius:6px;color:var(--mu)}
+#side button:hover{background:var(--panel2)}
+#side button.on{background:var(--panel2);color:var(--tx);box-shadow:inset 3px 0 var(--ac)}
+header{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--grey);display:inline-block}
+.dot.up{background:var(--green)}.dot.down{background:var(--red)}
+#hstate{font-weight:600;font-size:14px}
+.mu{color:var(--mu)}
+.sp{flex:1}
+.btn{background:var(--panel2);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:5px 12px;cursor:pointer;font:inherit}
+.btn:hover{border-color:var(--ac)}.btn:disabled{opacity:.45;cursor:default}
+.btn.go{background:var(--green);color:#fff;border-color:transparent}
+.btn.stop{background:var(--red);color:#fff;border-color:transparent}
+#banner{display:none;background:var(--red);color:#fff;padding:5px 16px;font-weight:600}
+main{overflow:auto;padding:16px;position:relative}
+.tab{display:none}.tab.on{display:block}
+.grid{display:grid;gap:12px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px}
+.card h3{margin:0 0 6px;font-size:12px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.big{font-size:26px;font-weight:600;font-variant-numeric:tabular-nums}
+.big small{font-size:13px;color:var(--mu);font-weight:400}
+svg.spark{width:100%;height:36px;display:block;margin-top:4px}
+h2{font-size:14px;margin:18px 0 8px}
+table{border-collapse:collapse;width:100%}
+th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--mu);font-weight:600;font-size:12px;position:sticky;top:-16px;background:var(--bg);z-index:1}
+.badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11.5px;font-weight:600;color:#fff;white-space:nowrap}
+.b-grey{background:var(--grey)}.b-green{background:var(--green)}.b-blue{background:var(--blue)}.b-amber{background:var(--amber)}.b-red{background:var(--red)}
+.chip{cursor:pointer;border:1px solid var(--line);background:transparent;color:var(--mu);border-radius:14px;padding:3px 10px;font:inherit}
+.chip.on{color:#fff;border-color:transparent}
+.chip.on.b-grey{background:var(--grey)}.chip.on.b-green{background:var(--green)}.chip.on.b-blue{background:var(--blue)}.chip.on.b-amber{background:var(--amber)}.chip.on.b-red{background:var(--red)}
+.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+input,select{background:var(--panel);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font:inherit}
+tr.row{cursor:pointer}tr.row:hover{background:var(--panel2)}
+tr.new{animation:fl 2.5s ease-out}
+@keyframes fl{from{background:var(--hl)}to{background:transparent}}
+.cut{max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#panel{position:fixed;top:0;right:-520px;width:500px;height:100%;background:var(--panel);border-left:1px solid var(--line);padding:16px;overflow:auto;transition:right .2s;z-index:5;box-shadow:-6px 0 20px #0005}
+#panel.open{right:0}
+pre{background:var(--panel2);padding:8px;border-radius:6px;overflow:auto;font:12px/1.4 Consolas,monospace;white-space:pre-wrap;word-break:break-word}
+.tb{display:flex;height:14px;border-radius:4px;overflow:hidden;background:var(--panel2);margin:4px 0}
+.tb i{display:block;height:100%}
+.chart{position:relative}
+.chart svg{width:100%;height:170px;display:block}
+.tip{position:absolute;pointer-events:none;background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:3px 8px;font-size:12px;display:none;white-space:nowrap;z-index:2}
+.leg span{margin-right:12px;font-size:12px}.leg i{display:inline-block;width:10px;height:3px;margin-right:4px;vertical-align:middle}
+#logbox{height:calc(100vh - 210px);overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px;font:12px/1.45 Consolas,monospace;white-space:pre-wrap;word-break:break-all}
+.sub{display:flex;gap:6px}
+</style>
+</head>
+<body>
+<nav id="side">
+ <h1>Bobby</h1>
+ <button data-t="dash" class="on">Tableau de bord</button>
+ <button data-t="journal">Journal</button>
+ <button data-t="res">Ressources</button>
+ <button data-t="logs">Journaux techniques</button>
+</nav>
+<header>
+ <span class="dot" id="hdot"></span><span id="hstate">...</span>
+ <span class="mu" id="hsince"></span><span class="mu" id="hext"></span>
+ <span class="sp"></span>
+ <button class="btn go" id="bStart">Démarrer</button>
+ <button class="btn" id="bRestart">Redémarrer</button>
+ <button class="btn stop" id="bStop">Arrêter</button>
+</header>
+<div id="banner">Serveur de l'app injoignable - nouvelle tentative toutes les 3 s</div>
+<main>
+<section class="tab on" id="t-dash">
+ <div class="grid" id="partCards" style="grid-template-columns:repeat(3,1fr)"></div>
+ <h2>Aujourd'hui</h2>
+ <div class="grid" style="grid-template-columns:repeat(5,1fr)" id="counters"></div>
+ <h2>Machine (2 dernières minutes)</h2>
+ <div class="grid" style="grid-template-columns:repeat(5,1fr)" id="gauges"></div>
+ <h2>Par composant</h2>
+ <div class="card"><table id="partTable"></table></div>
+</section>
+
+<section class="tab" id="t-journal">
+ <div class="bar" id="chips"></div>
+ <div class="bar">
+  <select id="fWho"><option value="">Toutes les personnes</option></select>
+  <input id="fQ" placeholder="Rechercher (phrase, action, réponse)" size="34">
+  <input type="date" id="fDay">
+  <span class="mu" id="jInfo"></span>
+ </div>
+ <table><thead><tr><th>Heure</th><th>Qui</th><th>Phrase entendue</th><th>Catégorie</th><th>Action exécutée</th><th>Réponse de Bobby</th><th>Latence</th></tr></thead><tbody id="jBody"></tbody></table>
+ <div style="text-align:center;margin:12px"><button class="btn" id="jMore">Charger plus</button></div>
+</section>
+
+<section class="tab" id="t-res">
+ <div class="bar" id="ranges"></div>
+ <div class="card" id="bobbyOnly" style="margin-bottom:12px">...</div>
+ <div class="grid" style="grid-template-columns:repeat(2,1fr)" id="charts"></div>
+</section>
+
+<section class="tab" id="t-logs">
+ <div class="bar">
+  <div class="sub" id="logTabs"></div>
+  <input id="lFilter" placeholder="Filtrer" size="26">
+  <label><input type="checkbox" id="lPause"> Pause défilement</label>
+ </div>
+ <div id="logbox"></div>
+</section>
+</main>
+<aside id="panel"></aside>
+
+<script>
+'use strict';
+const $=s=>document.querySelector(s);
+const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const num=(v,d=0)=>typeof v==='number'&&isFinite(v)?v.toFixed(d):'-';
+const hhmmss=iso=>{const d=new Date(iso);return isNaN(d)?'-':d.toLocaleTimeString('fr-FR')};
+const dur=ms=>{if(!(ms>=0))return '-';let s=Math.floor(ms/1000),h=Math.floor(s/3600),m=Math.floor(s%3600/60);s%=60;return (h?h+'h ':'')+(h||m?m+'min ':'')+s+'s'};
+async function api(path,opt){const r=await fetch(path,opt);if(!r.ok)throw new Error(r.status);return r.json()}
+
+// ---------- tabs ----------
+let curTab='dash';
+document.querySelectorAll('#side button').forEach(b=>b.onclick=()=>{
+ curTab=b.dataset.t;
+ document.querySelectorAll('#side button').forEach(x=>x.classList.toggle('on',x===b));
+ document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.id==='t-'+curTab));
+ if(curTab==='res')loadRes();
+ if(curTab==='logs')loadLogs(logPart);
+ if(curTab==='journal'&&!jLoaded)loadJournal(true);
+});
+
+// ---------- status ----------
+let status=null,online=false;
+function setOnline(v){online=v;$('#banner').style.display=v?'none':'block';if(!v){$('#hstate').textContent='Serveur injoignable';$('#hdot').className='dot down'}}
+function renderStatus(){
+ const s=status;if(!s||!online)return;
+ $('#hdot').className='dot '+(s.running?'up':'down');
+ $('#hstate').textContent=s.running?'Bobby en marche':'Bobby arrêté';
+ $('#hsince').textContent=s.running&&s.since?'depuis '+dur(Date.now()-new Date(s.since)):'';
+ $('#hext').textContent=s.external?'(lancé hors de l\'app)':'';
+ $('#bStart').disabled=!!s.running;
+ $('#bStop').disabled=!s.running;$('#bRestart').disabled=!s.running;
+ const names={llm:'Cerveau (LLM)',voice:'Voix (STT/TTS)',bot:'Bot Discord'};
+ const parts=s.parts||[];
+ $('#partCards').innerHTML=['llm','voice','bot'].map(n=>{
+  const p=parts.find(x=>x.name===n)||{};
+  return `<div class="card"><h3>${names[n]}</h3><span class="dot ${p.up?'up':'down'}"></span> <b>${p.up?'actif':'arrêté'}</b>
+  <div class="mu">pid ${p.pid||'-'} - redémarrages ${p.restarts??0}<br>uptime ${p.up&&p.startedAt?dur(Date.now()-new Date(p.startedAt)):'-'}</div></div>`}).join('');
+}
+async function refreshStatus(){try{status=await api('/api/status');setOnline(true);renderStatus()}catch{setOnline(false)}}
+async function act(a,label){
+ if((a==='stop'||a==='restart')&&!confirm(label+' Bobby ?'))return;
+ try{status=await api('/api/'+a,{method:'POST'});renderStatus()}catch{setOnline(false)}
+}
+$('#bStart').onclick=()=>act('start');
+$('#bStop').onclick=()=>act('stop','Arrêter');
+$('#bRestart').onclick=()=>act('restart','Redémarrer');
+setInterval(renderStatus,1000);
+
+// ---------- live metrics ----------
+const HIST=60,hist=[];
+const gdefs=[
+ ['CPU',m=>m.cpu,100,m=>num(m.cpu)+' <small>%</small>'],
+ ['RAM',m=>m.ram&&m.ram.used,m=>m.ram&&m.ram.total,m=>m.ram?num(m.ram.used/1024,1)+' <small>/ '+num(m.ram.total/1024,0)+' Go</small>':'-'],
+ ['GPU',m=>m.gpu&&m.gpu.util,100,m=>m.gpu?num(m.gpu.util)+' <small>%</small>':'n/a'],
+ ['VRAM',m=>m.gpu&&m.gpu.vramUsed,m=>m.gpu&&m.gpu.vramTotal,m=>m.gpu?num(m.gpu.vramUsed/1024,1)+' <small>/ '+num(m.gpu.vramTotal/1024,1)+' Go</small>':'n/a'],
+ ['Température GPU',m=>m.gpu&&m.gpu.temp,100,m=>m.gpu?num(m.gpu.temp)+' <small>°C</small>':'n/a'],
+];
+function spark(vals,max,color='var(--ac)'){
+ const v=vals.filter(x=>typeof x==='number');if(v.length<2)return '<svg class="spark"></svg>';
+ const mx=max||Math.max(...v,1),W=200,H=36,n=vals.length,off=W-(n-1)/(HIST-1)*W;
+ const pts=vals.map((x,i)=>typeof x==='number'?(i/(HIST-1)*W+off).toFixed(1)+','+(H-2-Math.min(x/mx,1)*(H-4)).toFixed(1):null).filter(Boolean).join(' ');
+ return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.6" vector-effect="non-scaling-stroke"/></svg>`;
+}
+function renderLive(){
+ const last=hist[hist.length-1]||{};
+ $('#gauges').innerHTML=gdefs.map((g,i)=>{
+  const vals=hist.map(m=>{try{return g[1](m)}catch{return null}});
+  let mx=g[2];if(typeof mx==='function'){mx=0;hist.forEach(m=>{try{mx=g[2](m)||mx}catch{}})}
+  return `<div class="card"><h3>${g[0]}</h3><div class="big">${last.ts?g[3](last):'-'}</div>${spark(vals,mx,'var(--c'+(i+1)+')')}</div>`}).join('');
+ const nm={llm:'LLM',voice:'Voix',bot:'Bot'};
+ let h='<tr><th>Composant</th><th>CPU %</th><th>CPU (2 min)</th><th>RAM</th><th>RAM (2 min)</th></tr>';
+ for(const n of ['llm','voice','bot']){
+  const cur=last.parts&&last.parts[n];
+  const c=hist.map(m=>m.parts&&m.parts[n]?m.parts[n].cpu:null),r=hist.map(m=>m.parts&&m.parts[n]?m.parts[n].ram:null);
+  h+=`<tr><td>${nm[n]}</td><td>${cur?num(cur.cpu,1):'-'}</td><td style="width:30%">${spark(c,0)}</td><td>${cur?num(cur.ram/1024,2)+' Go':'-'}</td><td style="width:30%">${spark(r,0,'var(--c2)')}</td></tr>`}
+ $('#partTable').innerHTML=h;
+}
+async function seedHist(){
+ try{const now=Date.now(),rows=await api(`/api/metrics?from=${now-120000}&to=${now}&step=2`);
+  if(!hist.length)rows.slice(-HIST).forEach(r=>hist.push({ts:r.ts,cpu:r.cpu,ram:{used:r.ramUsed,total:r.ramTotal},
+   gpu:r.gpu==null?null:{util:r.gpu,vramUsed:r.vramUsed,vramTotal:r.vramTotal,temp:r.gpuTemp},
+   parts:{llm:{cpu:r.llmCpu,ram:r.llmRam},voice:{cpu:r.voiceCpu,ram:r.voiceRam},bot:{cpu:r.botCpu,ram:r.botRam}}}))}catch{}
+ renderLive();
+}
+
+// ---------- journal model ----------
+const CATS=[['Capté sans Bobby','grey',['skipped','ignored']],['Exécuté','green',['done','confirmed']],
+ ['Répondu / en attente','blue',['answered','offered','confirm_asked','waiting','interrupted']],
+ ['Refusé / annulé','amber',['forbidden','not_allowed','cancelled','stop_ignored']],['Échec','red',['error','resolve_error','llm_down']]];
+const catOf=o=>{for(const c of CATS)if(c[2].includes(o))return c;return ['Autre','grey',[]]};
+const catOn=new Set(CATS.slice(1).map(c=>c[0]));
+const badge=r=>{const c=catOf(r.outcome);return `<span class="badge b-${c[1]}" title="${esc(r.outcome)}">${c[0]}</span>`};
+
+// today counters
+let today=[];const todayStart=new Date(new Date().setHours(0,0,0,0));
+function renderCounters(){
+ const addr=today.filter(r=>!['skipped','ignored'].includes(r.outcome)).length;
+ const ok=today.filter(r=>catOf(r.outcome)[1]==='green').length;
+ const ko=today.filter(r=>catOf(r.outcome)[1]==='red').length;
+ const t=today.map(r=>r.timing&&r.timing.total).filter(x=>typeof x==='number').sort((a,b)=>a-b);
+ const med=t.length?t[Math.floor(t.length/2)]:null;
+ const cards=[['Phrases captées',today.length],['Adressées à Bobby',addr],['Exécutées',ok],['Échecs',ko],['Latence médiane',med==null?'-':(med/1000).toFixed(2)+' s']];
+ $('#counters').innerHTML=cards.map(c=>`<div class="card"><h3>${c[0]}</h3><div class="big">${c[1]}</div></div>`).join('');
+}
+async function loadToday(){
+ try{const d=await api('/api/journal?from='+encodeURIComponent(todayStart.toISOString())+'&limit=5000');today=d.items||[]}catch{}
+ renderCounters();
+}
+
+// ---------- journal tab ----------
+let jItems=[],jLoaded=false,jMoreAvail=true,jBusy=false,seen=new Set();const people=new Set();
+const key=r=>r.at+'|'+(r.id||'')+'|'+r.outcome;
+$('#chips').innerHTML=CATS.map(c=>`<button class="chip b-${c[1]} ${catOn.has(c[0])?'on':''}" data-c="${c[0]}">${c[0]}</button>`).join('');
+$('#chips').onclick=e=>{const b=e.target.closest('.chip');if(!b)return;const c=b.dataset.c;catOn.has(c)?catOn.delete(c):catOn.add(c);b.classList.toggle('on');renderJournal();fillIfSparse()};
+$('#fWho').onchange=()=>{renderJournal();fillIfSparse()};
+$('#fQ').oninput=()=>{renderJournal()};
+const dayStr=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+$('#fDay').value=dayStr(new Date());
+$('#fDay').onchange=()=>loadJournal(true);
+function dayRange(){const v=$('#fDay').value;const s=v?new Date(v+'T00:00:00'):todayStart;return [s,new Date(s.getTime()+864e5)]}
+const isToday=()=>dayRange()[0].getTime()===todayStart.getTime();
+function matches(r){
+ if(!catOn.has(catOf(r.outcome)[0]))return false;
+ const w=$('#fWho').value;if(w&&r.who!==w)return false;
+ const q=$('#fQ').value.trim().toLowerCase();
+ if(q&&!((r.heard||'')+' '+(r.plan||'')+' '+(r.reply||'')).toLowerCase().includes(q))return false;
+ const [a,b]=dayRange(),t=new Date(r.at);return t>=a&&t<b;
+}
+function rowHtml(r){
+ const heard=r.outcome==='skipped'?`<span class="mu">— pas de « Bobby » (score ${r.wakeScore==null?'-':num(r.wakeScore,2)})</span>`:esc(r.heard||'');
+ return `<td>${hhmmss(r.at)}</td><td>${esc(r.who||'')}</td><td class="cut" title="${esc(r.heard)}">${heard}</td><td>${badge(r)}</td>
+ <td class="cut" title="${esc(r.plan)}">${r.plan?esc(r.plan):'—'}</td><td class="cut" title="${esc(r.reply||r.error)}">${esc(r.reply||(r.error?'⚠ '+r.error:''))}</td>
+ <td>${r.timing&&r.timing.total!=null?(r.timing.total/1000).toFixed(2)+' s':'—'}</td>`;
+}
+const trOf=new WeakMap();
+function makeRow(r){const tr=document.createElement('tr');tr.className='row';tr.innerHTML=rowHtml(r);tr.onclick=()=>openPanel(r);trOf.set(r,tr);return tr}
+function renderJournal(){
+ const rows=jItems.filter(matches),body=$('#jBody');
+ body.innerHTML='';rows.forEach(r=>body.appendChild(makeRow(r)));
+ $('#jInfo').textContent=rows.length+' affichées / '+jItems.length+' chargées';
+ $('#jMore').style.display=jMoreAvail?'':'none';
+}
+function notePeople(items){items.forEach(r=>{if(r.who&&!people.has(r.who)){people.add(r.who);const o=document.createElement('option');o.textContent=r.who;$('#fWho').appendChild(o)}})}
+async function fetchJournal(){
+ if(jBusy)return;jBusy=true;
+ try{
+  const [a,b]=dayRange();
+  const before=jItems.length?jItems[jItems.length-1].at:(isToday()?'':b.toISOString());
+  const d=await api('/api/journal?limit=300&from='+encodeURIComponent(a.toISOString())+(before?'&before='+encodeURIComponent(before):''));
+  const got=d.items||[],its=got.filter(r=>!seen.has(key(r)));
+  its.forEach(r=>seen.add(key(r)));jItems.push(...its);notePeople(its);
+  jMoreAvail=got.length>=300;
+ }catch{}
+ jBusy=false;
+}
+async function loadJournal(reset){
+ if(reset){jItems=[];seen=new Set();jMoreAvail=true}
+ jLoaded=true;await fetchJournal();renderJournal();fillIfSparse();
+}
+async function fillIfSparse(){ // keep loading while filters hide too much
+ for(let i=0;i<6&&jMoreAvail&&!jBusy&&jItems.filter(matches).length<30;i++){await fetchJournal();renderJournal()}
+}
+$('#jMore').onclick=async()=>{await fetchJournal();renderJournal()};
+document.querySelector('main').addEventListener('scroll',e=>{const m=e.target;if(curTab==='journal'&&jMoreAvail&&!jBusy&&m.scrollTop+m.clientHeight>m.scrollHeight-200)$('#jMore').click()});
+function onJournal(r){
+ if(!r||!r.at)return;
+ if(new Date(r.at)>=todayStart){today.push(r);renderCounters()}
+ if(!jLoaded||seen.has(key(r)))return;
+ seen.add(key(r));jItems.unshift(r);notePeople([r]);
+ if(matches(r)){const tr=makeRow(r);tr.classList.add('new');$('#jBody').prepend(tr);$('#jInfo').textContent=$('#jBody').children.length+' affichées / '+jItems.length+' chargées'}
+}
+
+// detail panel
+function openPanel(r){
+ const t=r.timing||{},tot=t.total||0;
+ const segs=[['stt','var(--c1)'],['ack','var(--c4)'],['shortcut','var(--c2)'],['llm','var(--c3)'],['claude','var(--c5)'],['action','var(--grey)']].filter(s=>typeof t[s[0]]==='number');
+ const sum=Math.max(tot,segs.reduce((a,s)=>a+t[s[0]],0),1);
+ const bar=segs.length?`<div class="tb">${segs.map(s=>`<i style="width:${t[s[0]]/sum*100}%;background:${s[1]}" title="${s[0]} ${t[s[0]]} ms"></i>`).join('')}</div>
+  <div class="leg">${segs.map(s=>`<span><i style="background:${s[1]}"></i>${s[0]} ${t[s[0]]} ms</span>`).join('')}<span><b>total ${tot||'-'} ms</b></span></div>`:'<span class="mu">pas de timing</span>';
+ const I=r.intent||{};
+ $('#panel').innerHTML=`<button class="btn" onclick="closePanel()" style="float:right">Fermer</button>
+ <h2 style="margin-top:0">${hhmmss(r.at)} - ${esc(r.who||'?')} ${badge(r)}</h2>
+ <div class="mu">${esc(r.at)} - ${esc(r.outcome)} - rôle ${esc(r.role||'-')} - langue ${esc(r.lang||'-')}${r.confirm?' - confirmation':''}${r.written?' - écrit dans '+esc(r.written):''}</div>
+ <h2>Entendu</h2><div>${r.outcome==='skipped'?'<span class="mu">pas de transcription ('+num(r.seconds,1)+' s d\'audio)</span>':esc(r.heard||'-')}</div>
+ ${r.query?`<div class="mu">requête : ${esc(r.query)}</div>`:''}
+ <div class="mu">score « Bobby » : ${r.wakeScore==null?'-':num(r.wakeScore,3)}</div>
+ <h2>Latences</h2>${bar}
+ <h2>Plan / réponse</h2><div>${esc(r.plan||'—')}</div><div>${esc(r.reply||'')}</div>
+ ${r.error?`<h2>Erreur</h2><pre>${esc(r.error)}</pre>`:''}
+ <h2>Intention${I.via?' ('+esc(I.via)+')':''}</h2><pre>${esc(JSON.stringify(I,null,2))}</pre>`;
+ $('#panel').classList.add('open');
+}
+function closePanel(){$('#panel').classList.remove('open')}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closePanel()});
+
+// ---------- resources ----------
+const RANGES=[['15 min',9e5,10],['1 h',36e5,30],['24 h',864e5,300],['7 j',6048e5,1800],['30 j',2592e6,7200]];
+let rangeIdx=1,resRows=[];
+function markRanges(){[...$('#ranges').children].forEach((x,i)=>x.classList.toggle('on',i===rangeIdx))}
+$('#ranges').innerHTML=RANGES.map((r,i)=>`<button class="chip b-blue" data-i="${i}">${r[0]}</button>`).join('');
+markRanges();
+$('#ranges').onclick=e=>{const b=e.target.closest('.chip');if(!b)return;rangeIdx=+b.dataset.i;markRanges();loadRes()};
+const CH=[
+ ['CPU (%)','%',[['CPU','cpu','--c1']],100],
+ ['RAM (Go)','Go',[['RAM','ramUsed','--c2']],null,1/1024],
+ ['GPU (%)','%',[['GPU','gpu','--c3']],100],
+ ['VRAM (Go)','Go',[['VRAM','vramUsed','--c4']],null,1/1024],
+ ['Température GPU (°C)','°C',[['GPU','gpuTemp','--c5']],null],
+ ['CPU par composant (%)','%',[['LLM','llmCpu','--c1'],['Voix','voiceCpu','--c3'],['Bot','botCpu','--c2']],null],
+ ['RAM par composant (Go)','Go',[['LLM','llmRam','--c1'],['Voix','voiceRam','--c3'],['Bot','botRam','--c2']],null,1/1024],
+];
+function lineChart(def,rows,from,to){
+ const [title,unit,series,fixMax,k=1]=def,W=600,H=170,L=40,B=18,T=8;
+ const all=[];series.forEach(s=>rows.forEach(r=>{if(typeof r[s[1]]==='number')all.push(r[s[1]]*k)}));
+ const mn=all.length?Math.min(...all):0,mx=all.length?Math.max(...all):0,avg=all.length?all.reduce((a,b)=>a+b,0)/all.length:0;
+ const top=fixMax||(mx*1.1||1),X=t=>L+(t-from)/(to-from)*(W-L-6),Y=v=>T+(H-T-B)*(1-Math.min(v/top,1));
+ let g='';for(let i=0;i<=4;i++){const v=top*i/4,y=Y(v);g+=`<line x1="${L}" x2="${W}" y1="${y}" y2="${y}" stroke="var(--line)"/><text x="${L-4}" y="${y+3}" text-anchor="end" font-size="10" fill="var(--mu)">${v>=10?v.toFixed(0):v.toFixed(1)}</text>`}
+ for(let i=0;i<=4;i++){const t=from+(to-from)*i/4,d=new Date(t);g+=`<text x="${X(t)}" y="${H-4}" text-anchor="${i?i===4?'end':'middle':'start'}" font-size="10" fill="var(--mu)">${(to-from)>864e5?d.toLocaleDateString('fr-FR',{day:'2-digit',month:'2-digit'}):d.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'})}</text>`}
+ series.forEach(s=>{ // break the line on gaps / nulls
+  let d='',pen=false;rows.forEach(r=>{const v=r[s[1]];if(typeof v!=='number'){pen=false;return}d+=(pen?'L':'M')+X(r.ts).toFixed(1)+' '+Y(v*k).toFixed(1);pen=true});
+  g+=`<path d="${d}" fill="none" stroke="var(${s[2]})" stroke-width="1.5"/>`});
+ const el=document.createElement('div');el.className='card chart';
+ el.innerHTML=`<h3>${title}</h3><div class="leg">${series.length>1?series.map(s=>`<span><i style="background:var(${s[2]})"></i>${s[0]}</span>`).join(''):''}<span class="mu">min ${all.length?mn.toFixed(1):'-'} / moy ${all.length?avg.toFixed(1):'-'} / max ${all.length?mx.toFixed(1):'-'} ${unit}</span></div>
+ <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${g}<line class="cur" y1="${T}" y2="${H-B}" stroke="var(--mu)" style="display:none"/></svg><div class="tip"></div>`;
+ const svg=el.querySelector('svg'),tip=el.querySelector('.tip'),cur=el.querySelector('.cur');
+ svg.onmousemove=e=>{
+  const bb=svg.getBoundingClientRect(),px=(e.clientX-bb.left)/bb.width*W;if(!rows.length)return;
+  const t=from+(px-L)/(W-L-6)*(to-from);let best=rows[0];for(const r of rows)if(Math.abs(r.ts-t)<Math.abs(best.ts-t))best=r;
+  cur.setAttribute('x1',X(best.ts));cur.setAttribute('x2',X(best.ts));cur.style.display='';
+  tip.style.display='block';tip.style.left=Math.min(e.clientX-bb.left+12,bb.width-170)+'px';tip.style.top='28px';
+  tip.innerHTML=new Date(best.ts).toLocaleString('fr-FR')+'<br>'+series.map(s=>`<span style="color:var(${s[2]})">${s[0]}</span> ${typeof best[s[1]]==='number'?(best[s[1]]*k).toFixed(1)+' '+unit:'-'}`).join('<br>')};
+ svg.onmouseleave=()=>{tip.style.display='none';cur.style.display='none'};
+ return el;
+}
+async function loadRes(){
+ const [,span,step]=RANGES[rangeIdx],to=Date.now(),from=to-span;
+ try{resRows=await api(`/api/metrics?from=${from}&to=${to}&step=${step}`)}catch{resRows=[]}
+ if(!Array.isArray(resRows))resRows=[];
+ const c=$('#charts');c.innerHTML='';CH.forEach(d=>c.appendChild(lineChart(d,resRows,from,to)));
+ const av=k=>{const v=resRows.map(r=>r[k]).filter(x=>typeof x==='number');return v.length?v.reduce((a,b)=>a+b,0)/v.length:null};
+ const ram=['llmRam','voiceRam','botRam'].map(av),ramSum=ram.every(x=>x==null)?null:ram.reduce((a,b)=>a+(b||0),0);
+ const vr=av('vramUsed');
+ $('#bobbyOnly').innerHTML=`Bobby seul : <b>${ramSum==null?'-':num(ramSum/1024,1)} Go</b> de RAM en moyenne, VRAM totale (GPU entier) : <b>${vr==null?'-':num(vr/1024,1)} Go</b> en moyenne sur la période.`;
+}
+
+// ---------- technical logs ----------
+let logPart='bot';const logBuf={bot:[],voice:[],llm:[],app:[]},LOGMAX=3000;
+$('#logTabs').innerHTML=Object.keys(logBuf).map(p=>`<button class="btn" data-p="${p}">${p}</button>`).join('');
+function markLogTab(){[...$('#logTabs').children].forEach(b=>{b.style.borderColor=b.dataset.p===logPart?'var(--ac)':'';b.style.color=b.dataset.p===logPart?'var(--ac)':''})}
+$('#logTabs').onclick=e=>{const b=e.target.closest('button');if(b)loadLogs(b.dataset.p)};
+$('#lFilter').oninput=renderLogs;
+function renderLogs(){
+ const q=$('#lFilter').value.toLowerCase(),box=$('#logbox');
+ box.textContent=logBuf[logPart].filter(l=>!q||l.toLowerCase().includes(q)).join('\n');
+ if(!$('#lPause').checked)box.scrollTop=box.scrollHeight;
+}
+async function loadLogs(p){
+ logPart=p;markLogTab();
+ try{const d=await api('/api/logs?part='+p+'&lines=300');logBuf[p]=(d.lines||[]).map(String)}catch{}
+ renderLogs();
+}
+function onLog(e){
+ if(!e||!logBuf[e.part])return;
+ const b=logBuf[e.part];b.push(e.line);if(b.length>LOGMAX)b.splice(0,b.length-LOGMAX);
+ if(curTab==='logs'&&e.part===logPart)renderLogs();
+}
+markLogTab();
+
+// ---------- SSE ----------
+let es=null;
+function connect(){
+ try{es&&es.close()}catch{}
+ es=new EventSource('/api/live');
+ const on=(n,f)=>es.addEventListener(n,ev=>{try{f(JSON.parse(ev.data))}catch(x){console.warn(n,x)}});
+ es.onopen=()=>{setOnline(true);refreshStatus()};
+ es.onerror=()=>{setOnline(false);try{es.close()}catch{};setTimeout(connect,3000)};
+ on('metrics',m=>{hist.push(m);if(hist.length>HIST)hist.shift();renderLive()});
+ on('status',s=>{status=s;setOnline(true);renderStatus()});
+ on('journal',onJournal);
+ on('log',onLog);
+}
+
+// ---------- boot ----------
+renderCounters();renderLive();
+refreshStatus();seedHist();loadToday();connect();
+// after an outage, reload the data
+let wasOffline=false;setInterval(()=>{if(!online)wasOffline=true;else if(wasOffline){wasOffline=false;seedHist();loadToday()}},3000);
+</script>
+</body>
+</html>

@@ -1,5 +1,6 @@
 @echo off
-rem Stops Bobby: the start.js process tree (if running) and the three windows of start.cmd.
+rem Stops Bobby: the start.js process tree (if running), the three windows of start.cmd and the control app server.
+rem "stop.cmd keep-app" leaves the app server alone (used by the app itself to stop a Bobby started elsewhere).
 cd /d "%~dp0"
 if exist _logs\bobby.pid (
   set /p PID=<_logs\bobby.pid
@@ -12,3 +13,12 @@ if exist _logs\bobby.pid (
 ) else echo No start.js running ^(no pid file^)
 echo Closing start.cmd windows "Bobby - *"
 taskkill /FI "WINDOWTITLE eq Bobby - *" /T /F
+if /i "%1"=="keep-app" goto :eof
+if exist _logs\app.pid (
+  set /p APID=<_logs\app.pid
+  setlocal enabledelayedexpansion
+  echo Stopping app server ^(pid !APID!^)
+  taskkill /T /F /FI "PID eq !APID!" /FI "IMAGENAME eq node.exe"
+  del _logs\app.pid
+  endlocal
+)

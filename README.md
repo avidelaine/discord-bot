@@ -64,6 +64,18 @@ In Discord, join a voice channel and type `/join`. Bobby then follows the group:
 
 Each command prints its timings: `[temps] stt … · llm … · action … · total …`.
 
+## Control app
+
+Double-click `Bobby.cmd`: it starts the control server (`app/server.js`, http://127.0.0.1:4100, hidden) if needed and opens it in its own Edge window. Closing the window leaves Bobby running; `stop.cmd` stops Bobby and the server.
+
+- **Header:** Bobby's state and Start / Restart / Stop (it also stops a Bobby started with `start.cmd`).
+- **Tableau de bord:** each part (LLM, voice, bot) up or down, live CPU, RAM, GPU, VRAM and GPU temperature, CPU and RAM per part, and today's counters: sentences captured, addressed to Bobby, executed, failed, median latency.
+- **Journal:** every captured sentence against what was executed, live, filtered by category, person, text and day; a row shows what the LLM understood and the time of each step.
+- **Ressources:** 30 days of history (SQLite in `_logs/metrics.db`, a row every 10 s), from 15 min to 30 days, with min / average / max, and Bobby's own RAM. VRAM is GPU-wide: Windows does not give it per process.
+- **Journaux techniques:** the raw logs of each part, live.
+
+No dependency: Node's built-in `node:sqlite`, `nvidia-smi` and one PowerShell sampler for the per-part numbers. `node start.js` (one console) uses the same supervisor (`app/supervisor.js`).
+
 ## GPU memory
 
 Measured on an RTX 4060 (8 GB): the LLM takes 3.2 GB (context cache stored in 8 bits, `-ctk q8_0 -ctv q8_0`: 0.6 GB less, same test scores and speed) and Whisper 1.2 GB, so about 4.4 GB in all. A game that fills the rest pushes both into shared memory and answers go from under a second to minutes; Bobby then says its brain is too slow after 20 s instead of hanging. On the CPU alone (Ryzen 9 7900X) the LLM answers in 3.9 s instead of 0.6 s and Whisper turbo in 3.6 s instead of 0.2 s.

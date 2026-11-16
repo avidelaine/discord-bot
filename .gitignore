@@ -64,7 +64,9 @@ build/
 /_bin/
 
 # Wake word training workspace (third-party trainer, datasets)
-/_training/
+/_training/*
+!/_training/*.py
+!/_training/*.sh
 
 # Logs (conversation journal, launcher logs)
 /_logs/

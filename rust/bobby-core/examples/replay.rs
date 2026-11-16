@@ -1,5 +1,5 @@
 //! Replays the real journal through the Rust brain's `intent()`, the twin of tests/fixtures/replay-node.js.
-//!   cargo run -p bobby-core --example replay -- [--llm http://127.0.0.1:8080] [journal.jsonl] > rust.jsonl
+//!   cargo run -p bobby-core --example replay -- [--llm http://127.0.0.1:8080] [--apps apps.txt] [journal.jsonl] > rust.jsonl
 //!   cargo run -p bobby-core --example replay -- --compare node.jsonl rust.jsonl
 //! One JSON line per journal record that has a `query` and no `confirm`: {i, at, query, via, plan, decision, written}.
 //! Never touches data/ or _logs/ (temporary store, empty temporary journal); the journal is only read.
@@ -30,6 +30,11 @@ fn main() {
     while let Some(a) = it.next() {
         if a == "--llm" {
             llm = it.next().unwrap_or_else(|| die("--llm needs an address"));
+        } else if a == "--apps" {
+            // the PC app names the client would report (one per line), e.g. dumped from Node's pc.js index
+            let f = it.next().unwrap_or_else(|| die("--apps needs a file"));
+            let text = std::fs::read_to_string(&f).unwrap_or_else(|e| die(&format!("{f}: {e}")));
+            bobby_core::actions::pc::set_apps(text.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect());
         } else {
             journal = Some(PathBuf::from(a));
         }

@@ -275,8 +275,49 @@ pub fn module() -> Module {
 
 /// Test helpers shared with the music tests: Node's `brain.js` `clean()` + `quick()` over discord, music and pc.
 /// R3b: port of the module's `run` functions (one per action type).
-pub async fn run<L: bobby_proto::infer::Understand + Sync>(_s: &mut crate::types::Step, _env: &super::Env<'_, L>, _lang: &str) -> crate::util::Res<Vec<super::UndoOp>> {
-    Ok(vec![]) // R3b
+pub async fn run<L: bobby_proto::infer::Understand + Sync>(s: &mut Step, env: &super::Env<'_, L>, _lang: &str) -> crate::util::Res<Vec<super::UndoOp>> {
+    use bobby_proto::msg::{Cap, MediaCmd, VolumeOp};
+    let t = s.text.to_lowercase();
+    let t = t.trim();
+    let cap = match s.kind.as_str() {
+        "pc_media" => match s.text.as_str() {
+            "play" => Some(Cap::PcMedia { cmd: MediaCmd::Play }),
+            "pause" => Some(Cap::PcMedia { cmd: MediaCmd::Pause }),
+            "next" => Some(Cap::PcMedia { cmd: MediaCmd::Next }),
+            "previous" => Some(Cap::PcMedia { cmd: MediaCmd::Previous }),
+            _ => None, // unknown media command
+        },
+        "pc_music" => Some(Cap::PcNow),
+        "pc_volume" => match t {
+            "up" => Some(Cap::PcVolume { op: VolumeOp::Delta { delta: 10 } }),
+            "down" => Some(Cap::PcVolume { op: VolumeOp::Delta { delta: -10 } }),
+            "mute" => Some(Cap::PcVolume { op: VolumeOp::Mute }),
+            "unmute" => Some(Cap::PcVolume { op: VolumeOp::Unmute }),
+            _ if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) => Some(Cap::PcVolume { op: VolumeOp::Set { level: t.parse::<u128>().unwrap_or(u128::MAX).min(100) as u8 } }),
+            _ => None, // unknown volume
+        },
+        "pc_launch" => Some(Cap::PcLaunch { name: s.text.clone() }),
+        "pc_close" => Some(Cap::PcClose { name: s.text.clone() }),
+        "pc_lock" => Some(Cap::PcLock),
+        "pc_sleep" => Some(Cap::PcSleep),
+        "pc_shutdown" => Some(Cap::PcShutdown),
+        "pc_gpu" => Some(Cap::PcGpu),
+        _ => return Ok(vec![]),
+    };
+    // a step that may fail marks s.fail instead of erroring, so Bobby says it out loud
+    let Some(cap) = cap else {
+        s.set("fail", true);
+        return Ok(vec![]);
+    };
+    match env.io.run(cap).await {
+        Ok(r) => match s.kind.as_str() {
+            "pc_music" | "pc_volume" | "pc_gpu" => s.set("res", r),
+            "pc_launch" | "pc_close" if truthy(&r["found"]) => s.set("found", r["found"].clone()),
+            _ => {}
+        },
+        Err(_) => s.set("fail", true),
+    }
+    Ok(vec![])
 }
 
 #[cfg(test)]
@@ -382,5 +423,54 @@ mod tests {
         assert_eq!(get("pc_music")(&s, None, "en").unwrap(), "On the PC: Song by Band.");
         s.set("fail", true);
         assert_eq!(get("pc_volume")(&s, None, "en").unwrap(), "I can't reach the PC service.");
+    }
+
+    use crate::actions::Env;
+    use crate::store::Store;
+    use crate::testing::{caps, fake_client, FakeLlm};
+    use bobby_proto::msg::{Cap, MediaCmd, VolumeOp};
+
+    /// Port of the JS `dry()`: runs a sentence's shortcut and returns the caps sent and the spoken line.
+    async fn dry(sentence: &str) -> (Vec<Cap>, String) {
+        let (io, sent) = fake_client(|cap| match cap {
+            Cap::PcVolume { op: VolumeOp::Set { level } } => Ok(json!({ "level": level, "muted": false })),
+            Cap::PcLaunch { name } | Cap::PcClose { name } => Ok(json!({ "found": name })),
+            _ => Ok(Value::Null),
+        });
+        let (ctx, store, llm) = (crate::testing::ctx(), Store::temp(), FakeLlm::new(vec![]));
+        let mut steps = crate::resolve::resolve(&quick(sentence).unwrap(), &ctx, &store).unwrap();
+        let env = Env { io: &io, store: &store, ctx: &ctx, llm: &llm, post_to: None };
+        let mut said = vec![];
+        for s in &mut steps {
+            run(s, &env, "fr").await.unwrap();
+            said.push(crate::actions::def(&s.kind).unwrap().say.unwrap()(s, None, "fr").unwrap());
+        }
+        (caps(&sent), said.join(" "))
+    }
+
+    #[tokio::test]
+    async fn pc_actions_send_caps() {
+        set_test_apps();
+        assert_eq!(dry("mets le PC en veille").await.0, vec![Cap::PcSleep]);
+        assert_eq!(dry("éteins le PC").await.0, vec![Cap::PcShutdown]);
+        assert_eq!(dry("verrouille le PC").await.0, vec![Cap::PcLock]);
+        assert_eq!(dry("mets le son du PC à 30").await, (vec![Cap::PcVolume { op: VolumeOp::Set { level: 30 } }], "Volume du PC à 30.".to_string()));
+        assert_eq!(dry("musique suivante sur le PC").await.0, vec![Cap::PcMedia { cmd: MediaCmd::Next }]);
+        assert_eq!(dry("lance Valorant").await, (vec![Cap::PcLaunch { name: "valorant".into() }], "Je lance valorant.".to_string()));
+        assert_eq!(dry("ouvre Claude").await.0, vec![Cap::PcLaunch { name: "claude".into() }]);
+    }
+
+    #[tokio::test]
+    async fn pc_failures_set_fail() {
+        let (io, _) = fake_client(|_| Err("connection refused".into()));
+        let (ctx, store, llm) = (crate::testing::ctx(), Store::temp(), FakeLlm::new(vec![]));
+        let env = Env { io: &io, store: &store, ctx: &ctx, llm: &llm, post_to: None };
+        let raw = [json!({"type":"pc_volume","text":"up"}), json!({"type":"pc_media","text":"rewind"}), json!({"type":"pc_gpu"})];
+        let mut steps = crate::resolve::resolve(&raw, &ctx, &store).unwrap();
+        for s in &mut steps {
+            run(s, &env, "fr").await.unwrap();
+            assert!(s.flag("fail"), "{}", s.kind);
+        }
+        assert_eq!(crate::actions::def("pc_volume").unwrap().say.unwrap()(&steps[0], None, "en").unwrap(), "I can't reach the PC service.");
     }
 }

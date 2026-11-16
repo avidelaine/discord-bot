@@ -250,8 +250,81 @@ fn clean_quick(m: &Captures) -> Vec<Value> {
 }
 
 /// R3b: port of the module's `run` functions (one per action type).
-pub async fn run<L: bobby_proto::infer::Understand + Sync>(_s: &mut crate::types::Step, _env: &super::Env<'_, L>, _lang: &str) -> crate::util::Res<Vec<super::UndoOp>> {
-    Ok(vec![]) // R3b
+pub async fn run<L: bobby_proto::infer::Understand + Sync>(s: &mut Step, env: &super::Env<'_, L>, _lang: &str) -> crate::util::Res<Vec<super::UndoOp>> {
+    use super::UndoOp;
+    use bobby_proto::msg::Cap;
+    let ids: Vec<String> = s.targets.iter().flatten().map(|t| t.id.clone()).collect();
+    // Node's `chan(s, io)`: the step's channel, else where the writing asked, else Bobby's text channel (None).
+    let chan = s.channel.as_ref().map(|c| c.id.clone()).or_else(|| env.post_to.map(|c| c.id.clone()));
+    match s.kind.as_str() {
+        "mute" | "unmute" | "deafen" | "undeafen" => {
+            let on = matches!(s.kind.as_str(), "mute" | "deafen");
+            let deaf = matches!(s.kind.as_str(), "deafen" | "undeafen");
+            let set = |users: Vec<String>, on: bool| if deaf { Cap::Deafen { users, on } } else { Cap::Mute { users, on } };
+            let r = env.io.run(set(ids, on)).await?;
+            // one undo call per distinct old value
+            let mut groups: Vec<(bool, Vec<String>)> = vec![];
+            for (id, v) in r["prev"].as_object().into_iter().flatten() {
+                let v = v.as_bool().unwrap_or(false);
+                match groups.iter_mut().find(|(g, _)| *g == v) {
+                    Some((_, users)) => users.push(id.clone()),
+                    None => groups.push((v, vec![id.clone()])),
+                }
+            }
+            Ok(groups.into_iter().map(|(v, users)| UndoOp::Cap(set(users, v))).collect())
+        }
+        "move" => {
+            let channel = s.channel.as_ref().map(|c| c.id.clone()).unwrap_or_default();
+            let r = env.io.run(Cap::Move { users: ids.clone(), channel: channel.clone() }).await?;
+            // a move that includes the speaker ("déplace-nous", "mets-moi", "tout le monde") takes Bobby along
+            let back = if ids.contains(&s.by.id) { env.io.run(Cap::Join { channel }).await.ok().and_then(|j| j["prev"].as_str().map(String::from)) } else { None };
+            // null = was not in voice: nothing to put back
+            let mut groups: Vec<(String, Vec<String>)> = vec![];
+            for (id, c) in r["prev"].as_object().into_iter().flatten() {
+                let Some(c) = c.as_str() else { continue };
+                match groups.iter_mut().find(|(g, _)| g == c) {
+                    Some((_, users)) => users.push(id.clone()),
+                    None => groups.push((c.to_string(), vec![id.clone()])),
+                }
+            }
+            let mut undo: Vec<UndoOp> = groups.into_iter().map(|(channel, users)| UndoOp::Cap(Cap::Move { users, channel })).collect();
+            undo.extend(back.map(|channel| UndoOp::Cap(Cap::Join { channel })));
+            Ok(undo)
+        }
+        "disconnect" => {
+            env.io.run(Cap::Disconnect { users: ids }).await?;
+            Ok(vec![])
+        }
+        "message" => {
+            env.io.run(Cap::Post { channel: s.channel.as_ref().map(|c| c.id.clone()), text: Some(s.text.clone()), embeds: vec![] }).await?;
+            Ok(vec![])
+        }
+        "msg_edit" => {
+            let r = env.io.run(Cap::EditLast { channel: chan, text: s.text.clone() }).await?;
+            s.set("found", r["found"].as_bool().unwrap_or(false));
+            Ok(vec![])
+        }
+        "msg_delete" => {
+            let r = env.io.run(Cap::DeleteLast { channel: chan }).await?;
+            s.set("found", r["found"].as_bool().unwrap_or(false));
+            Ok(vec![])
+        }
+        "clean" => {
+            let r = env.io.run(Cap::Clean { channel: chan }).await?;
+            s.set("count", r["count"].as_u64().unwrap_or(0));
+            s.set("where", r["channel"].as_str().unwrap_or(""));
+            Ok(vec![])
+        }
+        "ping" => {
+            env.io.run(Cap::Ping { users: ids, channel: chan, text: s.text.clone() }).await?;
+            Ok(vec![])
+        }
+        "leave" => {
+            env.io.run(Cap::Leave).await?;
+            Ok(vec![])
+        }
+        _ => Ok(vec![]),
+    }
 }
 
 #[cfg(test)]
@@ -288,5 +361,92 @@ mod tests {
         c.set("where", "memes");
         c.set("count", 3);
         assert_eq!(get("clean")(&c, None, "fr").unwrap(), "Je supprime mes 3 messages dans memes.");
+    }
+
+    use crate::actions::{Env, UndoOp};
+    use crate::store::Store;
+    use crate::testing::{caps, fake_client, FakeLlm};
+    use bobby_proto::msg::Cap;
+
+    /// Resolves, runs and describes `raw` against `io` (the last step's undo is returned).
+    async fn exec(raw: Vec<Value>, io: &crate::io::Io) -> (Vec<Step>, Vec<UndoOp>) {
+        let (ctx, store, llm) = (crate::testing::ctx(), Store::temp(), FakeLlm::new(vec![]));
+        let mut steps = crate::resolve::resolve(&raw, &ctx, &store).unwrap();
+        let env = Env { io, store: &store, ctx: &ctx, llm: &llm, post_to: None };
+        let mut undo = vec![];
+        for s in &mut steps {
+            undo = run(s, &env, "fr").await.unwrap();
+        }
+        (steps, undo)
+    }
+
+    fn ids(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn mute_undo_restores_each_old_value() {
+        let (io, sent) = fake_client(|_| Ok(json!({ "prev": { "Kévin": false, "Marie": true, "Zyklon": false } })));
+        let (_, undo) = exec(vec![json!({"type":"mute","who":["Kévin","Marie","Zyklon"]})], &io).await;
+        assert_eq!(caps(&sent), vec![Cap::Mute { users: ids(&["Kévin", "Marie", "Zyklon"]), on: true }]);
+        assert_eq!(undo.len(), 2);
+        assert!(undo.contains(&UndoOp::Cap(Cap::Mute { users: ids(&["Kévin", "Zyklon"]), on: false })));
+        assert!(undo.contains(&UndoOp::Cap(Cap::Mute { users: ids(&["Marie"]), on: true })));
+        let (_, undo) = exec(vec![json!({"type":"undeafen","who":["Kévin"]})], &io).await;
+        assert_eq!(caps(&sent).last().unwrap(), &Cap::Deafen { users: ids(&["Kévin"]), on: false });
+        assert!(matches!(&undo[0], UndoOp::Cap(Cap::Deafen { .. })));
+    }
+
+    #[tokio::test]
+    async fn move_takes_bobby_along_and_undoes() {
+        let (io, sent) = fake_client(|c| match c {
+            Cap::Move { .. } => Ok(json!({ "prev": { "Alex": "Général", "Zyklon": null } })),
+            _ => Ok(json!({ "prev": "Général" })),
+        });
+        let (_, undo) = exec(vec![json!({"type":"move","who":["moi","Zyklon"],"channel":"Gaming"})], &io).await;
+        assert_eq!(caps(&sent), vec![Cap::Move { users: ids(&["Alex", "Zyklon"]), channel: "Gaming".into() }, Cap::Join { channel: "Gaming".into() }]);
+        // Zyklon was not in voice (null): nothing to put back for him
+        assert_eq!(undo, vec![UndoOp::Cap(Cap::Move { users: ids(&["Alex"]), channel: "Général".into() }), UndoOp::Cap(Cap::Join { channel: "Général".into() })]);
+        // without the speaker, Bobby stays
+        let (io, sent) = fake_client(|_| Ok(json!({ "prev": { "Marie": "Gaming" } })));
+        let (_, undo) = exec(vec![json!({"type":"move","who":["Marie"],"channel":"AFK"})], &io).await;
+        assert_eq!(caps(&sent), vec![Cap::Move { users: ids(&["Marie"]), channel: "AFK".into() }]);
+        assert_eq!(undo, vec![UndoOp::Cap(Cap::Move { users: ids(&["Marie"]), channel: "Gaming".into() })]);
+    }
+
+    #[tokio::test]
+    async fn text_actions_send_their_caps() {
+        let (io, sent) = fake_client(|c| match c {
+            Cap::EditLast { .. } | Cap::DeleteLast { .. } => Ok(json!({ "found": true })),
+            Cap::Clean { .. } => Ok(json!({ "count": 3, "channel": "memes" })),
+            _ => Ok(Value::Null),
+        });
+        let (steps, _) = exec(
+            vec![
+                json!({"type":"message","channel":"annonces","text":"salut"}),
+                json!({"type":"msg_edit","text":"nouveau"}),
+                json!({"type":"msg_delete","channel":"memes"}),
+                json!({"type":"clean","channel":"memes"}),
+                json!({"type":"ping","who":["moi"],"text":"debout"}),
+                json!({"type":"disconnect","who":["Lucas"]}),
+                json!({"type":"leave"}),
+            ],
+            &io,
+        )
+        .await;
+        assert_eq!(
+            caps(&sent),
+            vec![
+                Cap::Post { channel: Some("annonces".into()), text: Some("salut".into()), embeds: vec![] },
+                Cap::EditLast { channel: None, text: "nouveau".into() },
+                Cap::DeleteLast { channel: Some("memes".into()) },
+                Cap::Clean { channel: Some("memes".into()) },
+                Cap::Ping { users: ids(&["Alex"]), channel: None, text: "debout".into() },
+                Cap::Disconnect { users: ids(&["lucas"]) },
+                Cap::Leave,
+            ]
+        );
+        assert!(steps[1].flag("found") && steps[2].flag("found"));
+        assert_eq!((steps[3].str("where"), steps[3].f["count"].as_u64()), (Some("memes"), Some(3)));
     }
 }

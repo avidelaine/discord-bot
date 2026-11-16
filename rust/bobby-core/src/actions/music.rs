@@ -300,9 +300,75 @@ pub fn module() -> Module {
 }
 
 /// R3b: port of the module's `run` functions (one per action type).
-pub async fn run<L: bobby_proto::infer::Understand + Sync>(_s: &mut crate::types::Step, _env: &super::Env<'_, L>, _lang: &str) -> crate::util::Res<Vec<super::UndoOp>> {
-    Ok(vec![]) // R3b
+pub async fn run<L: bobby_proto::infer::Understand + Sync>(s: &mut Step, env: &super::Env<'_, L>, _lang: &str) -> crate::util::Res<Vec<super::UndoOp>> {
+    use bobby_proto::msg::{Cap, Endless, MusicItem, VolumeOp};
+    let mode = s.str("mode").unwrap_or("");
+    // what to play: a radio, a style (played endlessly from YouTube) or a title (endless "similar" unless "unique" or "artiste")
+    let item = || match s.str("kind").unwrap_or("") {
+        "radio" => MusicItem::Radio { style: s.text.clone() },
+        "style" if mode != "artiste" => MusicItem::Style { style: s.text.clone() },
+        _ => match mode {
+            "unique" => MusicItem::Youtube { query: s.text.clone(), endless: None, seed: None },
+            "artiste" => MusicItem::Youtube { query: s.text.clone(), endless: Some(Endless::Artist), seed: Some(s.text.clone()) },
+            _ => MusicItem::Youtube { query: s.text.clone(), endless: Some(Endless::Similar), seed: None },
+        },
+    };
+    let mut clamped = None;
+    let cap = match s.kind.as_str() {
+        "music_play" => Cap::MusicPlay { item: item(), add: false },
+        "music_add" => Cap::MusicPlay { item: item(), add: true },
+        "music_pause" => Cap::MusicPause,
+        "music_resume" => Cap::MusicResume,
+        "music_stop" => Cap::MusicStop,
+        "music_skip" => Cap::MusicSkip,
+        "music_replay" => Cap::MusicReplay,
+        "music_queue" => Cap::MusicQueue,
+        "music_now" => Cap::MusicNow,
+        "music_volume" => {
+            let lower = s.text.to_lowercase();
+            let t = crate::util::replace1(&PERCENT, &lower, "");
+            let t = t.trim();
+            match t {
+                "up" => Cap::MusicVolume { op: VolumeOp::Delta { delta: 10 } },
+                "down" => Cap::MusicVolume { op: VolumeOp::Delta { delta: -10 } },
+                _ if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) => {
+                    // "200 %" sets the maximum and says so
+                    let n = t.parse::<u128>().unwrap_or(u128::MAX);
+                    clamped = Some(n > 100);
+                    Cap::MusicVolume { op: VolumeOp::Set { level: n.min(100) as u8 } }
+                }
+                _ => {
+                    s.set("res", json!({ "error": format!("unknown volume \"{}\"", s.text) }));
+                    return Ok(vec![]);
+                }
+            }
+        }
+        _ => return Ok(vec![]),
+    };
+    let kind = s.kind.clone();
+    // a failed cap (no player, nothing playing...) is the player's plain `{error}`, never an Err
+    let mut res = match env.io.run(cap).await {
+        Ok(r) => r,
+        Err(e) => json!({ "error": match e { crate::util::BrainError::Failed { msg, .. } => msg, e => e.to_string() } }),
+    };
+    if res["error"].is_null() {
+        match kind.as_str() {
+            // always stop: a track still being looked up must not start after "stop"
+            "music_stop" if !(t(&res["stopped"]) || t(&res["cleared"])) => res = json!({ "error": "nothing is playing" }),
+            "music_now" if res.get("nowPlaying").is_none() => res = json!({ "nowPlaying": res }),
+            "music_volume" => {
+                if let (Some(c), Some(o)) = (clamped, res.as_object_mut()) {
+                    o.insert("clamped".into(), c.into());
+                }
+            }
+            _ => {}
+        }
+    }
+    s.set("res", res);
+    Ok(vec![])
 }
+
+static PERCENT: LazyLock<Regex> = LazyLock::new(|| re(r"\s*(?:%|pour ?cent|percent)$"));
 
 #[cfg(test)]
 mod tests {
@@ -369,5 +435,91 @@ mod tests {
         assert_eq!(get("music_stop")(&s, None, "fr").unwrap(), "");
         s.set("res", json!({ "nowPlaying": { "title": "Jazz FM", "kind": "radio" }, "queue": [] }));
         assert_eq!(get("music_now")(&s, None, "en").unwrap(), "It's the radio Jazz FM.");
+    }
+
+    use crate::actions::Env;
+    use crate::store::Store;
+    use crate::testing::{caps, fake_client, FakeLlm};
+    use bobby_proto::msg::{Cap, Endless, MusicItem, VolumeOp};
+    use std::sync::{Arc, Mutex};
+
+    /// Port of `say(steps, lang)` of the JS test: resolves, runs and describes one step.
+    async fn say_of(raw: Value, io: &crate::io::Io, lang: &str) -> String {
+        let (ctx, store, llm) = (crate::testing::ctx(), Store::temp(), FakeLlm::new(vec![]));
+        let mut steps = crate::resolve::resolve(&[raw], &ctx, &store).unwrap();
+        let env = Env { io, store: &store, ctx: &ctx, llm: &llm, post_to: None };
+        let s = &mut steps[0];
+        assert!(run(s, &env, lang).await.unwrap().is_empty());
+        crate::actions::def(&s.kind).unwrap().say.unwrap()(s, None, lang).unwrap()
+    }
+
+    #[tokio::test]
+    async fn fake_player() {
+        // the JS `fake` player: volume 30, "Bohemian Rhapsody" playing, two tracks queued
+        let vol = Arc::new(Mutex::new(30i64));
+        let cur = json!({ "title": "Bohemian Rhapsody", "kind": "youtube" });
+        let (io, sent) = fake_client(move |cap| match cap {
+            Cap::MusicPlay { item: MusicItem::Radio { .. }, add: false } => Ok(json!({ "title": "Jazz FM", "kind": "radio", "station": "Jazz FM" })),
+            Cap::MusicPlay { item: MusicItem::Youtube { query, .. }, add: false } => Ok(json!({ "title": query, "kind": "youtube" })),
+            Cap::MusicPlay { item: MusicItem::Youtube { query, .. }, add: true } => Ok(json!({ "started": false, "position": 3, "label": query })),
+            Cap::MusicPlay { .. } => Ok(json!({ "kind": "youtube" })),
+            Cap::MusicPause => Ok(json!({ "paused": true })),
+            Cap::MusicResume => Err("nothing is playing".into()),
+            Cap::MusicStop => Ok(json!({ "stopped": cur, "cleared": 2 })),
+            Cap::MusicSkip => Ok(json!({ "skipped": cur, "nowPlaying": { "title": "Blinding Lights" } })),
+            Cap::MusicReplay => Ok(json!({ "nowPlaying": cur })),
+            Cap::MusicQueue => Ok(json!({ "nowPlaying": cur, "queue": [{ "label": "Blinding Lights" }, { "label": "x" }] })),
+            Cap::MusicNow => Ok(json!({ "nowPlaying": cur })),
+            Cap::MusicVolume { op } => {
+                let mut v = vol.lock().unwrap();
+                match op {
+                    VolumeOp::Set { level } => *v = i64::from(*level),
+                    VolumeOp::Delta { delta } => *v += i64::from(*delta),
+                    _ => {}
+                }
+                Ok(json!({ "volume": *v }))
+            }
+            _ => Ok(Value::Null),
+        });
+        let last = || caps(&sent).pop().unwrap();
+        let yt = |query: &str, endless, seed: Option<&str>| Cap::MusicPlay { item: MusicItem::Youtube { query: query.into(), endless, seed: seed.map(Into::into) }, add: false };
+        assert_eq!(say_of(json!({"type":"music_play","text":"Bohemian Rhapsody","kind":"youtube"}), &io, "fr").await, "Je lance Bohemian Rhapsody.");
+        assert_eq!(last(), yt("Bohemian Rhapsody", Some(Endless::Similar), None)); // endless by default
+        say_of(json!({"type":"music_play","text":"Bohemian Rhapsody","kind":"youtube","mode":"unique"}), &io, "fr").await;
+        assert_eq!(last(), yt("Bohemian Rhapsody", None, None));
+        say_of(json!({"type":"music_play","text":"Daft Punk","kind":"youtube","mode":"artiste"}), &io, "fr").await;
+        assert_eq!(last(), yt("Daft Punk", Some(Endless::Artist), Some("Daft Punk")));
+        say_of(json!({"type":"music_play","text":"hardstyle","kind":"style"}), &io, "fr").await;
+        assert_eq!(last(), Cap::MusicPlay { item: MusicItem::Style { style: "hardstyle".into() }, add: false });
+        assert_eq!(say_of(json!({"type":"music_play","text":"jazz","kind":"radio"}), &io, "fr").await, "Radio jazz : Jazz FM.");
+        assert_eq!(last(), Cap::MusicPlay { item: MusicItem::Radio { style: "jazz".into() }, add: false });
+        assert_eq!(say_of(json!({"type":"music_play","text":"jazz","kind":"radio"}), &io, "en").await, "jazz radio: Jazz FM.");
+        assert_eq!(say_of(json!({"type":"music_add","text":"Blinding Lights","kind":"youtube"}), &io, "fr").await, "J'ajoute Blinding Lights à la file, position 3.");
+        assert!(matches!(last(), Cap::MusicPlay { add: true, .. }));
+        assert_eq!(say_of(json!({"type":"music_queue"}), &io, "fr").await, "File : 2 titres, prochain : Blinding Lights.");
+        assert_eq!(say_of(json!({"type":"music_queue"}), &io, "en").await, "Queue: 2 tracks, next: Blinding Lights.");
+        assert_eq!(say_of(json!({"type":"music_volume","text":"up"}), &io, "fr").await, "Volume à 40.");
+        assert_eq!(last(), Cap::MusicVolume { op: VolumeOp::Delta { delta: 10 } });
+        assert_eq!(say_of(json!({"type":"music_volume","text":"25"}), &io, "en").await, "Volume at 25.");
+        assert_eq!(last(), Cap::MusicVolume { op: VolumeOp::Set { level: 25 } });
+        // "200 %" sets the maximum and says so
+        assert_eq!(say_of(json!({"type":"music_volume","text":"200 %"}), &io, "en").await, "100 % is the maximum, so I'm turning it all the way up.");
+        assert_eq!(last(), Cap::MusicVolume { op: VolumeOp::Set { level: 100 } });
+        assert_eq!(say_of(json!({"type":"music_skip"}), &io, "fr").await, "Suivant : Blinding Lights.");
+        assert_eq!(say_of(json!({"type":"music_now"}), &io, "fr").await, "C'est Bohemian Rhapsody.");
+        assert_eq!(say_of(json!({"type":"music_resume"}), &io, "fr").await, "Rien ne joue.");
+        assert_eq!(say_of(json!({"type":"music_resume"}), &io, "en").await, "Nothing is playing.");
+        assert_eq!(say_of(json!({"type":"music_stop"}), &io, "en").await, "Stopped.");
+    }
+
+    #[tokio::test]
+    async fn no_player_is_a_result_not_an_error() {
+        let (io, _) = fake_client(|_| Err("no player".into()));
+        assert_eq!(say_of(json!({"type":"music_pause"}), &io, "en").await, r#"Music only works on Discord: say "Bobby, join Discord"."#);
+        // a stop that stopped nothing is "nothing is playing" (a bare "stop" then says nothing)
+        let (io, _) = fake_client(|_| Ok(json!({ "stopped": null, "cleared": 0 })));
+        assert_eq!(say_of(json!({"type":"music_stop","quiet":true}), &io, "fr").await, "");
+        assert_eq!(say_of(json!({"type":"music_stop"}), &io, "fr").await, "Rien ne joue.");
+        assert_eq!(say_of(json!({"type":"music_volume","text":"fort"}), &io, "fr").await, "Ça n'a pas marché : unknown volume \"fort\".");
     }
 }

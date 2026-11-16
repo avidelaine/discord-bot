@@ -138,9 +138,98 @@ pub fn module() -> Module {
     }
 }
 
-/// R3b: port of the module's `run` functions (one per action type).
-pub async fn run<L: bobby_proto::infer::Understand + Sync>(_s: &mut crate::types::Step, _env: &super::Env<'_, L>, _lang: &str) -> crate::util::Res<Vec<super::UndoOp>> {
-    Ok(vec![]) // R3b
+// ---------- Running steps ----------
+
+use super::aliases::member_name;
+use super::{Env, Post, UndoOp};
+use crate::format::{card, RIGHTS};
+use crate::roles::{is_super, people, perms, prime_role, role_of, save_perms, Perms};
+use crate::util::{BrainError, Res};
+use bobby_proto::infer::Understand;
+use bobby_proto::msg::Embed;
+
+fn without(l: &[String], id: &str) -> Vec<String> {
+    l.iter().filter(|x| *x != id).cloned().collect()
+}
+fn with(l: &[String], id: &str) -> Vec<String> {
+    let mut v = without(l, id);
+    v.push(id.to_string());
+    v
+}
+
+/// `edit(p, id)` changes the permission lists in place; undo restores the previous document.
+fn change<L>(s: &Step, env: &Env<'_, L>, edit: impl FnOnce(&mut Perms, &str)) -> Res<Vec<UndoOp>> {
+    let id = s.targets.as_ref().map(|t| t[0].id.clone()).unwrap_or_default();
+    if is_super(&id) {
+        return Err(Say::new("On ne touche pas aux droits du super admin.", "The super admin's rights can't be changed.").into());
+    }
+    let mut p = perms(env.store);
+    let prev = serde_json::to_value(&p).unwrap();
+    edit(&mut p, &id);
+    save_perms(env.store, &p).map_err(|msg| BrainError::Failed { msg, no_rights: false })?;
+    Ok(vec![UndoOp::Restore { name: "permissions", prev }])
+}
+
+/// Who has which rights, as a card: one field per role with its people and what it can do.
+async fn rights_card<L>(env: &Env<'_, L>, lang: &str) -> Res<Embed> {
+    let p = people(env.store);
+    let en = lang == "en";
+    let names = |ids: Vec<String>| async move {
+        let mut out = vec![];
+        for id in &ids {
+            out.push(member_name(env, id).await?);
+        }
+        Ok::<String, BrainError>(if out.is_empty() { (if en { "nobody" } else { "personne" }).to_string() } else { out.join(", ") })
+    };
+    let supers = format!("{}\n*{}*", names(p.supers.clone()).await?, abilities(Role::Super, lang));
+    let admins = format!("{}\n*{}*", names(p.admins.clone()).await?, abilities(Role::Admin, lang));
+    let prime = format!("*{}*", abilities(Role::Prime, lang));
+    let blacklist = names(p.blacklist.clone()).await?;
+    let prime_name = format!("⭐ Prime ({} {})", if en { "role" } else { "rôle" }, p.prime_role);
+    Ok(card(
+        if en { "🔐 Rights" } else { "🔐 Droits" },
+        RIGHTS,
+        None,
+        &[("👑 Super admin", &supers, false), ("🛡️ Admins", &admins, false), (&prime_name, &prime, false), (if en { "🚫 Blacklisted" } else { "🚫 Liste noire" }, &blacklist, false)],
+        Some(if en { "The super admin only changes by hand, in .env." } else { "Le super admin ne change qu'à la main, dans le fichier .env." }),
+    ))
+}
+
+pub async fn run<L: Understand + Sync>(s: &mut Step, env: &Env<'_, L>, lang: &str) -> Res<Vec<UndoOp>> {
+    match s.kind.as_str() {
+        "perm_revoke" => change(s, env, |p, id| p.blacklist = with(&p.blacklist, id)),
+        "perm_restore" => change(s, env, |p, id| p.blacklist = without(&p.blacklist, id)),
+        "admin_add" => change(s, env, |p, id| {
+            p.admins = with(&p.admins, id);
+            p.not_admins = without(&p.not_admins, id);
+        }),
+        "admin_remove" => change(s, env, |p, id| {
+            p.admins = without(&p.admins, id);
+            p.not_admins = with(&p.not_admins, id);
+        }),
+        "perm_show" => {
+            // the card is posted only when asked in writing
+            let t = s.targets.as_ref().map(|t| t[0].clone()).unwrap_or_default();
+            // the brain only knows Discord roles of the speaker (`ctx.role`): a Prime speaker asking about themselves
+            let discord_roles = if t.id == env.ctx.speaker.id && env.ctx.role == Role::Prime { vec![prime_role()] } else { vec![] };
+            let role = role_of(&t.id, &discord_roles, env.store);
+            let blacklisted = perms(env.store).blacklist.contains(&t.id);
+            s.set("role", role.as_str());
+            s.set("blacklisted", blacklisted);
+            let title = if lang == "en" { format!("🔐 {}'s rights", t.name) } else { format!("🔐 Droits de {}", t.name) };
+            let c = card(&title, RIGHTS, Some(&rights_of(role, blacklisted, &t.name, lang)), &[], None);
+            s.set("card", serde_json::to_value(vec![c]).unwrap());
+            Ok(vec![])
+        }
+        "rights_list" => {
+            let c = rights_card(env, lang).await?;
+            let at = env.post(Post::Embeds(vec![c])).await?;
+            s.set("where", at);
+            Ok(vec![])
+        }
+        "super_admin" => Err(super_only_by_hand().into()),
+        _ => Ok(vec![]),
+    }
 }
 
 #[cfg(test)]
@@ -171,5 +260,89 @@ mod tests {
         assert_eq!(say_admin_add(&s, Some("Marie"), "en").unwrap(), "Marie is now an admin.");
         assert_eq!(rights_of(Role::Other, true, "Lucas", "fr"), "Lucas est sur liste noire : je ne lui réponds pas.");
         assert_eq!(say_rights_list(&s, None, "fr").unwrap(), "");
+    }
+
+    // ---------- running steps (bot/unit.test.js, "rights", lines 154-172) ----------
+
+    use crate::actions::{run as run_step, Env, UndoOp};
+    use crate::resolve::resolve;
+    use crate::roles::{perms, role_of};
+    use crate::shortcuts::quick;
+    use crate::store::Store;
+    use crate::testing::{ctx, fake_client, FakeLlm};
+    use crate::types::Ctx;
+
+    /// Runs the plan of a sentence; the undo ops of every step.
+    async fn play(c: &Ctx, store: &Store, sentence: &str) -> crate::util::Res<Vec<UndoOp>> {
+        let (io, _sent) = fake_client(|_| Ok(json!({ "name": "?", "channel": "dev-bot-test" })));
+        let env = Env { io: &io, store, ctx: c, llm: &FakeLlm::default(), post_to: None };
+        let mut ops = vec![];
+        for mut s in resolve(&quick(sentence).unwrap(), c, store).unwrap() {
+            ops.extend(run_step(&mut s, &env, "fr").await?);
+        }
+        Ok(ops)
+    }
+
+    /// "annule": puts the documents back.
+    fn undo(store: &Store, ops: Vec<UndoOp>) {
+        for op in ops.into_iter().rev() {
+            if let UndoOp::Restore { name, prev } = op {
+                store.save(name, &prev).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rights_by_voice_and_undo() {
+        let store = Store::temp();
+        let c = ctx();
+        let ilias = c.members.iter().find(|m| m.name == "Prime Ilias").unwrap().id.clone(); // 397478613559148545
+        let role = |id: &str, r: &[&str]| role_of(id, &r.iter().map(|x| x.to_string()).collect::<Vec<_>>(), &store);
+        play(&c, &store, "enlève les permissions de Ilias").await.unwrap();
+        assert_eq!(role(&ilias, &["Team Prime"]), Role::Other);
+        play(&c, &store, "redonne les permissions à Ilias").await.unwrap();
+        assert_eq!(role(&ilias, &[]), Role::Admin);
+        play(&c, &store, "retire l'admin à Ilias").await.unwrap();
+        assert_eq!(role(&ilias, &["Team Prime"]), Role::Prime);
+        play(&c, &store, "passe Ilias admin").await.unwrap();
+        assert_eq!(role(&ilias, &[]), Role::Admin);
+        let ops = play(&c, &store, "passe Lucas admin").await.unwrap();
+        assert_eq!(role("lucas", &[]), Role::Admin);
+        undo(&store, ops); // undo also covers rights
+        assert_eq!(role("lucas", &[]), Role::Other);
+        match play(&c, &store, "enlève les permissions de WakandeX").await {
+            Err(crate::util::BrainError::Say(say)) => assert!(say.fr.contains("super admin")),
+            other => panic!("expected a Say, got {other:?}"),
+        }
+        assert_eq!(role("261531632589078528", &[]), Role::Super);
+        assert!(!perms(&store).blacklist.contains(&"261531632589078528".to_string()));
+    }
+
+    #[tokio::test]
+    async fn show_and_list_and_super() {
+        let store = Store::temp();
+        let c = ctx();
+        let (io, sent) = fake_client(|cap| match cap {
+            bobby_proto::msg::Cap::MemberName { id } => Ok(json!({ "name": format!("n-{id}") })),
+            _ => Ok(json!({ "channel": "dev-bot-test" })),
+        });
+        let env = Env { io: &io, store: &store, ctx: &c, llm: &FakeLlm::default(), post_to: None };
+        let mut s = resolve(&[json!({ "type": "perm_show", "who": ["Lucas"] })], &c, &store).unwrap().remove(0);
+        run_step(&mut s, &env, "fr").await.unwrap();
+        let say = crate::actions::def("perm_show").unwrap().say.unwrap();
+        assert_eq!(say(&s, Some("Lucas"), "fr").unwrap(), "Lucas n'a aucun rôle : je ne lui réponds pas.");
+        assert_eq!(s.f["card"][0]["title"], "🔐 Droits de Lucas");
+        assert_eq!(s.f["card"][0]["description"], "Lucas n'a aucun rôle : je ne lui réponds pas.");
+        let mut s = resolve(&[json!({ "type": "rights_list" })], &c, &store).unwrap().remove(0);
+        run_step(&mut s, &env, "en").await.unwrap();
+        assert_eq!(s.str("where"), Some("dev-bot-test"));
+        let posted = crate::testing::caps(&sent);
+        let Some(bobby_proto::msg::Cap::Post { embeds, .. }) = posted.last() else { panic!("no post") };
+        assert_eq!(embeds[0].title, "🔐 Rights");
+        assert_eq!(embeds[0].fields[0].name, "👑 Super admin");
+        assert!(embeds[0].fields[0].value.starts_with("n-261531632589078528\n*"));
+        assert_eq!(embeds[0].fields[3].value, "nobody");
+        let mut s = resolve(&[json!({ "type": "super_admin" })], &c, &store).unwrap().remove(0);
+        assert!(matches!(run_step(&mut s, &env, "fr").await, Err(crate::util::BrainError::Say(_))));
     }
 }

@@ -361,9 +361,196 @@ pub fn module() -> Module {
     }
 }
 
-/// R3b: port of the module's `run` functions (one per action type).
-pub async fn run<L: bobby_proto::infer::Understand + Sync>(_s: &mut crate::types::Step, _env: &super::Env<'_, L>, _lang: &str) -> crate::util::Res<Vec<super::UndoOp>> {
-    Ok(vec![]) // R3b
+// ---------- Running steps ----------
+
+use super::{Env, Post, UndoOp};
+use crate::format::{card, TODO};
+use crate::types::By;
+use crate::util::{norm, sim, BrainError, Res};
+use bobby_proto::infer::Understand;
+use bobby_proto::msg::Embed;
+
+fn can_edit(it: &Value, by: &By) -> bool {
+    by.role == Role::Super || it["author"]["id"].as_str() == Some(by.id.as_str()) || it["list"].as_str() == Some(by.id.as_str())
+}
+fn can_add(list: &str, by: &By) -> bool {
+    by.role == Role::Super || list == GENERAL || list == by.id
+}
+fn not_yours() -> Say {
+    Say::new("Tu ne peux modifier que tes propres points, ou ceux de ta liste.", "You can only change your own items, or the ones on your list.")
+}
+
+static LEAD_WORD: LazyLock<Regex> = LazyLock::new(|| re(r"^(?:le |la |l'|the )?(?:point|élément|item|tâche|task|numéro|number|n°)\s*"));
+static DIGITS: LazyLock<Regex> = LazyLock::new(|| re(r"^\d+$"));
+static LAST_RE: LazyLock<Regex> = LazyLock::new(|| re(r"^(?:dernier|derni[eè]re|last)(?: point| item)?$"));
+static FIRST_RE: LazyLock<Regex> = LazyLock::new(|| re(r"^(?:premier|premi[eè]re|first)(?: point| item)?$"));
+
+/// Item named in a sentence: its number in the list, "dernier" / "premier", or words of its text. Index in `all`.
+fn find_item(s: &Step, all: &[Value]) -> Option<usize> {
+    let list_id = s.list.as_ref().filter(|l| !l.is_null()).map(|l| l["id"].as_str().unwrap_or("").to_string());
+    let general = |it: &Value| it["list"] == GENERAL;
+    let scope: Vec<usize> = (0..all.len())
+        .filter(|&i| match &list_id {
+            Some(id) => all[i]["list"].as_str() == Some(id.as_str()),
+            None => general(&all[i]) || all[i]["list"].as_str() == Some(s.by.id.as_str()) || s.by.role == Role::Super,
+        })
+        .collect();
+    let ref_ = replace1(&LEAD_WORD, &s.text.trim().to_lowercase(), "");
+    // numbers, "dernier" and "premier" without a list name count in the general list, as it is posted
+    let listed: Vec<usize> = if list_id.is_some() { scope.clone() } else { scope.iter().copied().filter(|&i| general(&all[i])).collect() };
+    if hit(&DIGITS, &ref_) {
+        return ref_.parse::<usize>().ok().and_then(|n| n.checked_sub(1)).and_then(|n| listed.get(n).copied());
+    }
+    if hit(&LAST_RE, &ref_) {
+        return listed.last().copied();
+    }
+    if hit(&FIRST_RE, &ref_) {
+        return listed.first().copied();
+    }
+    let q = norm(&ref_);
+    let score = |t: &str| if q.chars().count() >= 4 && norm(t).contains(&q) { 0.9 } else { sim(&ref_, t) };
+    let mut best: Option<(usize, f64)> = None;
+    for &i in &scope {
+        let sc = score(text_of(&all[i]));
+        if best.is_none_or(|(_, b)| sc > b) {
+            best = Some((i, sc));
+        }
+    }
+    best.filter(|&(_, sc)| sc >= 0.6).map(|(i, _)| i)
+}
+
+/// Runs `f(all, step)` -> item touched (None: not found) and saves. The undo puts the document back as it was.
+fn edit<L>(s: &mut Step, env: &Env<'_, L>, f: impl FnOnce(&mut Vec<Value>, &Step) -> Res<Option<Value>>) -> Res<Vec<UndoOp>> {
+    let prev = env.store.load_or("todo", json!([]));
+    let mut all = items(env.store);
+    let it = f(&mut all, s)?;
+    s.set("item", it.clone().unwrap_or(Value::Null));
+    if it.is_none() {
+        return Ok(vec![]);
+    }
+    env.store.save("todo", &Value::Array(all)).map_err(|msg| BrainError::Failed { msg, no_rights: false })?;
+    Ok(vec![UndoOp::Restore { name: "todo", prev }])
+}
+
+/// `touch(fn)`: finds the item, checks the rights, applies `fn` to it; the item left is the one `say` shows.
+fn touch<L>(s: &mut Step, env: &Env<'_, L>, f: impl FnOnce(&mut Vec<Value>, usize, &Step) -> Res<()>) -> Res<Vec<UndoOp>> {
+    edit(s, env, |all, s| {
+        let Some(i) = find_item(s, all) else { return Ok(None) };
+        if !can_edit(&all[i], &s.by) {
+            return Err(not_yours().into());
+        }
+        let it = all[i].clone();
+        f(all, i, s)?;
+        // a removed item is shown as it was; a ticked or moved one as it is now
+        Ok(Some(all.iter().find(|x| x["id"] == it["id"]).cloned().unwrap_or(it)))
+    })
+}
+
+/// `new Date().toISOString()`
+fn now_iso() -> String {
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+}
+
+/// `toLocaleString('fr-FR', { day, month, hour, minute: '2-digit' })`, local time: "12/11 23:15".
+fn date(iso: &Value) -> String {
+    let Some(d) = iso.as_str().filter(|s| !s.is_empty()).and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()) else { return "?".into() };
+    d.with_timezone(&chrono::Local).format("%d/%m %H:%M").to_string()
+}
+
+/// `text.slice(0, n)` in UTF-16 units.
+fn slice16(t: &str, n: usize) -> String {
+    String::from_utf16_lossy(&t.encode_utf16().take(n).collect::<Vec<_>>())
+}
+
+/// A list as a card: one field per item, with its done mark, author and date. Numbers stay the list's own
+/// ("le point 3"), even when a filter shows only some items.
+fn list_card(l: &(String, Option<String>), mine: &[Value], shown: &[Value], filter: &str) -> Embed {
+    let open = mine.iter().filter(|it| !truthy(&it["done"])).count();
+    let done = mine.len() - open;
+    let fields: Vec<(String, String)> = shown
+        .iter()
+        .map(|it| {
+            let text = text_of(it);
+            let long = text.encode_utf16().count() > 200;
+            let pos = mine.iter().position(|m| m == it).map_or(0, |i| i + 1);
+            let mark = if truthy(&it["done"]) { "✅" } else { "⬜" };
+            let name = format!("{mark} {pos}. {}", if long { format!("{}…", slice16(text, 199)) } else { text.to_string() });
+            let author = it["author"]["name"].as_str().filter(|n| !n.is_empty()).unwrap_or("?");
+            (name, format!("{}*{author} · {}*", if long { format!("{text}\n") } else { String::new() }, date(&it["at"])))
+        })
+        .collect();
+    let f: Vec<(&str, &str, bool)> = fields.iter().map(|(n, v)| (n.as_str(), v.as_str(), false)).collect();
+    let title = format!("📝 {}{filter}", if l.0 == GENERAL { "Liste générale".to_string() } else { format!("Liste de {}", l.1.as_deref().unwrap_or("null")) });
+    card(&title, TODO, Some(&format!("**{open}** à faire · **{done}** fait{}", if done > 1 { "s" } else { "" })), &f, None)
+}
+
+/// "Qu'est-ce qui a déjà été fait ?", "ce qui reste à faire", "les points de Lucas": which items a readout shows.
+fn filtered(s: &Step, mine: &[Value]) -> Vec<Value> {
+    let mut out: Vec<Value> = mine.to_vec();
+    match s.str("filter") {
+        Some("done") => out.retain(|it| truthy(&it["done"])),
+        Some("open") => out.retain(|it| !truthy(&it["done"])),
+        _ => {}
+    }
+    let a = s.str("author").unwrap_or("").trim();
+    if !a.is_empty() {
+        out.retain(|it| if is_mine(a) { it["author"]["id"].as_str() == Some(s.by.id.as_str()) } else { sim(a, it["author"]["name"].as_str().unwrap_or("")) >= 0.7 });
+    }
+    out
+}
+
+pub async fn run<L: Understand + Sync>(s: &mut Step, env: &Env<'_, L>, _lang: &str) -> Res<Vec<UndoOp>> {
+    match s.kind.as_str() {
+        "todo_add" => edit(s, env, |all, s| {
+            let list = step_list(s).0;
+            if !can_add(&list, &s.by) {
+                return Err(Say::new("Tu ne peux ajouter qu'à la liste générale ou à ta liste.", "You can only add to the general list or to your own.").into());
+            }
+            let id = all.iter().map(|x| x["id"].as_i64().unwrap_or(0)).max().unwrap_or(0).max(0) + 1;
+            let it = json!({ "id": id, "text": s.text, "list": list, "author": { "id": s.by.id, "name": s.by.name }, "at": now_iso(), "done": false });
+            all.push(it.clone());
+            Ok(Some(it))
+        }),
+        "todo_done" => touch(s, env, |all, i, _| {
+            all[i]["done"] = json!(true);
+            Ok(())
+        }),
+        "todo_remove" => touch(s, env, |all, i, _| {
+            all.remove(i);
+            Ok(())
+        }),
+        "todo_move" => touch(s, env, |all, i, s| {
+            let to = list_parts(s.to.as_ref()).0;
+            if !can_add(&to, &s.by) {
+                return Err(Say::new("Tu ne peux déplacer que vers la liste générale ou ta liste.", "You can only move items to the general list or your own.").into());
+            }
+            all[i]["list"] = json!(to);
+            Ok(())
+        }),
+        "todo_list" => {
+            let l = step_list(s);
+            let mine: Vec<Value> = items(env.store).into_iter().filter(|it| it["list"].as_str() == Some(l.0.as_str())).collect();
+            s.set("open", mine.iter().filter(|it| !truthy(&it["done"])).cloned().collect::<Vec<_>>());
+            let author = s.str("author").unwrap_or("").to_string();
+            if s.flag("filter") || !author.is_empty() {
+                let shown = filtered(s, &mine);
+                let filter = match s.str("filter") {
+                    Some("done") => " · faits",
+                    Some("open") => " · à faire",
+                    _ => "",
+                };
+                let suffix = format!("{filter}{}", if author.is_empty() { String::new() } else { format!(" · {author}") });
+                let at: Value = if shown.is_empty() { Value::Null } else { env.post(Post::Embeds(vec![list_card(&l, &mine, &shown, &suffix)])).await?.into() };
+                s.set("shown", shown);
+                s.set("where", at);
+                return Ok(vec![]);
+            }
+            let at: Value = if mine.is_empty() { Value::Null } else { env.post(Post::Embeds(vec![list_card(&l, &mine, &mine, "")])).await?.into() };
+            s.set("where", at);
+            Ok(vec![])
+        }
+        _ => Ok(vec![]),
+    }
 }
 
 #[cfg(test)]
@@ -443,5 +630,120 @@ mod tests {
         assert_eq!(say_list(&s, None, "fr").unwrap(), "La liste de Lucas : 2 points. a b ; c.");
         s.text = "pain".into();
         assert_eq!(say_done(&s, None, "fr").unwrap(), "Je ne trouve pas « pain » dans la liste.");
+    }
+
+    // ---------- running steps (bot/unit.test.js lines 204-216 and 404-420) ----------
+
+    use crate::actions::{run as run_step, Env, UndoOp};
+    use crate::resolve::{names, resolve};
+    use crate::shortcuts::quick;
+    use crate::testing::{caps as sent_caps, fake_client, FakeLlm};
+    use bobby_proto::msg::Cap;
+
+    fn sup() -> Ctx {
+        Ctx { role: Role::Super, ..ctx() }
+    }
+
+    fn describe(plan: &[Step], lang: &str) -> String {
+        plan.iter()
+            .filter_map(|s| crate::actions::def(&s.kind).and_then(|d| d.say).and_then(|say| say(s, s.targets.as_ref().map(|t| names(t, lang)).as_deref(), lang)))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    async fn go(store: &Store, plan: &mut [Step]) -> Vec<UndoOp> {
+        let (io, _) = fake_client(|_| Ok(json!({ "channel": "dev-bot-test" })));
+        let c = sup();
+        let env = Env { io: &io, store, ctx: &c, llm: &FakeLlm::default(), post_to: None };
+        let mut ops = vec![];
+        for s in plan {
+            ops.extend(run_step(s, &env, "fr").await.unwrap());
+        }
+        ops
+    }
+
+    fn undo(store: &Store, ops: Vec<UndoOp>) {
+        for op in ops.into_iter().rev() {
+            if let UndoOp::Restore { name, prev } = op {
+                store.save(name, &prev).unwrap();
+            }
+        }
+    }
+
+    fn texts(store: &Store) -> Vec<String> {
+        items(store).iter().map(|x| text_of(x).to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn undo_covers_the_todo_list() {
+        let store = Store::temp();
+        let c = sup();
+        store.save("todo", &json!([])).unwrap();
+        go(&store, &mut resolve(&[json!({ "type": "todo_add", "text": "pain" })], &c, &store).unwrap()).await;
+        go(&store, &mut resolve(&[json!({ "type": "todo_add", "text": "lait" })], &c, &store).unwrap()).await;
+        let ops = go(&store, &mut resolve(&[json!({ "type": "todo_remove", "text": "pain" })], &c, &store).unwrap()).await;
+        assert_eq!(texts(&store), ["lait"]);
+        undo(&store, ops);
+        assert_eq!(texts(&store), ["pain", "lait"]);
+        let all = items(&store);
+        assert_eq!((all[0]["id"].clone(), all[1]["id"].clone(), all[1]["author"].clone()), (json!(1), json!(2), json!({ "id": "Alex", "name": "Alex" })));
+    }
+
+    #[tokio::test]
+    async fn rights_and_edits() {
+        let store = two_items();
+        let mut c = ctx();
+        c.role = Role::Prime; // Alex: neither the author nor the owner of the items
+        let (io, _) = fake_client(|_| Ok(json!({ "channel": "dev-bot-test" })));
+        let env = Env { io: &io, store: &store, ctx: &c, llm: &FakeLlm::default(), post_to: None };
+        let mut done = resolve(&[json!({ "type": "todo_done", "text": "2" })], &c, &store).unwrap();
+        assert!(matches!(run_step(&mut done[0], &env, "fr").await, Err(crate::util::BrainError::Say(s)) if s.fr.contains("tes propres points")));
+        let mut add = resolve(&[json!({ "type": "todo_add", "text": "x", "list": "Lucas" })], &c, &store).unwrap();
+        assert!(matches!(run_step(&mut add[0], &env, "fr").await, Err(crate::util::BrainError::Say(_))));
+        let s = sup();
+        let mut mv = resolve(&[json!({ "type": "todo_move", "text": "voix", "to": "moi" })], &s, &store).unwrap();
+        go(&store, &mut mv).await;
+        assert_eq!(items(&store)[1]["list"], "Alex");
+        assert_eq!(describe(&mv, "fr"), "Je déplace « Une voix différente pour Claude » dans ta liste.");
+        let mut gone = resolve(&[json!({ "type": "todo_done", "text": "zzzz" })], &s, &store).unwrap();
+        assert!(go(&store, &mut gone).await.is_empty());
+        assert_eq!(describe(&gone, "en"), "I can't find \"zzzz\" in the list.");
+    }
+
+    // List filters: "qu'est-ce qui a déjà été fait dans cette liste ?" read the whole list
+    #[tokio::test]
+    async fn list_filters() {
+        assert_eq!(quick("est-ce que tu peux me dire ce qui a déjà été fait dans cette liste ?"), Some(vec![json!({ "type": "todo_list", "list": "general", "filter": "done" })]));
+        assert_eq!(quick("qu'est-ce qui reste à faire").unwrap()[0]["filter"], "open");
+        let store = Store::temp();
+        let a = |id: &str| json!({ "id": id, "name": id });
+        store
+            .save(
+                "todo",
+                &json!([
+                    { "id": 1, "text": "fondus", "list": "general", "author": a("Marie"), "at": null, "done": true },
+                    { "id": 2, "text": "voix de Claude", "list": "general", "author": a("Alex"), "at": null, "done": false },
+                    { "id": 3, "text": "historique", "list": "general", "author": a("Marie"), "at": null, "done": true },
+                ]),
+            )
+            .unwrap();
+        let c = sup();
+        let (io, sent) = fake_client(|_| Ok(json!({ "channel": "dev-bot-test" })));
+        let env = Env { io: &io, store: &store, ctx: &c, llm: &FakeLlm::default(), post_to: None };
+        let mut lp = resolve(&[json!({ "type": "todo_list", "list": "general", "filter": "done" })], &c, &store).unwrap();
+        run_step(&mut lp[0], &env, "fr").await.unwrap();
+        assert_eq!(describe(&lp, "fr"), "Dans la liste générale, 2 points faits : fondus ; historique.");
+        let posted = sent_caps(&sent);
+        let Some(Cap::Post { embeds, .. }) = posted.last() else { panic!("no post") };
+        assert_eq!(embeds[0].fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["✅ 1. fondus", "✅ 3. historique"]); // the list's own numbers
+        assert_eq!(embeds[0].title, "📝 Liste générale · faits");
+        assert_eq!(embeds[0].description, "**1** à faire · **2** faits");
+        let mut lp = resolve(&[json!({ "type": "todo_list", "list": "general", "author": "Alex" })], &c, &store).unwrap();
+        run_step(&mut lp[0], &env, "fr").await.unwrap();
+        assert_eq!(describe(&lp, "fr"), "Dans la liste générale, 1 point de Alex : voix de Claude.");
+        // nothing on the list: nothing posted
+        let mut lp = resolve(&[json!({ "type": "todo_list", "list": "Lucas" })], &c, &store).unwrap();
+        run_step(&mut lp[0], &env, "fr").await.unwrap();
+        assert_eq!(describe(&lp, "fr"), "La liste de Lucas est vide.");
     }
 }

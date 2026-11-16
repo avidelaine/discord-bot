@@ -111,9 +111,112 @@ pub fn module() -> Module {
     }
 }
 
-/// R3b: port of the module's `run` functions (one per action type).
-pub async fn run<L: bobby_proto::infer::Understand + Sync>(_s: &mut crate::types::Step, _env: &super::Env<'_, L>, _lang: &str) -> crate::util::Res<Vec<super::UndoOp>> {
-    Ok(vec![]) // R3b
+// ---------- Running steps ----------
+
+use super::{Env, Post, UndoOp};
+use crate::format::{card, table, NICKNAMES};
+use crate::util::{BrainError, Res};
+use bobby_proto::infer::Understand;
+use bobby_proto::msg::{Cap, Embed};
+use serde_json::Map;
+
+/// `io.memberName(id)`
+pub(super) async fn member_name<L>(env: &Env<'_, L>, id: &str) -> Res<String> {
+    let v = env.io.run(Cap::MemberName { id: id.to_string() }).await?;
+    Ok(v["name"].as_str().unwrap_or(id).to_string())
+}
+
+fn has(list: Option<&Value>, text: &str) -> Option<usize> {
+    list.and_then(Value::as_array).and_then(|l| l.iter().position(|x| norm(x.as_str().unwrap_or("")) == norm(text)))
+}
+
+/// Person who has nickname s.text: the one named in the sentence, else anyone.
+fn owner(all: &Map<String, Value>, s: &Step) -> Option<String> {
+    let ids: Vec<String> = match &s.targets {
+        Some(t) if !t.is_empty() => vec![t[0].id.clone()],
+        _ => all.keys().cloned().collect(),
+    };
+    ids.into_iter().find(|id| has(all.get(id), &s.text).is_some())
+}
+
+/// Runs `f(all, step)` on the stored nicknames; `f` returns the id of the person it changed (none: nickname not
+/// found). Undo restores the previous document.
+async fn edit<L>(s: &mut Step, env: &Env<'_, L>, f: impl FnOnce(&mut Map<String, Value>, &Step) -> Option<String>) -> Res<Vec<UndoOp>> {
+    let prev = env.store.load_or("aliases", json!({}));
+    let mut all = prev.as_object().cloned().unwrap_or_default();
+    let id = f(&mut all, s);
+    s.set("missing", id.is_none());
+    if let Some(id) = &id {
+        if s.targets.is_none() {
+            let name = member_name(env, id).await?;
+            s.set("owner", name);
+        }
+    }
+    all.retain(|_, l| l.as_array().is_none_or(|a| !a.is_empty()));
+    env.store.save("aliases", &Value::Object(all)).map_err(|msg| BrainError::Failed { msg, no_rights: false })?;
+    Ok(vec![UndoOp::Restore { name: "aliases", prev }])
+}
+
+/// Nicknames as a card holding an aligned table (person | nicknames), sorted by name; None when nobody has one.
+/// People may have left voice: names come from the client.
+async fn list_card<L>(env: &Env<'_, L>) -> Res<Option<Embed>> {
+    let all = env.store.load_or("aliases", json!({}));
+    let mut rows: Vec<Vec<String>> = vec![];
+    for (id, l) in all.as_object().into_iter().flatten() {
+        let l = l.as_array().cloned().unwrap_or_default();
+        if !l.is_empty() {
+            rows.push(vec![member_name(env, id).await?, l.iter().map(|x| x.as_str().unwrap_or("")).collect::<Vec<_>>().join(", ")]);
+        }
+    }
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    rows.sort_by(|a, b| norm(&a[0]).cmp(&norm(&b[0])).then_with(|| a[0].cmp(&b[0]))); // localeCompare, close enough
+    Ok(Some(card("🏷️ Surnoms", NICKNAMES, Some(&table(&["Personne", "Surnoms"], &rows)), &[], None)))
+}
+
+pub async fn run<L: Understand + Sync>(s: &mut Step, env: &Env<'_, L>, _lang: &str) -> Res<Vec<UndoOp>> {
+    match s.kind.as_str() {
+        "alias_add" => {
+            edit(s, env, |all, s| {
+                let id = s.targets.as_ref()?[0].id.clone();
+                let e = all.entry(id.clone()).or_insert_with(|| json!([]));
+                if has(Some(e), &s.text).is_none() {
+                    e.as_array_mut()?.push(json!(s.text));
+                }
+                Some(id)
+            })
+            .await
+        }
+        "alias_remove" => {
+            edit(s, env, |all, s| {
+                let id = owner(all, s)?;
+                let i = has(all.get(&id), &s.text)?;
+                all.get_mut(&id)?.as_array_mut()?.remove(i);
+                Some(id)
+            })
+            .await
+        }
+        "alias_rename" => {
+            edit(s, env, |all, s| {
+                let to = s.str("to").filter(|t| !t.is_empty())?;
+                let id = owner(all, s)?;
+                let i = has(all.get(&id), &s.text)?;
+                all.get_mut(&id)?.as_array_mut()?[i] = json!(to);
+                Some(id)
+            })
+            .await
+        }
+        "alias_list" => {
+            let at: Value = match list_card(env).await? {
+                Some(c) => env.post(Post::Embeds(vec![c])).await?.into(),
+                None => Value::Null,
+            };
+            s.set("where", at);
+            Ok(vec![])
+        }
+        _ => Ok(vec![]),
+    }
 }
 
 #[cfg(test)]
@@ -139,5 +242,96 @@ mod tests {
         let s = Step { text: "le Grec".into(), ..Default::default() };
         assert_eq!(say_add(&s, Some("Zyklon"), "fr").unwrap(), "Zyklon s'appelle aussi « le Grec ».");
         assert_eq!(say_remove(&s, Some("Zyklon"), "en").unwrap(), "Forgetting \"le Grec\" for Zyklon.");
+    }
+
+    // ---------- running steps (bot/unit.test.js, "Undo covers nicknames ...", lines 174-204) ----------
+
+    use crate::actions::{run as run_step, Env, UndoOp};
+    use crate::resolve::{names, resolve};
+    use crate::shortcuts::quick;
+    use crate::store::Store;
+    use crate::testing::{caps as sent_caps, ctx, fake_client, FakeLlm};
+    use bobby_proto::msg::Cap;
+
+    /// `nio`: names of people out of voice, and a text channel to post in.
+    fn answer(cap: &Cap) -> Result<Value, String> {
+        match cap {
+            Cap::MemberName { id } => Ok(json!({ "name": match id.as_str() { "b" => "Zoé", "a" => "Ana", x => x } })),
+            Cap::Post { .. } => Ok(json!({ "channel": "dev-bot-test" })),
+            _ => Ok(Value::Null),
+        }
+    }
+
+    /// `describe(plan, lang)`: the `say` of each step.
+    fn describe(plan: &[Step], lang: &str) -> String {
+        plan.iter()
+            .filter_map(|s| crate::actions::def(&s.kind).and_then(|d| d.say).and_then(|say| say(s, s.targets.as_ref().map(|t| names(t, lang)).as_deref(), lang)))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    async fn go(store: &Store, plan: &mut [Step]) -> Vec<UndoOp> {
+        let (io, _) = fake_client(answer);
+        let c = ctx();
+        let env = Env { io: &io, store, ctx: &c, llm: &FakeLlm::default(), post_to: None };
+        let mut ops = vec![];
+        for s in plan {
+            ops.extend(run_step(s, &env, "fr").await.unwrap());
+        }
+        ops
+    }
+
+    fn undo(store: &Store, ops: Vec<UndoOp>) {
+        for op in ops.into_iter().rev() {
+            if let UndoOp::Restore { name, prev } = op {
+                store.save(name, &prev).unwrap();
+            }
+        }
+    }
+
+    fn plan(store: &Store, sentence: &str) -> Vec<Step> {
+        resolve(&quick(sentence).unwrap(), &ctx(), store).unwrap()
+    }
+
+    #[tokio::test]
+    async fn nicknames_undo_list_rename_delete() {
+        let store = Store::temp();
+        let c = ctx();
+        let mut add = resolve(&[json!({ "type": "alias_add", "who": ["Kévin"], "text": "le Boss" })], &c, &store).unwrap();
+        let ops = go(&store, &mut add).await;
+        assert_eq!(store.load("aliases").unwrap()["Kévin"], json!(["le Boss"]));
+        undo(&store, ops);
+        assert_eq!(store.load("aliases").unwrap().get("Kévin"), None);
+        // list (sorted by name, people out of voice included), rename, delete, each undoable
+        store.save("aliases", &json!({ "b": ["le Grec", "Zo"], "a": ["la Reine"], "c": [] })).unwrap();
+        let (io, sent) = fake_client(answer);
+        let env = Env { io: &io, store: &store, ctx: &c, llm: &FakeLlm::default(), post_to: None };
+        let mut lst = plan(&store, "qui a quel surnom");
+        run_step(&mut lst[0], &env, "fr").await.unwrap();
+        let posted = sent_caps(&sent);
+        let Some(Cap::Post { embeds, .. }) = posted.last() else { panic!("no post") };
+        assert_eq!(embeds[0].description, "```\nPersonne  Surnoms\n--------  -----------\nAna       la Reine\nZoé       le Grec, Zo\n```"); // aligned table in an embed
+        assert_eq!(embeds[0].title, "🏷️ Surnoms");
+        assert_eq!(describe(&lst, "fr"), "Je l'ai mis dans dev-bot-test.");
+        assert_eq!(describe(&lst, "en"), "I put it in dev-bot-test.");
+        let mut rn = plan(&store, "renomme le surnom le grec en le Spartiate");
+        let ops = go(&store, &mut rn).await;
+        assert_eq!(store.load("aliases").unwrap()["b"], json!(["le spartiate", "Zo"])); // shortcuts lowercase the sentence
+        assert_eq!(describe(&rn, "fr"), "« le grec » devient « le spartiate » pour Zoé.");
+        undo(&store, ops);
+        assert_eq!(store.load("aliases").unwrap()["b"], json!(["le Grec", "Zo"]));
+        let mut del = plan(&store, "supprime le surnom la reine");
+        let ops = go(&store, &mut del).await;
+        assert_eq!(store.load("aliases").unwrap().get("a"), None);
+        assert_eq!(describe(&del, "fr"), "J'oublie « la reine » pour Ana.");
+        undo(&store, ops);
+        assert_eq!(store.load("aliases").unwrap()["a"], json!(["la Reine"]));
+        let mut nope = plan(&store, "supprime le surnom inconnu");
+        go(&store, &mut nope).await;
+        assert_eq!(describe(&nope, "fr"), "Je ne trouve pas le surnom « inconnu ».");
+        // with "who": only that person is searched
+        let mut one = resolve(&[json!({ "type": "alias_remove", "who": ["Zyklon"], "text": "le Grec" })], &c, &store).unwrap();
+        go(&store, &mut one).await;
+        assert_eq!(one[0].f["missing"], json!(true));
     }
 }

@@ -91,10 +91,14 @@ pub enum ClientMsg {
         expected: bool,
     },
     /// Answer to `BrainMsg::Run { id }`. `data` is the plain-data result (see `Cap` docs).
+    /// `error` starting with "50013" means Discord refused for missing permissions (said as such to the user).
     Result { id: u64, ok: bool, data: Value, error: Option<String> },
     /// A slash command (`join`, `leave`, `surnoms`) typed by `user` in `text_channel`. The brain decides
     /// (roles, nicknames are its data) and answers with `BrainMsg::Reply { id }`, then any `Run`.
     Command { id: u64, name: String, user: String, text_channel: String },
+    /// Bobby's voice started (`user`: the person the reply is for, see `Say::to_user`) or ended (`None`).
+    /// The brain needs it to let that person interrupt with a plain "stop".
+    Speaking { user: Option<String> },
 }
 
 // ---------- Brain -> client ----------
@@ -134,12 +138,24 @@ pub enum BrainMsg {
 
 // ---------- Capabilities ----------
 
-/// Plain Discord embed; the client splits to Discord's limits.
+/// Plain Discord embed (one logical card); the client splits it to Discord's limits like `bot/format.js` `embed()`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Embed {
     pub title: String,
     pub description: String,
     pub color: Option<u32>,
+    #[serde(default)]
+    pub fields: Vec<EmbedField>,
+    #[serde(default)]
+    pub footer: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EmbedField {
+    pub name: String,
+    pub value: String,
+    #[serde(default)]
+    pub inline: bool,
 }
 
 /// What to play. `endless`: go on with similar tracks (`similar`) or only this artist (`artist`).
@@ -186,6 +202,7 @@ pub enum MediaCmd {
 /// - `mute`/`deafen`: `{"prev": {user_id: bool}}` (state before the change; the brain undoes it by
 ///   sending the old values back, one call per value)
 /// - `move`: `{"prev": {user_id: channel_id|null}}`
+/// - `join`: `{"prev": channel_id|null}` (where Bobby was; null if it did not move), used to undo a "come"/"move me"
 /// - `post`: `{"channel": name}`; `edit_last`/`delete_last`: `{"found": bool}`
 /// - `clean`: `{"count": n, "channel": name}` (deletes in the background, answers at once)
 /// - `member_name`: `{"name": string}`
@@ -271,7 +288,7 @@ mod tests {
             Cap::Disconnect { users: ids(&["1"]) },
             Cap::Join { channel: s("2") },
             Cap::Leave,
-            Cap::Post { channel: None, text: Some(s("hi")), embeds: vec![Embed { title: s("t"), description: s("d"), color: Some(255) }] },
+            Cap::Post { channel: None, text: Some(s("hi")), embeds: vec![Embed { title: s("t"), description: s("d"), color: Some(255), fields: vec![EmbedField { name: s("n"), value: s("v"), inline: true }], footer: Some(s("f")) }] },
             Cap::Ping { users: ids(&["1"]), channel: Some(s("3")), text: s("wake up") },
             Cap::EditLast { channel: None, text: s("new") },
             Cap::DeleteLast { channel: Some(s("3")) },
@@ -352,6 +369,7 @@ mod tests {
             ClientMsg::Result { id: 7, ok: true, data: json!({"prev": {"1": false}}), error: None },
             ClientMsg::Result { id: 8, ok: false, data: Value::Null, error: Some(s("no player")) },
             ClientMsg::Command { id: 9, name: s("join"), user: s("1"), text_channel: s("3") },
+            ClientMsg::Speaking { user: Some(s("1")) },
         ];
         for m in &client {
             round_trip(m);

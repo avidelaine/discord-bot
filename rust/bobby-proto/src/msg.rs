@@ -103,7 +103,7 @@ pub enum ClientMsg {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SignalKind {
-    /// Spoken or short "got it".
+    /// Spoken or short "got it": the client plays its spoken ack, or the beep if it has none yet.
     Ack,
     Beep,
     Nope,
@@ -127,7 +127,7 @@ pub enum BrainMsg {
     /// Stop speaking now.
     Hush,
     Run { id: u64, cap: Cap },
-    /// Listen to `user` without a wake word for `ms` milliseconds.
+    /// Listen to `user` without a wake word for `ms` milliseconds. `ms: 0` closes the window.
     Expect { user: String, ms: u32 },
 }
 
@@ -201,7 +201,9 @@ pub enum MediaCmd {
 /// - `post`: `{"channel": name}`; `edit_last`/`delete_last`: `{"found": bool}`
 /// - `clean`: `{"count": n, "channel": name}` (deletes in the background, answers at once)
 /// - `member_name`: `{"name": string}`
-/// - `music_*`: the player's plain result (`{"nowPlaying": ..}`, `{"queue": [..]}`, `{"error": ".."}` ...)
+/// - `music_*`: the player's plain result (`{"nowPlaying": ..}`, `{"queue": [..]}`, `{"error": ".."}` ...). The player's own
+///   errors arrive as `ok: true` data `{"error": ".."}`, including `"no player"` when the client has no Discord player;
+///   `ok: false` is a real failure of the cap.
 /// - `pc_now`: `{"playing": bool, "title": .., "artist": ..}`; `pc_volume`: see `VolumeOp`;
 ///   `pc_apps`/`pc_windows`: `{"items": [string]}`; `pc_launch`/`pc_close`: `{"found": name|null}`;
 ///   `pc_gpu`: `{"name", "temp", "load", "used", "total"}`

@@ -203,6 +203,11 @@ impl<L: Understand + Sync> Brain<L> {
         let mut memory = Memory::new();
         let n = memory.reload(&journal.path, now_ms());
         println!("[brain] {n} past exchange(s) reloaded from the journal");
+        // `claude.check()` at startup (bot.js ClientReady): logs whether the Claude CLI is usable; the result is cached
+        #[cfg(not(test))]
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(ask::check());
+        }
         Brain { store, llm, io, journal, state: Mutex::new(State { memory, ..Default::default() }) }
     }
 
@@ -277,7 +282,7 @@ impl<L: Understand + Sync> Brain<L> {
                             UndoOp::Cap(cap) => {
                                 env.io.run(cap.clone()).await?;
                             }
-                            UndoOp::Restore { name, prev } => env.store.save(name, prev).map_err(BrainError::failed)?,
+                            op => op.apply_to_store(env.store).map_err(BrainError::failed)?,
                         }
                     }
                     self.st().undo.remove(&who);
@@ -476,12 +481,16 @@ impl<L: Understand + Sync> Brain<L> {
             }
             return;
         }
-        let key = {
+        let (key, closed) = {
             let mut st = self.st();
-            st.pending.remove(&h.user);
+            // Node `pending.delete`: the entry is consumed (or dropped) by this sentence
+            let open = st.pending.remove(&h.user).is_some_and(|p| p.until_ms > now_ms());
             st.next_rec += 1;
-            st.next_rec
+            (st.next_rec, open)
         };
+        if closed {
+            self.io.expect(&h.user, 0); // the client's listening window closes with it
+        }
         let mut t = Map::new();
         if let Some(s) = h.stt_ms {
             t.insert("stt".into(), json!(s));
@@ -916,6 +925,33 @@ mod tests {
         // nothing left to undo
         r.hear("Bobby, remets comme avant", ADMIN).await;
         assert_eq!(r.said(), ["Il n'y a rien à annuler."]);
+    }
+
+    #[tokio::test]
+    async fn answering_a_pending_window_closes_it() {
+        let r = rig(vec![], ok);
+        r.hear("Bobby", ADMIN).await;
+        assert!(r.msgs().contains(&BrainMsg::Expect { user: ADMIN.into(), ms: 8000 }));
+        r.hear("mute Kévin", ADMIN).await;
+        assert_eq!(r.msgs().iter().filter(|m| matches!(m, BrainMsg::Expect { ms: 0, .. })).count(), 1);
+        assert!(r.msgs().contains(&BrainMsg::Expect { user: ADMIN.into(), ms: 0 }));
+        // a sentence with no window open sends no close
+        r.hear("Bobby, mute Kévin", ADMIN).await;
+        assert_eq!(r.msgs().iter().filter(|m| matches!(m, BrainMsg::Expect { ms: 0, .. })).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn undo_of_a_move_moves_people_back_before_bobby_rejoins() {
+        let llm = vec![json!({"actions": [{"type": "move", "who": ["moi"], "channel": "Gaming"}], "say": ""}), json!({"actions": [{"type": "undo"}], "say": ""})];
+        let r = rig(llm, |c| match c {
+            Cap::Move { .. } => Ok(json!({ "prev": { ADMIN: "Général" } })),
+            Cap::Join { .. } => Ok(json!({ "prev": "Général" })),
+            _ => Ok(Value::Null),
+        });
+        r.hear("Bobby, mets-moi dans Gaming", ADMIN).await;
+        r.hear("Bobby, annule", ADMIN).await;
+        let c = caps(&r.sent);
+        assert_eq!(&c[2..], [Cap::Move { users: vec![ADMIN.into()], channel: "Général".into() }, Cap::Join { channel: "Général".into() }], "{c:?}");
     }
 
     #[tokio::test]

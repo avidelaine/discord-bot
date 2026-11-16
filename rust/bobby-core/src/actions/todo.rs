@@ -419,17 +419,25 @@ fn find_item(s: &Step, all: &[Value]) -> Option<usize> {
     best.filter(|&(_, sc)| sc >= 0.6).map(|(i, _)| i)
 }
 
-/// Runs `f(all, step)` -> item touched (None: not found) and saves. The undo puts the document back as it was.
+/// Runs `f(all, step)` -> item touched (None: not found) and saves. The undo reverts only that item, so it never
+/// erases what someone else added meanwhile.
 fn edit<L>(s: &mut Step, env: &Env<'_, L>, f: impl FnOnce(&mut Vec<Value>, &Step) -> Res<Option<Value>>) -> Res<Vec<UndoOp>> {
-    let prev = env.store.load_or("todo", json!([]));
     let mut all = items(env.store);
+    let before = all.clone();
     let it = f(&mut all, s)?;
     s.set("item", it.clone().unwrap_or(Value::Null));
     if it.is_none() {
         return Ok(vec![]);
     }
+    let (mut remove_ids, mut put, mut replace) = (vec![], vec![], vec![]);
+    let id = it.as_ref().map_or(Value::Null, |x| x["id"].clone());
+    match before.iter().position(|x| x["id"] == id) {
+        None => remove_ids.extend(id.as_i64()), // added: remove it
+        Some(i) if !all.iter().any(|x| x["id"] == id) => put.push((i, before[i].clone())), // deleted: put it back
+        Some(i) => replace.push(before[i].clone()), // ticked or moved: previous state
+    }
     env.store.save("todo", &Value::Array(all)).map_err(|msg| BrainError::Failed { msg, no_rights: false })?;
-    Ok(vec![UndoOp::Restore { name: "todo", prev }])
+    Ok(vec![UndoOp::Items { name: "todo", remove_ids, put, replace }])
 }
 
 /// `touch(fn)`: finds the item, checks the rights, applies `fn` to it; the item left is the one `say` shows.
@@ -664,9 +672,7 @@ mod tests {
 
     fn undo(store: &Store, ops: Vec<UndoOp>) {
         for op in ops.into_iter().rev() {
-            if let UndoOp::Restore { name, prev } = op {
-                store.save(name, &prev).unwrap();
-            }
+            op.apply_to_store(store).unwrap();
         }
     }
 

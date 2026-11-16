@@ -12,6 +12,9 @@ use tokio::sync::{mpsc, oneshot};
 /// Discord's "Missing Permissions" error code, sent by the client as `error: "50013 ..."`.
 pub const NO_RIGHTS: &str = "50013";
 
+/// How long a `run` waits for the client's answer.
+const RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 type Reply = Result<Value, String>;
 
 pub struct Io {
@@ -35,18 +38,29 @@ impl Io {
     pub async fn run(&self, cap: Cap) -> Res<Value> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.waiting.lock().unwrap().insert(id, tx);
-        self.send(BrainMsg::Run { id, cap });
-        match rx.await {
-            Ok(Ok(v)) => Ok(v),
-            Ok(Err(e)) => Err(BrainError::Failed { no_rights: e.starts_with(NO_RIGHTS), msg: e }),
-            Err(_) => Err(BrainError::failed("client gone")),
+        self.waiting().insert(id, tx);
+        if self.tx.send(BrainMsg::Run { id, cap }).is_err() {
+            self.waiting().remove(&id);
+            return Err(BrainError::failed("no client"));
         }
+        match tokio::time::timeout(RUN_TIMEOUT, rx).await {
+            Ok(Ok(Ok(v))) => Ok(v),
+            Ok(Ok(Err(e))) => Err(BrainError::Failed { no_rights: e.starts_with(NO_RIGHTS), msg: e }),
+            Ok(Err(_)) => Err(BrainError::failed("client gone")),
+            Err(_) => {
+                self.waiting().remove(&id);
+                Err(BrainError::failed("client timeout"))
+            }
+        }
+    }
+
+    fn waiting(&self) -> std::sync::MutexGuard<'_, HashMap<u64, oneshot::Sender<Reply>>> {
+        self.waiting.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Routes a `ClientMsg::Result` to the `run` waiting for it. False if nobody waits for that id.
     pub fn deliver(&self, id: u64, ok: bool, data: Value, error: Option<String>) -> bool {
-        let Some(tx) = self.waiting.lock().unwrap().remove(&id) else { return false };
+        let Some(tx) = self.waiting().remove(&id) else { return false };
         let _ = tx.send(if ok { Ok(data) } else { Err(error.unwrap_or_else(|| "failed".into())) });
         true
     }
@@ -96,5 +110,20 @@ mod tests {
         assert_eq!(io.run(Cap::MemberName { id: "1".into() }).await.unwrap(), json!({"name": "Kévin"}));
         assert!(matches!(io.run(Cap::Leave).await, Err(BrainError::Failed { no_rights: true, .. })));
         client.abort();
+    }
+
+    #[tokio::test]
+    async fn run_fails_without_a_client() {
+        let (io, rx) = Io::new();
+        drop(rx);
+        assert!(matches!(io.run(Cap::Leave).await, Err(BrainError::Failed { msg, .. }) if msg == "no client"));
+        assert!(io.waiting().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_times_out() {
+        let (io, _rx) = Io::new(); // a client that never answers
+        assert!(matches!(io.run(Cap::Leave).await, Err(BrainError::Failed { msg, .. }) if msg == "client timeout"));
+        assert!(io.waiting().is_empty());
     }
 }

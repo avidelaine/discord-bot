@@ -254,8 +254,8 @@ pub async fn run<L: bobby_proto::infer::Understand + Sync>(s: &mut Step, env: &s
     use super::UndoOp;
     use bobby_proto::msg::Cap;
     let ids: Vec<String> = s.targets.iter().flatten().map(|t| t.id.clone()).collect();
-    // Node's `chan(s, io)`: the step's channel, else where the writing asked, else Bobby's text channel (None).
-    let chan = s.channel.as_ref().map(|c| c.id.clone()).or_else(|| env.post_to.map(|c| c.id.clone()));
+    // Node's `chan(s, io)`: the step's channel, else Bobby's text channel (None); it ignores the writing mode.
+    let chan = s.channel.as_ref().map(|c| c.id.clone());
     match s.kind.as_str() {
         "mute" | "unmute" | "deafen" | "undeafen" => {
             let on = matches!(s.kind.as_str(), "mute" | "deafen");
@@ -287,8 +287,9 @@ pub async fn run<L: bobby_proto::infer::Understand + Sync>(s: &mut Step, env: &s
                     None => groups.push((c.to_string(), vec![id.clone()])),
                 }
             }
-            let mut undo: Vec<UndoOp> = groups.into_iter().map(|(channel, users)| UndoOp::Cap(Cap::Move { users, channel })).collect();
-            undo.extend(back.map(|channel| UndoOp::Cap(Cap::Join { channel })));
+            // ops are undone last to first: people go back first, then Bobby re-joins its previous channel
+            let mut undo: Vec<UndoOp> = back.map(|channel| UndoOp::Cap(Cap::Join { channel })).into_iter().collect();
+            undo.extend(groups.into_iter().map(|(channel, users)| UndoOp::Cap(Cap::Move { users, channel })));
             Ok(undo)
         }
         "disconnect" => {
@@ -406,7 +407,8 @@ mod tests {
         let (_, undo) = exec(vec![json!({"type":"move","who":["moi","Zyklon"],"channel":"Gaming"})], &io).await;
         assert_eq!(caps(&sent), vec![Cap::Move { users: ids(&["Alex", "Zyklon"]), channel: "Gaming".into() }, Cap::Join { channel: "Gaming".into() }]);
         // Zyklon was not in voice (null): nothing to put back for him
-        assert_eq!(undo, vec![UndoOp::Cap(Cap::Move { users: ids(&["Alex"]), channel: "Général".into() }), UndoOp::Cap(Cap::Join { channel: "Général".into() })]);
+        // (undo runs the ops last to first: the move back, then Bobby's join)
+        assert_eq!(undo, vec![UndoOp::Cap(Cap::Join { channel: "Général".into() }), UndoOp::Cap(Cap::Move { users: ids(&["Alex"]), channel: "Général".into() })]);
         // without the speaker, Bobby stays
         let (io, sent) = fake_client(|_| Ok(json!({ "prev": { "Marie": "Gaming" } })));
         let (_, undo) = exec(vec![json!({"type":"move","who":["Marie"],"channel":"AFK"})], &io).await;

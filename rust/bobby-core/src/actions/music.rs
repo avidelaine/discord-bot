@@ -346,11 +346,9 @@ pub async fn run<L: bobby_proto::infer::Understand + Sync>(s: &mut Step, env: &s
         _ => return Ok(vec![]),
     };
     let kind = s.kind.clone();
-    // a failed cap (no player, nothing playing...) is the player's plain `{error}`, never an Err
-    let mut res = match env.io.run(cap).await {
-        Ok(r) => r,
-        Err(e) => json!({ "error": match e { crate::util::BrainError::Failed { msg, .. } => msg, e => e.to_string() } }),
-    };
+    // the player's own errors (no player, nothing playing...) come as `ok: true` data `{"error": ".."}`;
+    // a failed cap is a real failure ("Ça n'a pas marché." or no rights)
+    let mut res = env.io.run(cap).await?;
     if res["error"].is_null() {
         match kind.as_str() {
             // always stop: a track still being looked up must not start after "stop"
@@ -464,7 +462,7 @@ mod tests {
             Cap::MusicPlay { item: MusicItem::Youtube { query, .. }, add: true } => Ok(json!({ "started": false, "position": 3, "label": query })),
             Cap::MusicPlay { .. } => Ok(json!({ "kind": "youtube" })),
             Cap::MusicPause => Ok(json!({ "paused": true })),
-            Cap::MusicResume => Err("nothing is playing".into()),
+            Cap::MusicResume => Ok(json!({ "error": "nothing is playing" })),
             Cap::MusicStop => Ok(json!({ "stopped": cur, "cleared": 2 })),
             Cap::MusicSkip => Ok(json!({ "skipped": cur, "nowPlaying": { "title": "Blinding Lights" } })),
             Cap::MusicReplay => Ok(json!({ "nowPlaying": cur })),
@@ -514,12 +512,23 @@ mod tests {
 
     #[tokio::test]
     async fn no_player_is_a_result_not_an_error() {
-        let (io, _) = fake_client(|_| Err("no player".into()));
+        let (io, _) = fake_client(|_| Ok(json!({ "error": "no player" })));
         assert_eq!(say_of(json!({"type":"music_pause"}), &io, "en").await, r#"Music only works on Discord: say "Bobby, join Discord"."#);
         // a stop that stopped nothing is "nothing is playing" (a bare "stop" then says nothing)
         let (io, _) = fake_client(|_| Ok(json!({ "stopped": null, "cleared": 0 })));
         assert_eq!(say_of(json!({"type":"music_stop","quiet":true}), &io, "fr").await, "");
         assert_eq!(say_of(json!({"type":"music_stop"}), &io, "fr").await, "Rien ne joue.");
         assert_eq!(say_of(json!({"type":"music_volume","text":"fort"}), &io, "fr").await, "Ça n'a pas marché : unknown volume \"fort\".");
+    }
+
+    #[tokio::test]
+    async fn a_failed_cap_is_an_error() {
+        let (ctx, store, llm) = (crate::testing::ctx(), Store::temp(), FakeLlm::new(vec![]));
+        for (e, rights) in [("boom", false), ("50013 Missing Permissions", true)] {
+            let (io, _) = fake_client(move |_| Err(e.into()));
+            let env = Env { io: &io, store: &store, ctx: &ctx, llm: &llm, post_to: None };
+            let mut s = crate::resolve::resolve(&[json!({"type":"music_pause"})], &ctx, &store).unwrap().remove(0);
+            assert!(matches!(run(&mut s, &env, "fr").await, Err(crate::util::BrainError::Failed { no_rights, .. }) if no_rights == rights), "{e}");
+        }
     }
 }

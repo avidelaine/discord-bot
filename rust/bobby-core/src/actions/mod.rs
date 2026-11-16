@@ -50,6 +50,35 @@ pub fn types() -> Vec<&'static str> {
 pub enum UndoOp {
     Cap(Cap),
     Restore { name: &'static str, prev: Value },
+    /// Reverts only some items of a list document (so it never erases what someone else added meanwhile):
+    /// drops the items with these ids, puts the items back at their place, replaces the ones with the same id.
+    Items { name: &'static str, remove_ids: Vec<i64>, put: Vec<(usize, Value)>, replace: Vec<Value> },
+}
+
+impl UndoOp {
+    /// Applies a store-side op (`Restore`, `Items`); a `Cap` is for the client and does nothing here.
+    pub fn apply_to_store(&self, store: &Store) -> Result<(), String> {
+        match self {
+            UndoOp::Cap(_) => Ok(()),
+            UndoOp::Restore { name, prev } => store.save(name, prev),
+            UndoOp::Items { name, remove_ids, put, replace } => {
+                let mut cur = match store.load_or(name, Value::Array(vec![])) {
+                    Value::Array(a) => a,
+                    _ => vec![],
+                };
+                cur.retain(|x| !x["id"].as_i64().is_some_and(|i| remove_ids.contains(&i)));
+                for r in replace {
+                    if let Some(x) = cur.iter_mut().find(|x| x["id"] == r["id"]) {
+                        *x = r.clone();
+                    }
+                }
+                for (i, v) in put {
+                    cur.insert((*i).min(cur.len()), v.clone());
+                }
+                store.save(name, &Value::Array(cur))
+            }
+        }
+    }
 }
 
 /// What a step may use while it runs (Node's `io` + the step's `ctx`).

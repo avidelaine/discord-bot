@@ -47,6 +47,8 @@ pub struct Person {
     pub nicknames: Vec<String>,
     /// username, global name, then nicknames: what `pick` also matches.
     pub aliases: Vec<String>,
+    /// Discord role ids of the member (`Member.roles`), for `roles::role_of`.
+    pub roles: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

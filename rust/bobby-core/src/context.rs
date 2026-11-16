@@ -25,7 +25,7 @@ pub fn build(c: &Context, store: &Store) -> Ctx {
             let channel = chan_name(m.channel.as_deref()?)?;
             let n = nick(&m.id);
             let aliases = [Some(m.username.clone()), m.global_name.clone()].into_iter().flatten().chain(n.iter().cloned()).filter(|s| !s.is_empty()).collect();
-            Some(Person { id: m.id.clone(), name: m.name.clone(), channel: Some(channel), nicknames: n, aliases })
+            Some(Person { id: m.id.clone(), name: m.name.clone(), channel: Some(channel), nicknames: n, aliases, roles: m.roles.clone() })
         })
         .collect();
     let speaker = members.iter().find(|m| m.id == c.speaker).cloned().unwrap_or_else(|| Person {

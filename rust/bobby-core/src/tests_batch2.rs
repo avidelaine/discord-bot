@@ -384,12 +384,7 @@ fn own_messages() {
     assert_eq!(quick("supprime ton dernier message").unwrap()[0]["type"], "msg_delete");
 }
 
-// FIXME(R3b review): todo undo is a snapshot (`UndoOp::Restore` puts the whole "todo" document back as it was before
-// the step), Node undid per item: Alex's undone delete wipes Lucas's later "encore Lucas".
-// got ["point de Alex", "perso de Lucas"], expected ["point de Alex", "perso de Lucas", "encore Lucas"].
-// The assertions after it live in `review_fixes_rest` so they still run.
 #[tokio::test]
-#[ignore]
 async fn review_fixes() {
     // After review: undo is per person and per item; "dernier" counts in the general list; claims in answers stay
     let r = rig();

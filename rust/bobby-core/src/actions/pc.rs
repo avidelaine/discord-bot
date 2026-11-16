@@ -315,6 +315,8 @@ pub async fn run<L: bobby_proto::infer::Understand + Sync>(s: &mut Step, env: &s
             "pc_launch" | "pc_close" if truthy(&r["found"]) => s.set("found", r["found"].clone()),
             _ => {}
         },
+        // lock, sleep, shutdown and launch throw in Node (not under `safe()`): the error reaches `hear`
+        Err(e) if matches!(s.kind.as_str(), "pc_lock" | "pc_sleep" | "pc_shutdown" | "pc_launch") => return Err(e),
         Err(_) => s.set("fail", true),
     }
     Ok(vec![])
@@ -472,5 +474,11 @@ mod tests {
             assert!(s.flag("fail"), "{}", s.kind);
         }
         assert_eq!(crate::actions::def("pc_volume").unwrap().say.unwrap()(&steps[0], None, "en").unwrap(), "I can't reach the PC service.");
+        // lock, sleep, shutdown and launch return the error instead (their JS run threw)
+        for k in ["pc_lock", "pc_sleep", "pc_shutdown", "pc_launch"] {
+            let mut s = crate::resolve::resolve(&[json!({"type": k, "text": "claude"})], &ctx, &store).unwrap().remove(0);
+            assert!(run(&mut s, &env, "fr").await.is_err(), "{k}");
+            assert!(!s.flag("fail"), "{k}");
+        }
     }
 }

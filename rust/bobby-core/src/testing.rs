@@ -4,7 +4,7 @@ use crate::types::{Chan, Ctx, Person, Role};
 
 fn m(name: &str, channel: &str, id: Option<&str>, nicknames: &[&str]) -> Person {
     let n: Vec<String> = nicknames.iter().map(|s| s.to_string()).collect();
-    Person { id: id.unwrap_or(name).into(), name: name.into(), channel: Some(channel.into()), nicknames: n.clone(), aliases: n }
+    Person { id: id.unwrap_or(name).into(), name: name.into(), channel: Some(channel.into()), nicknames: n.clone(), aliases: n, roles: vec![] }
 }
 
 fn chans(names: &[&str]) -> Vec<Chan> {

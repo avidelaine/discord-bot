@@ -143,7 +143,7 @@ pub fn module() -> Module {
 use super::aliases::member_name;
 use super::{Env, Post, UndoOp};
 use crate::format::{card, RIGHTS};
-use crate::roles::{is_super, people, perms, prime_role, role_of, save_perms, Perms};
+use crate::roles::{is_super, people, perms, role_of, save_perms, Perms};
 use crate::util::{BrainError, Res};
 use bobby_proto::infer::Understand;
 use bobby_proto::msg::Embed;
@@ -210,9 +210,7 @@ pub async fn run<L: Understand + Sync>(s: &mut Step, env: &Env<'_, L>, lang: &st
         "perm_show" => {
             // the card is posted only when asked in writing
             let t = s.targets.as_ref().map(|t| t[0].clone()).unwrap_or_default();
-            // the brain only knows Discord roles of the speaker (`ctx.role`): a Prime speaker asking about themselves
-            let discord_roles = if t.id == env.ctx.speaker.id && env.ctx.role == Role::Prime { vec![prime_role()] } else { vec![] };
-            let role = role_of(&t.id, &discord_roles, env.store);
+            let role = role_of(&t.id, &t.roles, env.store);
             let blacklisted = perms(env.store).blacklist.contains(&t.id);
             s.set("role", role.as_str());
             s.set("blacklisted", blacklisted);
@@ -286,9 +284,7 @@ mod tests {
     /// "annule": puts the documents back.
     fn undo(store: &Store, ops: Vec<UndoOp>) {
         for op in ops.into_iter().rev() {
-            if let UndoOp::Restore { name, prev } = op {
-                store.save(name, &prev).unwrap();
-            }
+            op.apply_to_store(store).unwrap();
         }
     }
 
@@ -333,6 +329,12 @@ mod tests {
         assert_eq!(say(&s, Some("Lucas"), "fr").unwrap(), "Lucas n'a aucun rôle : je ne lui réponds pas.");
         assert_eq!(s.f["card"][0]["title"], "🔐 Droits de Lucas");
         assert_eq!(s.f["card"][0]["description"], "Lucas n'a aucun rôle : je ne lui réponds pas.");
+        // the Discord roles of any person count, not only the speaker's
+        let mut c2 = ctx();
+        c2.members.iter_mut().find(|m| m.name == "Lucas").unwrap().roles = vec![crate::roles::prime_role()];
+        let mut s = resolve(&[json!({ "type": "perm_show", "who": ["Lucas"] })], &c2, &store).unwrap().remove(0);
+        run_step(&mut s, &env, "fr").await.unwrap();
+        assert!(s.f["card"][0]["description"].as_str().unwrap().starts_with("Lucas est Prime"), "{}", s.f["card"][0]["description"]);
         let mut s = resolve(&[json!({ "type": "rights_list" })], &c, &store).unwrap().remove(0);
         run_step(&mut s, &env, "en").await.unwrap();
         assert_eq!(s.str("where"), Some("dev-bot-test"));

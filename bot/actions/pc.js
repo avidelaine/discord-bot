@@ -9,7 +9,7 @@ const { sim } = require('../util');
 
 const DRY = () => process.env.BOBBY_PC_DRY === '1';
 const calls = [];
-const VOICE = () => process.env.VOICE_URL || 'http://127.0.0.1:3000';
+const VOICE = () => process.env.LOCAL_URL || process.env.VOICE_URL || 'http://127.0.0.1:3000';
 
 // Every side effect goes through here. Hidden, detached, no input.
 function sh(file, args) {

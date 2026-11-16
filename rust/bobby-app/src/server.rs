@@ -106,7 +106,7 @@ async fn logs_h(State(s): State<AppState>, Query(q): Q) -> Response {
     no_store(StatusCode::OK, json!({ "lines": lines }))
 }
 
-pub fn router(state: AppState) -> Router {
+pub fn router(state: AppState, bridge: Router) -> Router {
     Router::new()
         .route("/", get(|| async { ([(header::CACHE_CONTROL, "no-store")], Html(INDEX)) }))
         .route("/index.html", get(|| async { ([(header::CACHE_CONTROL, "no-store")], Html(INDEX)) }))
@@ -116,8 +116,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/metrics", get(metrics_h))
         .route("/api/journal", get(journal_h))
         .route("/api/logs", get(logs_h))
-        .fallback(|| async { no_store(StatusCode::NOT_FOUND, json!({ "error": "not found" })) })
         .with_state(state)
+        .merge(bridge)
+        .fallback(|| async { no_store(StatusCode::NOT_FOUND, json!({ "error": "not found" })) })
 }
 
 pub async fn bind(port: u16) -> std::io::Result<tokio::net::TcpListener> {

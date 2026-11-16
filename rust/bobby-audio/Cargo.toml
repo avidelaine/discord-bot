@@ -10,6 +10,7 @@ ort = { workspace = true }
 rubato = { workspace = true }
 cpal = { workspace = true }
 hound = "3.5"
+chrono = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_Media_Multimedia"] }

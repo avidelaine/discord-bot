@@ -48,6 +48,16 @@ pub struct Supervisor {
     state: Mutex<State>,
     log_file: Mutex<Option<std::fs::File>>,
     bus: Bus,
+    env: Vec<(String, String)>,
+}
+
+/// Extra env for every part, from the `[run]` switches. Flip the switch back + restart = rollback.
+/// audio = rust: the bot sends local mode (/local, /speak, /beep, /hush) and /pc/* to this app instead of Python.
+pub fn part_env(cfg: &Config) -> Vec<(String, String)> {
+    match cfg.run.audio {
+        bobby_proto::settings::AudioImpl::Rust => vec![("LOCAL_URL".into(), format!("http://127.0.0.1:{}", cfg.port))],
+        bobby_proto::settings::AudioImpl::Python => vec![],
+    }
 }
 
 impl Supervisor {
@@ -62,6 +72,7 @@ impl Supervisor {
             state: Mutex::new(State { parts: cfg.parts.iter().map(|_| PartState::default()).collect(), ..Default::default() }),
             log_file: Mutex::new(log_file),
             bus,
+            env: part_env(cfg),
         })
     }
 
@@ -174,6 +185,7 @@ impl Supervisor {
                 .current_dir(def.dir(&self.root))
                 .env("PYTHONIOENCODING", "utf-8")
                 .env("PYTHONUNBUFFERED", "1")
+                .envs(self.env.iter().map(|(k, v)| (k, v)))
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -317,6 +329,14 @@ mod tests {
             parts: vec![part("short", &["/c", "echo hi"]), part("long", &["/c", "ping -n 60 127.0.0.1 >nul"])],
             ..Config::default()
         }
+    }
+
+    #[test]
+    fn audio_switch_sets_local_url() {
+        let mut c = Config { port: 4100, ..Config::default() };
+        assert!(part_env(&c).is_empty());
+        c.run.audio = bobby_proto::settings::AudioImpl::Rust;
+        assert_eq!(part_env(&c), [("LOCAL_URL".to_string(), "http://127.0.0.1:4100".to_string())]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

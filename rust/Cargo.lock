@@ -448,10 +448,14 @@ name = "bobby-app"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "bobby-audio",
+ "bobby-infer",
+ "bobby-pc",
  "bobby-proto",
  "chrono",
  "futures-util",
  "nvml-wrapper",
+ "reqwest 0.12.28",
  "rusqlite",
  "serde",
  "serde_json",
@@ -463,6 +467,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "toml 1.2.1+spec-1.1.0",
+ "tower",
 ]
 
 [[package]]
@@ -470,6 +475,7 @@ name = "bobby-audio"
 version = "0.1.0"
 dependencies = [
  "bobby-proto",
+ "chrono",
  "cpal",
  "hound",
  "ort",

@@ -29,7 +29,7 @@ Requirements: Windows, an NVIDIA GPU, Node 22+, Python 3.11, ffmpeg on the PATH.
 - `_bin/llama/`: llama.cpp Windows CUDA 12.4 build (`llama-bXXXX-bin-win-cuda-12.4-x64.zip` + `cudart-…zip`, from the llama.cpp GitHub releases).
 - `models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf`: from `unsloth/Qwen3-4B-Instruct-2507-GGUF` on Hugging Face.
 - `models/piper/fr_FR-siwis-medium.onnx`, `models/piper/en_US-lessac-medium.onnx` (Bobby's voices), `models/piper/fr_FR-tom-medium.onnx`, `models/piper/en_US-ryan-medium.onnx` (Claude's voices) and their `.onnx.json`: from `rhasspy/piper-voices`.
-- Python: `py -3.11 -m venv voice/.venv`, then `voice/.venv/Scripts/pip install faster-whisper fastapi "uvicorn[standard]" scipy piper-tts openwakeword==0.6.0 nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"`, then `voice/.venv/Scripts/python -c "from openwakeword.utils import download_models; download_models(['hey_jarvis'])"` (fetches openWakeWord's shared feature models).
+- Python: `py -3.11 -m venv voice/.venv`, then `voice/.venv/Scripts/pip install faster-whisper fastapi "uvicorn[standard]" scipy piper-tts openwakeword==0.6.0 nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*" sounddevice`, then `voice/.venv/Scripts/python -c "from openwakeword.utils import download_models; download_models(['hey_jarvis'])"` (fetches openWakeWord's shared feature models).
 - `models/wakeword/bobby.onnx` and `bobby.onnx.data`: the custom "Bobby" wake word model (see below). Without it, every sentence goes through Whisper.
 - PC control: `voice/.venv/Scripts/pip install -r voice/requirements-pc.txt` (Windows media sessions and volume).
 - Node: `cd bot && npm install`.
@@ -63,6 +63,10 @@ The bot needs the **Connect**, **Speak**, **Mute Members**, **Deafen Members**, 
 In Discord, join a voice channel and type `/join`. Bobby then follows the group: a move that includes the speaker ("déplace-nous dans PRIME", "mets-moi dans Général", "tout le monde dans Working") takes Bobby along, music included, and "viens dans PRIME" / "rejoins-nous" / "come here" bring it alone (Prime). If everyone leaves its channel, Bobby joins whoever typed `/join`; if that person is not in voice, the music pauses and Bobby leaves after 2 minutes unless someone comes back. Logs: `_logs/bot.log`, `_logs/voice.log`, `_logs/llm.log`, and the journal of every exchange `_logs/conversations.jsonl`.
 
 Each command prints its timings: `[temps] stt … · llm … · action … · total …`.
+
+## Local mode (Bobby on the PC)
+
+While Bobby is not in a Discord voice channel, it listens to the PC microphone and answers on the PC speakers (`voice/local.py`): same wake word, same Whisper, same brain, for the super admin only (it is their PC). "Bobby, connecte-toi sur Discord" joins the voice channel they are in, and the PC stops listening; "Bobby, repasse en local" (or `/leave`) leaves Discord and the PC listens again. Music needs Discord (Bobby says so); everything else works the same. `LOCAL_MODE=off` in `.env` turns it off. The mic is ignored while Bobby speaks, so it never hears itself.
 
 ## Control app
 

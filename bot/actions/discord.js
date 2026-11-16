@@ -64,7 +64,7 @@ module.exports = {
     '- msg_delete : supprimer ton dernier message écrit ("channel" facultatif)',
     '- clean : supprimer tous tes propres messages d\'un salon texte ("channel" facultatif)',
     '- ping : mentionner (notifier, arrobase, @, tag, ping) "who" dans le salon texte "channel" (facultatif), avec le message "text" (facultatif)',
-    '- leave : Bobby quitte le salon vocal',
+    '- leave : Bobby quitte le salon vocal (aussi "repasse en local", "reviens sur le PC", "déconnecte-toi de Discord")',
   ],
   rules: [
     '- "virer", "dégager" ou "kicker" une personne nommée du vocal, c\'est disconnect. Si on dit à Bobby lui-même de partir, c\'est leave.',
@@ -96,6 +96,7 @@ module.exports = {
   ],
   // LLM-free shortcuts. ponytail: a handful of phrasings per language; add the ones that keep showing up in the logs.
   quick: [
+    [/^(?:repasse|reviens|retourne|passe)(?: en| sur)? (?:local|le pc|mon pc|l'ordi)$|^(?:déconnecte|deconnecte|quitte)(?:-toi| toi)? (?:de )?discord$/, () => [{ type: 'leave' }]],
     [/^(?:coupe|ferme|mute)(?: le)? micro (?:de|à|a) (.+)$/, (m) => [{ type: 'mute', who: who(m[1]) }]],
     [/^(?:dé|de|des|dés) ?-?mute (.+)$/, (m) => [{ type: 'unmute', who: who(m[1]) }]],
     [/^mute (.+)$/, (m) => [{ type: 'mute', who: who(m[1]) }]],

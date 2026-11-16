@@ -4,6 +4,7 @@ import io
 import os
 import site
 import sys
+import threading
 import time
 import wave
 from pathlib import Path
@@ -24,6 +25,7 @@ from fastapi.responses import Response
 from faster_whisper import WhisperModel
 from piper import PiperVoice
 from wakescan import WakeScan, to_16k  # live wake word scoring (testable without Whisper)
+from local import Local, post, tone  # local mode: PC microphone and speakers
 
 try:  # PC control is optional: without its packages (requirements-pc.txt), STT and TTS still work
     import pc
@@ -97,13 +99,14 @@ else:
     print("No wake word model: every sentence goes through Whisper.", flush=True)
 
 
-def bobby_score(audio: np.ndarray) -> float:
+def bobby_score(audio: np.ndarray, model=None) -> float:
     """Highest wake word score over the sentence, scanned in 80 ms frames."""
+    model = model or wake
     pad = np.zeros(8000, np.float32)  # Discord sends no audio during silence; give the model some on both sides
     pcm = (np.clip(np.concatenate([pad, audio, pad]), -1, 1) * 32767).astype(np.int16)
-    wake.reset()
+    model.reset()
     # float(): the model returns numpy floats, which FastAPI cannot turn into JSON
-    return float(max((max(wake.predict(pcm[i : i + 1280]).values()) for i in range(0, len(pcm) - 1279, 1280)), default=0.0))
+    return float(max((max(model.predict(pcm[i : i + 1280]).values()) for i in range(0, len(pcm) - 1279, 1280)), default=0.0))
 
 
 print("Voice service ready.", flush=True)
@@ -113,7 +116,15 @@ if pc:
     app.include_router(pc.router)
 
 
+gpu = threading.Lock()  # one Whisper run at a time: Discord streams and the local microphone share the GPU
+
+
 def run_whisper(audio: np.ndarray, hotwords: str | None):
+    with gpu:
+        return _whisper(audio, hotwords)
+
+
+def _whisper(audio: np.ndarray, hotwords: str | None):
     opts = dict(
         beam_size=1,  # greedy search: faster, near-identical quality on short sentences
         temperature=0,
@@ -205,6 +216,63 @@ async def listen(ws: WebSocket, force: str = "0", hotwords: str = ""):
             await ws.close()
         except Exception:  # noqa: BLE001
             pass
+
+
+# ---------- Local mode (PC microphone and speakers), driven by the bot ----------
+BOT_URL = os.getenv("BOT_URL", "http://127.0.0.1:3001")
+local_wake = new_wake() if wake is not None else None
+local_wake_lock = threading.Lock()
+
+
+def local_sentence(audio: np.ndarray):
+    t = time.perf_counter()
+    score = None
+    if local_wake is not None and time.time() > local.force_until:
+        with local_wake_lock:
+            score = bobby_score(audio, local_wake)
+        if score < WAKE_THRESHOLD:
+            return  # not for Bobby: never transcribed, like on Discord
+    text, lang = run_whisper(audio, None)
+    ms = round((time.perf_counter() - t) * 1000)
+    print(f"[local] {ms} ms  {len(audio) / 16000:.1f} s  {lang}  {text!r}", flush=True)
+    if not text:
+        return
+    try:
+        r = post(f"{BOT_URL}/local", {"text": text, "lang": lang, "score": None if score is None else round(score, 3), "ms": ms})
+        local.force_until = time.time() + 8 if r.get("expect") else 0
+    except Exception as e:  # noqa: BLE001
+        print(f"[local] bot not reachable at {BOT_URL}: {e}", flush=True)
+
+
+local = Local(local_sentence)
+BEEPS = {"yes": tone([880]), "nope": tone([330, 247], 140)}
+
+
+@app.post("/local/{state}")
+def local_switch(state: str):
+    on = state == "on"
+    if on != local.enabled:
+        print(f"[local] {'on: Bobby listens on the PC' if on else 'off: Bobby is on Discord'}", flush=True)
+    local.set(on)
+    return {"local": local.enabled}
+
+
+@app.post("/speak")
+async def speak(text: str, lang: str = "fr", voice: str = "bobby"):
+    await asyncio.to_thread(local.play, tts(text, lang, voice).body)  # returns once spoken (the bot awaits it)
+    return {"ok": True}
+
+
+@app.post("/beep")
+async def beep(kind: str = "yes"):
+    await asyncio.to_thread(local.play, BEEPS.get(kind, BEEPS["yes"]))
+    return {"ok": True}
+
+
+@app.post("/hush")
+def hush():
+    local.hush()
+    return {"ok": True}
 
 
 @app.get("/tts")

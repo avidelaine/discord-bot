@@ -290,7 +290,7 @@ console.log('PC shortcuts and rights: ok');
   assert.strictEqual(await say([{ type: 'music_stop' }], 'en'), 'Stopped.');
   const none = resolve([{ type: 'music_pause' }], ctx);
   await run(none, {});
-  assert.match(describe(none), /Ça n'a pas marché/);
+  assert.match(describe(none), /que sur Discord/); // no player = Bobby is on the PC (local mode)
   console.log('music: ok');
 
   // Claude not logged in: immediate answer, no wait

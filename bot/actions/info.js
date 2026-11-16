@@ -69,7 +69,7 @@ module.exports = {
   prompt: [
     '- time : dire la date et l\'heure',
     '- help : dire ce que tu sais faire (lister tes fonctionnalités, ce qu\'on t\'a implémenté)',
-    '- come : Bobby (toi) vient dans le salon vocal "channel" ("ici" = celui de celui qui parle)',
+    '- come : Bobby (toi) vient dans le salon vocal "channel" ("ici" = celui de celui qui parle) ; "connecte-toi sur Discord" = come ici',
     '- about : question ou remarque sur Bobby (toi), tes réglages, ta voix, ton mot d\'activation, qui a quels droits, les gens du serveur, ou la conversation en cours ; "text" = la phrase complète',
   ],
   rules: ['- "viens", "rejoins-nous", "come here", "déplace-toi dans X" : come (Bobby vient seul). Déplacer les autres : move.'],
@@ -87,6 +87,8 @@ module.exports = {
   ],
   quick: [
     [/^(?:quelle heure (?:est-il|il est|est il)|il est quelle heure|what time is it|what's the time)$/, () => [{ type: 'time' }]],
+    // "connecte-toi sur Discord" (said on the PC, local mode): Bobby joins the speaker's voice channel
+    [/^(?:connecte-toi|connecte toi|reconnecte-toi|va|passe|rejoins|retourne|reviens|go|connect|join)(?: (?:sur|à|a|on|to))? discord$/, () => [{ type: 'come', channel: 'ici' }]],
     [/^(?:viens|ram[eè]ne-toi|rejoins(?:[- ](?:nous|moi))?|come(?: over)?|join (?:us|me))(?: (?:ici|here|là|la))?$/, () => [{ type: 'come', channel: 'ici' }]],
     [/^(?:viens|rejoins(?:[- ](?:nous|moi))?|déplace-toi|come|join(?: us| me)?) (?:dans|en|sur|to|in|into|over to) (?:le salon |la salle (?:de )?|the )?(.+?)(?: channel)?$/, (m) => [{ type: 'come', channel: m[1] }]],
     [/\blist\w* (?:moi )?(?:tes |les |your )?(?:features|fonctionnalit|commandes|capacit|commands)|ce que tu sais faire|que sais-tu faire|tu sais faire quoi|what can you do/, () => [{ type: 'help' }]],

@@ -14,7 +14,11 @@ const item = (s) => {
 const then = { fr: { similar: ', puis la suite dans le même style' }, en: { similar: ', then more in the same style' } };
 
 const NOTHING = { fr: 'Rien ne joue.', en: 'Nothing is playing.' };
-const ERR = { 'nothing is playing': NOTHING, superseded: { fr: '', en: '' } };
+const ERR = {
+  'nothing is playing': NOTHING, superseded: { fr: '', en: '' },
+  // local mode (Bobby on the PC): the player streams to Discord only
+  'no player': { fr: 'La musique ne marche que sur Discord : dis « Bobby, connecte-toi sur Discord ».', en: 'Music only works on Discord: say "Bobby, join Discord".' },
+};
 // Every line goes through here so errors are spoken plainly in both languages.
 // A bare "stop" (s.quiet) with nothing playing says nothing at all.
 const quiet = (s) => s.quiet && s.res?.error === 'nothing is playing';

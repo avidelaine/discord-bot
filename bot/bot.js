@@ -140,6 +140,7 @@ function disconnect(guildId) {
   speech = null; ring?.stream.destroy(); ring = null; mixer.stopOverlay();
   clearTimeout(leaveTimer); leaveTimer = null; autoPaused = null;
   getVoiceConnection(guildId)?.destroy();
+  syncLocal(); // off Discord: Bobby listens on the PC again
 }
 
 const memberName = (guild) => async (id) => (guild.members.cache.get(id) ?? (await guild.members.fetch(id).catch(() => null)))?.displayName ?? id;
@@ -293,6 +294,7 @@ client.once(Events.ClientReady, async () => {
   claude.check();
   loadAcks();
   require('./actions/pc').warm();
+  if (LOCAL) { syncLocal(); setInterval(syncLocal, 10_000); console.log('[local] Bobby listens on the PC until it joins Discord'); }
   await client.application.commands.set([]); // drop global commands left by older versions: only the server ones below remain
   await client.guilds.cache.get(process.env.GUILD_ID)?.commands.set([
     { name: 'join', description: 'Bobby rejoint ton salon vocal' },
@@ -319,23 +321,100 @@ async function onCommand(it) {
   }
   const channel = it.member.voice.channel;
   if (!channel) return it.reply({ content: 'Rejoins un salon vocal d\'abord.', ephemeral: true });
-  getVoiceConnection(it.guildId)?.destroy(); // a second /join must not attach a second listener (double actions)
-  session = { guild: it.guild, joinerId: it.user.id };
+  await it.reply(`Bobby écoute dans ${channel.name}. Dis « Bobby, … ».`);
+  const err = await joinVoice(channel, it.user.id, textFor(channel.guild, it.channel));
+  if (err) return it.followUp(err);
+}
+
+const textFor = (guild, fallback) => guild.channels.cache.find((c) => c.isTextBased() && (c.id === TEXT_CHANNEL || c.name === TEXT_CHANNEL)) || fallback;
+
+// Joins a voice channel and listens there: /join, or "Bobby, connecte-toi sur Discord" said on the PC. -> error text or null
+async function joinVoice(channel, joinerId, text) {
+  getVoiceConnection(channel.guild.id)?.destroy(); // a second join must not attach a second listener (double actions)
+  session = { guild: channel.guild, joinerId };
   clearTimeout(leaveTimer); leaveTimer = null; autoPaused = null;
   const connection = joinVoiceChannel({
     channelId: channel.id, guildId: channel.guild.id, adapterCreator: channel.guild.voiceAdapterCreator, selfDeaf: false,
   });
   connection.subscribe(player);
-  await it.reply(`Bobby écoute dans ${channel.name}. Dis « Bobby, … ».`);
+  syncLocal(); // on Discord: the PC microphone stops
   try {
     await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
   } catch {
     connection.destroy();
-    return it.followUp('Connexion vocale impossible.');
+    syncLocal();
+    return 'Connexion vocale impossible.';
   }
-  const text = channel.guild.channels.cache.find((c) => c.isTextBased() && (c.id === TEXT_CHANNEL || c.name === TEXT_CHANNEL)) || it.channel;
   loadAcks();
   listen(connection, channel.guild, makeIo(channel.guild, text));
+  console.log(`[voice] Bobby joins ${channel.name}`);
+  return null;
 }
+
+// ---------- Local mode: Bobby on the PC (microphone and speakers) while it is not in a Discord voice channel ----------
+// The voice service (voice/local.py) listens to the microphone and sends each sentence to POST /local here; only the
+// super admin (whose PC it is) talks to Bobby this way. "Bobby, connecte-toi sur Discord" joins their voice channel
+// and the PC stops listening; when Bobby leaves Discord (/leave, "Bobby, repasse en local"), the PC listens again.
+const BOT_PORT = parseInt(process.env.BOT_PORT || '3001');
+const LOCAL = process.env.LOCAL_MODE !== 'off';
+const voicePost = (p) => fetch(`${VOICE_URL}${p}`, { method: 'POST' });
+// ponytail: re-sent every 10 s and on each join/leave (idempotent), so a restarted voice service gets the state back.
+function syncLocal() {
+  const guild = client.guilds.cache.get(process.env.GUILD_ID);
+  if (!guild) return;
+  voicePost(`/local/${LOCAL && !getVoiceConnection(guild.id) ? 'on' : 'off'}`).catch(() => {});
+}
+let localSpeech = null; // { id } while Bobby speaks on the PC speakers
+
+function localIo(guild) {
+  const io = {
+    music: null, // the music player streams to Discord only (see the "no player" line in actions/music.js)
+    memberName: memberName(guild),
+    textChannel: textFor(guild, null),
+    post: async (content, ch = io.textChannel) => {
+      if (!ch) throw new Error('no text channel: set TEXT_CHANNEL in .env');
+      for (const m of messages(content)) await ch.send(m);
+      return ch.name;
+    },
+    beep: () => voicePost('/beep?kind=yes').catch(() => {}),
+    nope: () => voicePost('/beep?kind=nope').catch(() => {}),
+    ack() { voicePost(`/speak?text=${encodeURIComponent(ACKS[Math.floor(Math.random() * ACKS.length)])}`).catch(() => {}); return true; },
+    ring() {}, ringStop() {},
+    async say(text, lang = 'fr', voice = 'bobby', forId = null) {
+      console.log(`[${voice} on the PC] ${text}`);
+      const me = (localSpeech = { id: forId });
+      try { await voicePost(`/speak?lang=${lang}&voice=${voice}&text=${encodeURIComponent(text)}`); } catch (e) { console.error(`[local] speakers: ${e.message}`); }
+      if (localSpeech === me) localSpeech = null;
+    },
+    speaking: () => localSpeech,
+    hush: () => { localSpeech = null; voicePost('/hush').catch(() => {}); },
+    // "Bobby, connecte-toi sur Discord" ("come" to the speaker's channel): Bobby joins it, the PC stops listening.
+    follow: (channel) => { joinVoice(channel, roles.people().supers[0], textFor(guild, null)).then((e) => e && console.error(`[local] ${e}`)); return null; },
+    leave: () => {}, // not on Discord already
+  };
+  return io;
+}
+
+require('http').createServer(async (req, res) => {
+  const reply = (code, o) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(o)); };
+  // Only the voice service (no Origin header) may post: a web page open in a browser must never give Bobby orders.
+  if (req.method !== 'POST' || req.url !== '/local' || req.headers.origin) return reply(403, { error: 'forbidden' });
+  let body = '';
+  for await (const c of req) body += c;
+  try {
+    const { text, lang = 'fr', score = null, ms = null } = JSON.parse(body);
+    const guild = client.guilds.cache.get(process.env.GUILD_ID);
+    const id = roles.people().supers[0];
+    const member = guild && id && (guild.members.cache.get(id) || (await guild.members.fetch(id).catch(() => null)));
+    if (!member || getVoiceConnection(guild.id)) return reply(200, { expect: false }); // on Discord: the PC is not listened to
+    console.log(`
+[heard on the PC] ${member.displayName}: "${text}" (${lang}, whisper ${ms} ms${score != null ? `, wake ${score}` : ''})`);
+    await brain.hear({ text, lang, score, member, guild, tEnd: performance.now(), sttMs: ms, io: localIo(guild), expected: score == null });
+    reply(200, { expect: brain.expecting(member.id) });
+  } catch (e) {
+    console.error('[local]', e.message);
+    reply(500, { expect: false });
+  }
+}).on('error', (e) => console.error(`[local] port ${BOT_PORT}: ${e.message}`)).listen(BOT_PORT, '127.0.0.1');
 
 client.login(process.env.DISCORD_TOKEN);

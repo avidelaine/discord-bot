@@ -17,7 +17,11 @@ if [ -d "$W/collected" ]; then
 fi
 echo "positive_train: $(ls "$P" | wc -l) clips ($(ls "$P" | grep -c '^CONT_') Bobby+request, $(ls "$P" | grep -c '^COLL_') real collected copies)"
 cd ~/oww
-mkdir -p "$W/models/v2"; cp -n export/bobby.onnx* "$W/models/v2/" 2>/dev/null || true  # keep model 2 (the one in use)
+mkdir -p "$W/models/v2"; cp -n output/bobby.onnx output/bobby.onnx.data "$W/models/v2/" 2>/dev/null || true  # keep model 2 (the one in use)
+# the trainer skips training when output/bobby.onnx exists, and its export step writes under the default config's
+# name (export/hey_echo.onnx): drop the old model first and copy the new one from output/ ourselves
+rm -f output/bobby.onnx output/bobby.onnx.data
 bash train.sh --from augment 2>&1 | tee "$W/train3.log"
-mkdir -p "$W/models/v3"; cp export/bobby.onnx* "$W/models/v3/"
+test -f output/bobby.onnx || { echo "no model trained"; exit 1; }
+mkdir -p "$W/models/v3"; cp output/bobby.onnx output/bobby.onnx.data "$W/models/v3/"
 ls -la "$W/models/v3/"

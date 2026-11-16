@@ -25,8 +25,12 @@ if [ -d "$W/collected" ]; then
 fi
 echo "collected: $pos with Bobby (x20 in positives), $neg without (hard negatives)"
 cd ~/oww
+# the trainer skips training when output/bobby.onnx exists, and its export step writes under the default config's
+# name (export/hey_echo.onnx): drop the old model first and copy the new one from output/ ourselves
+rm -f output/bobby.onnx output/bobby.onnx.data
 bash train.sh --from augment 2>&1 | tee "$W/retrain.log"
 stamp=$(date +%Y%m%d-%H%M)
 mkdir -p "$W/models/$stamp" "$W/models/latest"
-cp export/bobby.onnx* "$W/models/$stamp/"; cp export/bobby.onnx* "$W/models/latest/"
+test -f output/bobby.onnx || { echo "no model trained"; exit 1; }
+cp output/bobby.onnx output/bobby.onnx.data "$W/models/$stamp/"; cp output/bobby.onnx output/bobby.onnx.data "$W/models/latest/"
 echo "new model: $W/models/$stamp (also models/latest); compare with bench.py before using it"

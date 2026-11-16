@@ -49,6 +49,8 @@ pub struct Bot {
     pub player: Player,
     /// Beep/ack/ring/TTS state (see `speech`).
     pub speech: std::sync::Mutex<crate::speech::Speech>,
+    /// Debounce and 2 minute leave timers of the never-alone behaviour (see `alone`).
+    pub alone: std::sync::Mutex<crate::alone::Alone>,
     next_id: AtomicU64,
 }
 
@@ -92,6 +94,7 @@ impl Bot {
             let _ = self.songbird.remove(self.guild).await;
         }
         self.state.lock().unwrap().joiner = Some(joiner);
+        crate::alone::reset(self);
         let call = self.songbird.get_or_insert(self.guild);
         receive::attach(&mut *call.lock().await, self.clone());
         match tokio::time::timeout(Duration::from_secs(20), self.songbird.join(self.guild, channel)).await {
@@ -129,6 +132,7 @@ impl Bot {
     }
 
     pub async fn leave(&self) {
+        crate::alone::reset(self);
         let _ = self.songbird.remove(self.guild).await;
         self.mixer.lock().unwrap().detach();
     }
@@ -240,6 +244,14 @@ impl EventHandler for Handler {
         }
     }
 
+    async fn voice_state_update(&self, _: serenity::all::Context, _old: Option<serenity::all::VoiceState>, new: serenity::all::VoiceState) {
+        if let Some(bot) = self.0.get() {
+            if new.guild_id == Some(bot.guild) {
+                crate::alone::on_voice_update(bot);
+            }
+        }
+    }
+
     async fn interaction_create(&self, _: serenity::all::Context, it: Interaction) {
         if let (Interaction::Command(cmd), Some(bot)) = (it, self.0.get()) {
             bot.on_command(cmd).await;
@@ -270,6 +282,7 @@ pub async fn run(cfg: Config, from_brain: UnboundedReceiver<BrainMsg>, to_brain:
         state: Mutex::new(State::default()),
         listen: Default::default(),
         speech: Default::default(),
+        alone: Default::default(),
         player: Player::new(mixer.clone()),
         mixer,
         next_id: AtomicU64::new(1),

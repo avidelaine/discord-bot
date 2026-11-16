@@ -177,19 +177,22 @@ fn read(path: &str) -> Vec<Value> {
 
 fn compare(node: &str, rust: &str) {
     let (n, r) = (read(node), read(rust));
-    let key = |v: &Value| format!("{}\u{0}{}\u{0}{}\u{0}{}", v["plan"], v["via"], v["decision"], v["written"]);
-    let mut same = 0;
-    for (a, b) in n.iter().zip(&r) {
+    // an error compares on its message only (Node's intent throws before it knows via/decision; Rust returns them)
+    let key = |v: &Value| {
+        let plan = v["plan"].as_str().unwrap_or("");
+        if plan.starts_with("ERR") { plan.to_string() } else { format!("{plan}|{}|{}|{}", v["via"], v["decision"], v["written"]) }
+    };
+    let show = |v: &Value| format!("{} [{} / {} / written={}]", v["plan"].as_str().unwrap_or(""), v["via"].as_str().unwrap_or(""), v["decision"].as_str().unwrap_or(""), v["written"]);
+    // joined on the record number: the live journal may have grown between the two runs
+    let (mut same, mut total) = (0, 0);
+    for a in &n {
+        let Some(b) = r.iter().find(|b| b["i"] == a["i"]) else { continue };
+        total += 1;
         if key(a) == key(b) {
             same += 1;
         } else {
-            let show = |v: &Value| format!("{} [{} / {} / written={}]", v["plan"].as_str().unwrap_or(""), v["via"].as_str().unwrap_or(""), v["decision"].as_str().unwrap_or(""), v["written"]);
             println!("{} | {} | {} | {}", a["i"], a["query"].as_str().unwrap_or(""), show(a), show(b));
         }
     }
-    if n.len() != r.len() {
-        println!("lengths differ: node {} lines, rust {} lines (only the first {} compared)", n.len(), r.len(), n.len().min(r.len()));
-    }
-    let total = n.len().max(r.len()).max(1);
-    println!("identical: {same}/{total} ({:.1} %)", 100.0 * same as f64 / total as f64);
+    println!("identical: {same}/{total} ({:.1} %)", 100.0 * same as f64 / total.max(1) as f64);
 }

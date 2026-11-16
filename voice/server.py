@@ -109,6 +109,32 @@ def bobby_score(audio: np.ndarray, model=None) -> float:
     return float(max((max(model.predict(pcm[i : i + 1280]).values()) for i in range(0, len(pcm) - 1279, 1280)), default=0.0))
 
 
+# Training data for the next wake word model (2026-11-16): real sentences, real mic, real "Bobby, <request>" said
+# in one breath. Kept: every sentence that passed the gate (with its transcript) and the near-misses (score >= 0.01:
+# the hard negatives, and the "Bobby" the model missed). _training/ is gitignored.
+COLLECT = MODELS.parent / "_training" / "collected"
+COLLECT_MIN = float(os.getenv("COLLECT_MIN_SCORE", "0.01"))  # set to 2 to turn collection off
+COLLECT_MAX_PER_DAY = 600  # ponytail: ~60 MB a day at most; raise it if a day fills up
+
+
+def collect(audio: np.ndarray, score, text: str | None = None, where: str = "discord"):
+    if score is not None and score < COLLECT_MIN:
+        return
+    try:
+        day = COLLECT / time.strftime("%Y-%m-%d")
+        day.mkdir(parents=True, exist_ok=True)
+        if sum(1 for _ in day.glob("*.wav")) >= COLLECT_MAX_PER_DAY:
+            return
+        name = f"{time.strftime('%H%M%S')}_{int(time.time() * 1000) % 1000:03d}_{where}_{'forced' if score is None else f'{score:.3f}'}"
+        with wave.open(str(day / f"{name}.wav"), "wb") as w:
+            w.setnchannels(1), w.setsampwidth(2), w.setframerate(16000)
+            w.writeframes((np.clip(audio, -1, 1) * 32767).astype(np.int16).tobytes())
+        if text is not None:
+            (day / f"{name}.txt").write_text(text, encoding="utf-8")
+    except Exception as e:  # noqa: BLE001  (never break a sentence for the dataset)
+        print(f"[collect] {e}", flush=True)
+
+
 print("Voice service ready.", flush=True)
 
 app = FastAPI()
@@ -200,6 +226,7 @@ async def listen(ws: WebSocket, force: str = "0", hotwords: str = ""):
         if passed is not None:
             print(f"[wake] {'Bobby heard' if passed else 'no Bobby'} (score {score:.2f}, gate {ms} ms after the end)", flush=True)
         if passed is False:
+            collect(audio, score)  # a near-miss (the function keeps only score >= COLLECT_MIN)
             return
         t = time.perf_counter()
         async with whisper_lock:
@@ -207,6 +234,7 @@ async def listen(ws: WebSocket, force: str = "0", hotwords: str = ""):
         ms = round((time.perf_counter() - t) * 1000)
         print(f"[stt] {ms} ms  {seconds:.1f} s of audio  {lang}  {text!r}", flush=True)
         await ws.send_json({"type": "text", "text": text, "lang": lang, "ms": ms})
+        collect(audio, score, text)
     except (WebSocketDisconnect, RuntimeError):  # client left mid-sentence (RuntimeError: send after close)
         pass
     finally:
@@ -231,8 +259,10 @@ def local_sentence(audio: np.ndarray):
         with local_wake_lock:
             score = bobby_score(audio, local_wake)
         if score < WAKE_THRESHOLD:
+            collect(audio, score, where="pc")
             return  # not for Bobby: never transcribed, like on Discord
     text, lang = run_whisper(audio, None)
+    collect(audio, score, text, where="pc")
     ms = round((time.perf_counter() - t) * 1000)
     print(f"[local] {ms} ms  {len(audio) / 16000:.1f} s  {lang}  {text!r}", flush=True)
     if not text:

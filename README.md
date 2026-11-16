@@ -136,6 +136,16 @@ On held-out real recordings, at the default threshold of 0.10, it lets through 9
 
 The model is kept out of git because it was trained partly on a personal voice.
 
+### Self-training
+
+The voice service keeps real sentences in `_training/collected/` (gitignored): every one that passed the wake word gate, with its transcript, and every near-miss scoring 0.003 or more (`COLLECT_MIN_SCORE`), about 150 a day. To improve the model on the owner's real way of calling Bobby (often "Bobby, <request>" in one breath):
+
+1. `voice/.venv/Scripts/python _training/label_collected.py` (GPU free): Whisper, not the wake word model, transcribes the near-misses; those holding "Bobby" are the misses, the best positives; the others are real hard negatives.
+2. `wsl -d Ubuntu -- bash "/mnt/c/.../_training/retrain.sh"`: retrains with them (~35 min on the GPU).
+3. `voice/.venv/Scripts/python _training/bench.py models/wakeword/bobby.onnx _training/models/latest/bobby.onnx`: compares the models on held-out synthetic "Bobby, <request>" sentences, the owner's recordings and the collected clips; copy the new one to `models/wakeword/` only if it does better.
+
+Since the misses are labeled by Whisper, the model also learns from what it failed to hear, so the owner never has to slow down to be heard. Once it is reliable, the collection threshold and the wake threshold can go back up.
+
 ## Tests
 
 - `node bot/wake.test.js`: detection of "Bobby" in the transcript, including the spellings Whisper produces ("Bobbie", "Dibobby"...).

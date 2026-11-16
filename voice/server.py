@@ -110,10 +110,10 @@ def bobby_score(audio: np.ndarray, model=None) -> float:
 
 
 # Training data for the next wake word model (2026-11-16): real sentences, real mic, real "Bobby, <request>" said
-# in one breath. Kept: every sentence that passed the gate (with its transcript) and the near-misses (score >= 0.01:
+# in one breath. Kept: every sentence that passed the gate (with its transcript) and the near-misses (score >= 0.003:
 # the hard negatives, and the "Bobby" the model missed). _training/ is gitignored.
 COLLECT = MODELS.parent / "_training" / "collected"
-COLLECT_MIN = float(os.getenv("COLLECT_MIN_SCORE", "0.01"))  # set to 2 to turn collection off
+COLLECT_MIN = float(os.getenv("COLLECT_MIN_SCORE", "0.003"))  # set to 2 to turn collection off
 COLLECT_MAX_PER_DAY = 600  # ponytail: ~60 MB a day at most; raise it if a day fills up
 
 

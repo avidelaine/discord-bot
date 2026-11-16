@@ -149,6 +149,11 @@ fn now_ms() -> i64 {
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let url = args.iter().position(|a| a == "--llm").and_then(|i| args.get(i + 1)).cloned().unwrap_or_else(|| "http://127.0.0.1:8080".into());
+    // the PC app names the client would report (one per line), e.g. dumped from Node's pc.js index
+    if let Some(f) = args.iter().position(|a| a == "--apps").and_then(|i| args.get(i + 1)) {
+        let text = std::fs::read_to_string(f).expect("--apps file");
+        bobby_core::actions::pc::set_apps(text.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect());
+    }
     let fixtures: Value = serde_json::from_str(include_str!("../tests/fixtures/intents.json")).expect("intents.json");
 
     // A fixed to-do list, so the list lines in the prompt are the same on every run (never the real data/).

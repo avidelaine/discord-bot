@@ -28,6 +28,9 @@ serenity = { version = "0.12.5", default-features = false }
 songbird = "0.6.1"
 symphonia = "0.6"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# bobby-core: JS-compatible regexes (lookarounds) and accent stripping, like the Node brain
+fancy-regex = "0.14"
+unicode-normalization = "0.1"
 
 [profile.release]
 opt-level = "s"

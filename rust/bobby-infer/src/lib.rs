@@ -2,6 +2,7 @@
 //! HTTP clients for today's services (voice/server.py on :3000, llama-server on :8080).
 //! Later an in-process engine implements the same traits; the setting value "local" selects it.
 use bobby_proto::infer::{ChatMsg, InferError, InferErrorKind, Speak, Transcribe, Transcript, Understand, Wav};
+pub mod loudness;
 use std::time::Duration;
 
 fn trim(base: &str) -> String {

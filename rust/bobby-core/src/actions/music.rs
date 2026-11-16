@@ -135,6 +135,9 @@ fn q(r: Regex, f: QuickFn) -> (Regex, QuickFn) {
 
 static UP: LazyLock<Regex> = LazyLock::new(|| re(r"^(?:(?:monte|augmente) (?:le )?(?:son|volume)|monte|plus fort|louder|turn (?:it )?up|(?:raise|increase|turn up) (?:the )?volume)$"));
 static DOWN: LazyLock<Regex> = LazyLock::new(|| re(r"^(?:(?:baisse|diminue|descends) (?:le )?(?:son|volume)|baisse|moins fort|quieter|softer|turn (?:it )?down|(?:lower|decrease|reduce|turn down) (?:the )?volume)$"));
+static VOICE_UP: LazyLock<Regex> = LazyLock::new(|| re(r"^(?:parle plus (?:fort|haut)|monte ta voix|augmente ta voix|augmente le volume de ta voix|speak up|speak louder|talk louder|raise your voice)$"));
+static VOICE_DOWN: LazyLock<Regex> = LazyLock::new(|| re(r"^(?:parle moins fort|parle plus bas|plus bas|baisse ta voix|baisse le volume de ta voix|speak (?:more )?(?:quietly|softly|quieter|softer)|talk quieter|lower your voice)$"));
+static VOICE_SET: LazyLock<Regex> = LazyLock::new(|| re(r"^(?:(?:parle|speak|talk) (?:à|a|at|to) |mets ta voix (?:à|a|sur) |set your voice to )(\d+)(?: ?%| pour cent| percent)?$"));
 static SET: LazyLock<Regex> = LazyLock::new(|| re(r"^(?:(?:mets|met|règle|regle) (?:le )?(?:son|volume) (?:à|a|sur) |volume (?:à |a |to )?|set (?:the )?volume to )(\d+)(?: ?%| pour cent| percent)?$"));
 static RADIO: LazyLock<Regex> = LazyLock::new(|| re(r"^(?:joue|lance|mets|play|put on) (?:une? |a )?radio (?:de |d'|of )?(.+?)$|^(?:joue|lance|mets|play|put on) (?:some |a )?(.+?) radio$"));
 static STYLE: LazyLock<Regex> = LazyLock::new(|| re(r"^(?:joue|lance|mets|play|put on)(?:-moi| me)? (?:du |de la |de l'|des |d'|some |a bit of )(?!(?:la )?(?:musique|music)$)(.+?)$"));
@@ -185,6 +188,9 @@ pub fn module() -> Module {
             q(re(r"^(?:stop|arrête|arrete)$"), |_| vec![json!({ "type": "music_stop", "text": "", "quiet": true })]), // stops the music if any, else silence; never leaves
             q(re(r"^(?:(?:stop|arrête|arrete|coupe)(?: la| le| the)? (?:musique|music|radio))$"), |_| act("music_stop", "", None)),
             q(re(r"^(?:rejoue|replay|recommence)(?: (?:ça|ce son|cette musique|le morceau|this|it|the song|this song))?$|^(?:joue|play) (?:ça|it|this|that)(?: again| encore)$"), |_| act("music_replay", "", None)),
+            q(VOICE_UP.clone(), |_| act("voice_volume", "up", None)),
+            q(VOICE_DOWN.clone(), |_| act("voice_volume", "down", None)),
+            q(VOICE_SET.clone(), |m| act("voice_volume", group(m, 1), None)),
             q(UP.clone(), |_| act("music_volume", "up", None)),
             q(DOWN.clone(), |_| act("music_volume", "down", None)),
             q(SET.clone(), |m| act("music_volume", group(m, 1), None)),
@@ -280,6 +286,25 @@ pub fn module() -> Module {
                 },
             ),
             (
+                "voice_volume",
+                ActionDef {
+                    role: Role::Prime,
+                    text: true,
+                    echo: Echo::If(ok),
+                    say: Some(|s, _, l| {
+                        say(s, l, |r, s, fr| match (s.text.as_str(), fr) {
+                            ("up", true) => "D'accord, je parle plus fort.".into(),
+                            ("up", false) => "Okay, I'll speak louder.".into(),
+                            ("down", true) => "Je parle moins fort.".into(),
+                            ("down", false) => "I'll speak quieter.".into(),
+                            (_, true) => format!("Ma voix est à {} %.", js(&r["level"])),
+                            (_, false) => format!("My voice is at {} %.", js(&r["level"])),
+                        })
+                    }),
+                    ..Default::default()
+                },
+            ),
+            (
                 "music_now",
                 prime(Echo::No, |s, _, l| {
                     say(s, l, |r, _, fr| {
@@ -343,6 +368,20 @@ pub async fn run<L: bobby_proto::infer::Understand + Sync>(s: &mut Step, env: &s
                 }
             }
         }
+        "voice_volume" => {
+            let lower = s.text.to_lowercase();
+            let t = crate::util::replace1(&PERCENT, &lower, "");
+            let t = t.trim();
+            match t {
+                "up" => Cap::VoiceVolume { op: VolumeOp::Delta { delta: 10 } },
+                "down" => Cap::VoiceVolume { op: VolumeOp::Delta { delta: -10 } },
+                _ if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) => Cap::VoiceVolume { op: VolumeOp::Set { level: t.parse::<u128>().unwrap_or(u128::MAX).min(100) as u8 } },
+                _ => {
+                    s.set("res", json!({ "error": format!("unknown volume \"{}\"", s.text) }));
+                    return Ok(vec![]);
+                }
+            }
+        }
         _ => return Ok(vec![]),
     };
     let kind = s.kind.clone();
@@ -376,8 +415,8 @@ mod tests {
     #[test]
     fn quick_regexes_compile() {
         let m = module();
-        assert_eq!(m.quick.len(), 17);
-        assert_eq!(m.actions.len(), 10);
+        assert_eq!(m.quick.len(), 20);
+        assert_eq!(m.actions.len(), 11);
         assert_eq!(clean("musique hardstyle en boucle"), "hardstyle");
     }
 
@@ -449,6 +488,37 @@ mod tests {
         let s = &mut steps[0];
         assert!(run(s, &env, lang).await.unwrap().is_empty());
         crate::actions::def(&s.kind).unwrap().say.unwrap()(s, None, lang).unwrap()
+    }
+
+    #[test]
+    fn voice_volume_shortcuts() {
+        let cases = [
+            ("parle plus fort", "voice_volume", "up"), ("monte ta voix", "voice_volume", "up"), ("louder, speak up", "", ""), ("speak up", "voice_volume", "up"),
+            ("parle moins fort", "voice_volume", "down"), ("plus bas", "voice_volume", "down"), ("baisse ta voix", "voice_volume", "down"),
+            ("quieter please", "", ""), ("lower your voice", "voice_volume", "down"), ("parle à 50 %", "voice_volume", "50"),
+            ("monte le son", "music_volume", "up"), ("plus fort", "music_volume", "up"), ("moins fort", "music_volume", "down"),
+            ("monte le volume du PC", "pc_volume", "up"), ("monte le son du PC", "pc_volume", "up"),
+        ];
+        for (phrase, kind, text) in cases.into_iter().filter(|c| !c.1.is_empty()) {
+            crate::actions::pc::testkit::set_test_apps();
+            let a = quick(phrase).unwrap_or_default();
+            assert!(a.len() == 1 && a[0]["type"] == kind && a[0]["text"] == text, "{phrase} -> {a:?}");
+        }
+        assert!(!crate::actions::types().contains(&"voice_volume"));
+    }
+
+    #[tokio::test]
+    async fn voice_volume_sends_cap() {
+        let (io, sent) = fake_client(|cap| match cap {
+            Cap::VoiceVolume { op: VolumeOp::Set { level } } => Ok(json!({ "level": level })),
+            _ => Ok(json!({ "level": 60 })),
+        });
+        assert_eq!(say_of(json!({"type":"voice_volume","text":"up"}), &io, "fr").await, "D'accord, je parle plus fort.");
+        assert_eq!(caps(&sent).pop().unwrap(), Cap::VoiceVolume { op: VolumeOp::Delta { delta: 10 } });
+        assert_eq!(say_of(json!({"type":"voice_volume","text":"down"}), &io, "fr").await, "Je parle moins fort.");
+        assert_eq!(caps(&sent).pop().unwrap(), Cap::VoiceVolume { op: VolumeOp::Delta { delta: -10 } });
+        assert_eq!(say_of(json!({"type":"voice_volume","text":"50"}), &io, "fr").await, "Ma voix est à 50 %.");
+        assert_eq!(caps(&sent).pop().unwrap(), Cap::VoiceVolume { op: VolumeOp::Set { level: 50 } });
     }
 
     #[tokio::test]

@@ -1,6 +1,7 @@
 // The HTTP + SSE contract of app/server.js on 127.0.0.1: the Tauri window loads it, and any browser can too.
 use crate::journal;
 use crate::metrics::{self, Db};
+use bobby_proto::settings::{self, Config};
 use crate::supervisor::{now_ms, Bus, Supervisor};
 use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -106,11 +107,94 @@ async fn logs_h(State(s): State<AppState>, Query(q): Q) -> Response {
     no_store(StatusCode::OK, json!({ "lines": lines }))
 }
 
+/// The settings the app edits, as JSON.
+fn settings_json(c: &Config) -> Value {
+    json!({ "beep_volume": c.audio.beep_volume, "voice_volume_pc": c.audio.voice_volume_pc, "voice_volume_discord": c.audio.voice_volume_discord, "wake_threshold": c.models.wake_threshold })
+}
+
+/// Validates the posted values and rewrites only those fields of the settings file at `path`.
+fn update_settings(path: &std::path::Path, body: &Value) -> Result<Value, String> {
+    let vol = |k: &str| -> Result<u8, String> {
+        body.get(k).and_then(Value::as_u64).filter(|v| *v <= 100).map(|v| v as u8).ok_or_else(|| format!("{k} must be a whole number from 0 to 100"))
+    };
+    let (beep, pc, discord) = (vol("beep_volume")?, vol("voice_volume_pc")?, vol("voice_volume_discord")?);
+    let thr = body.get("wake_threshold").and_then(Value::as_f64).filter(|v| (0.01..=0.9).contains(v)).ok_or("wake_threshold must be between 0.01 and 0.9")?;
+    let mut c = match std::fs::read_to_string(path) {
+        Ok(text) => settings::parse(&text).map_err(|e| format!("settings file is broken: {e}"))?,
+        Err(_) => Config::default(),
+    };
+    c.audio.beep_volume = beep;
+    c.audio.voice_volume_pc = pc;
+    c.audio.voice_volume_discord = discord;
+    c.models.wake_threshold = (thr * 100.0).round() as f32 / 100.0;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(path, toml::to_string_pretty(&c).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    Ok(settings_json(&c))
+}
+
+async fn settings_get() -> Response {
+    let c = tokio::task::spawn_blocking(settings::load).await.unwrap_or_default();
+    no_store(StatusCode::OK, settings_json(&c))
+}
+
+async fn settings_post(headers: HeaderMap, Json(body): Json<Value>) -> Response {
+    if !origin_ok(headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())) {
+        return no_store(StatusCode::FORBIDDEN, json!({ "error": "forbidden origin" }));
+    }
+    match tokio::task::spawn_blocking(move || update_settings(&settings::path(), &body)).await {
+        Ok(Ok(v)) => no_store(StatusCode::OK, v),
+        Ok(Err(e)) => no_store(StatusCode::BAD_REQUEST, json!({ "error": e })),
+        Err(e) => no_store(StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": e.to_string() })),
+    }
+}
+
+/// Plays the "yes" beep on the PC speakers at the saved beep volume.
+async fn test_beep(headers: HeaderMap) -> Response {
+    if !origin_ok(headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())) {
+        return no_store(StatusCode::FORBIDDEN, json!({ "error": "forbidden origin" }));
+    }
+    let ok = tokio::task::spawn_blocking(|| {
+        let wav = bobby_audio::out::beep("yes", 100);
+        let wav = bobby_audio::out::scale_wav(&bobby_infer::loudness::normalize(&wav), settings::load().audio.beep_volume);
+        bobby_audio::out::Speaker::new().play(&wav)
+    })
+    .await
+    .unwrap_or(false);
+    no_store(StatusCode::OK, json!({ "ok": ok }))
+}
+
+/// Plays the reference sentence through the TTS, normalized, at the saved PC voice volume.
+async fn test_voice(headers: HeaderMap) -> Response {
+    use bobby_proto::infer::Speak;
+    if !origin_ok(headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())) {
+        return no_store(StatusCode::FORBIDDEN, json!({ "error": "forbidden origin" }));
+    }
+    let cfg = tokio::task::spawn_blocking(settings::load).await.unwrap_or_default();
+    let tts = bobby_infer::HttpTts::new(&cfg.models.tts);
+    let wav = match tts.speak("Ceci est le niveau de référence de Bobby.", "fr", "bobby").await {
+        Ok(w) => w.0,
+        Err(e) => return no_store(StatusCode::BAD_GATEWAY, json!({ "error": e.to_string() })),
+    };
+    let vol = cfg.audio.voice_volume_pc;
+    let ok = tokio::task::spawn_blocking(move || {
+        let wav = bobby_audio::out::scale_wav(&bobby_infer::loudness::normalize(&wav), vol);
+        bobby_audio::out::Speaker::new().play(&wav)
+    })
+    .await
+    .unwrap_or(false);
+    no_store(StatusCode::OK, json!({ "ok": ok }))
+}
+
 pub fn router(state: AppState, bridge: Router) -> Router {
     Router::new()
         .route("/", get(|| async { ([(header::CACHE_CONTROL, "no-store")], Html(INDEX)) }))
         .route("/index.html", get(|| async { ([(header::CACHE_CONTROL, "no-store")], Html(INDEX)) }))
         .route("/api/{action}", post(action))
+        .route("/api/settings", get(settings_get).post(settings_post))
+        .route("/api/settings/test-beep", post(test_beep))
+        .route("/api/settings/test-voice", post(test_voice))
         .route("/api/status", get(status))
         .route("/api/live", get(live))
         .route("/api/metrics", get(metrics_h))
@@ -128,6 +212,22 @@ pub async fn bind(port: u16) -> std::io::Result<tokio::net::TcpListener> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_update_changes_only_audio_and_threshold() {
+        let path = std::env::temp_dir().join(format!("bobby-settings-test-{}.toml", std::process::id()));
+        std::fs::write(&path, "port = 4111\n[run]\naudio = 'rust'\n[[parts]]\nname = 'x'\ncmd = 'tools/x.exe'\n").unwrap();
+        let before = settings::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let out = update_settings(&path, &json!({ "beep_volume": 12, "voice_volume_pc": 80, "voice_volume_discord": 70, "wake_threshold": 0.25 })).unwrap();
+        assert_eq!(out, json!({ "beep_volume": 12, "voice_volume_pc": 80, "voice_volume_discord": 70, "wake_threshold": 0.25 }));
+        let after = settings::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!((after.port, &after.parts, &after.run), (before.port, &before.parts, &before.run));
+        assert_eq!((after.audio.beep_volume, after.audio.voice_volume_pc, after.audio.voice_volume_discord), (12, 80, 70));
+        assert!(update_settings(&path, &json!({ "beep_volume": 101, "voice_volume_pc": 80, "voice_volume_discord": 80, "wake_threshold": 0.25 })).is_err());
+        assert!(update_settings(&path, &json!({ "beep_volume": 5, "voice_volume_pc": 80, "voice_volume_discord": 80, "wake_threshold": 0.0 })).is_err());
+        assert!(update_settings(&path, &json!({ "beep_volume": 5, "voice_volume_pc": 80, "voice_volume_discord": 80 })).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn origin_check() {

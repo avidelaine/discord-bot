@@ -31,6 +31,8 @@ pub enum CapKind {
     PcVolume,
     PcApps,
     PcPower,
+    /// Every client that speaks (Discord or PC).
+    Voice,
 }
 
 // ---------- Context ----------
@@ -242,6 +244,10 @@ pub enum Cap {
     PcMedia { cmd: MediaCmd },
     PcNow,
     PcVolume { op: VolumeOp },
+    /// Volume of Bobby's own voice on the output he speaks on (Discord or PC), not the music, not Windows.
+    /// The client changes its own `[audio] voice_volume_discord` or `voice_volume_pc` and saves the settings file.
+    /// Accepts `Set` and `Delta`; answers `{"level": u8}`.
+    VoiceVolume { op: VolumeOp },
     PcApps,
     PcWindows,
     PcLaunch { name: String },
@@ -263,6 +269,7 @@ impl Cap {
             PcVolume { .. } => CapKind::PcVolume,
             PcApps | PcWindows | PcLaunch { .. } | PcClose { .. } => CapKind::PcApps,
             PcLock | PcSleep | PcShutdown | PcGpu => CapKind::PcPower,
+            VoiceVolume { .. } => CapKind::Voice,
         }
     }
 }
@@ -306,6 +313,8 @@ mod tests {
             Cap::PcNow,
             Cap::PcVolume { op: VolumeOp::Delta { delta: -10 } },
             Cap::PcVolume { op: VolumeOp::Mute },
+            Cap::VoiceVolume { op: VolumeOp::Delta { delta: 10 } },
+            Cap::VoiceVolume { op: VolumeOp::Set { level: 50 } },
             Cap::PcApps,
             Cap::PcWindows,
             Cap::PcLaunch { name: s("Valorant") },
@@ -334,7 +343,7 @@ mod tests {
     #[test]
     fn every_cap_family_is_covered() {
         let kinds: Vec<CapKind> = all_caps().iter().map(Cap::kind).collect();
-        for k in [CapKind::DiscordVoice, CapKind::DiscordText, CapKind::Music, CapKind::PcMedia, CapKind::PcVolume, CapKind::PcApps, CapKind::PcPower] {
+        for k in [CapKind::DiscordVoice, CapKind::DiscordText, CapKind::Music, CapKind::PcMedia, CapKind::PcVolume, CapKind::PcApps, CapKind::PcPower, CapKind::Voice] {
             assert!(kinds.contains(&k), "{k:?}");
         }
     }

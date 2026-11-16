@@ -196,7 +196,8 @@ async fn speak_h(State(b): S, Query(q): Q, h: HeaderMap) -> Response {
     match spoken {
         Err(_) => reply(StatusCode::GATEWAY_TIMEOUT, json!({ "error": "tts timed out" })),
         Ok(Ok(wav)) => {
-            let _ = tokio::task::spawn_blocking(move || b.speaker.play(&wav.0)).await; // returns once spoken
+            let vol = bobby_proto::settings::load().audio.voice_volume_pc; // read at each use: applies live
+            let _ = tokio::task::spawn_blocking(move || b.speaker.play(&out::scale_wav(&bobby_infer::loudness::normalize(&wav.0), vol))).await; // returns once spoken
             reply(StatusCode::OK, json!({ "ok": true }))
         }
         Ok(Err(e)) => reply(StatusCode::BAD_GATEWAY, json!({ "error": e.to_string() })),
@@ -205,7 +206,8 @@ async fn speak_h(State(b): S, Query(q): Q, h: HeaderMap) -> Response {
 
 async fn beep_h(State(b): S, Query(q): Q, h: HeaderMap) -> Response {
     if let Some(r) = forbidden(&h) { return r; }
-    let wav = out::beep(q.get("kind").map_or("yes", String::as_str));
+    // 100 % = the normalized voice level: build the beep at full amplitude, normalize it, then scale by beep_volume.
+    let wav = out::scale_wav(&bobby_infer::loudness::normalize(&out::beep(q.get("kind").map_or("yes", String::as_str), 100)), bobby_proto::settings::load().audio.beep_volume);
     let _ = tokio::task::spawn_blocking(move || b.speaker.play(&wav)).await;
     reply(StatusCode::OK, json!({ "ok": true }))
 }

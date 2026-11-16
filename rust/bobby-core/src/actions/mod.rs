@@ -37,9 +37,10 @@ pub fn def(kind: &str) -> Option<&'static ActionDef> {
     MODULES.iter().flat_map(|m| m.actions.iter()).find(|(k, _)| *k == kind).map(|(_, d)| d)
 }
 
-/// `Object.keys(ACTIONS)`: every action type in module order, then "undo".
+/// `Object.keys(ACTIONS)`: every action type in module order, then "undo". `voice_volume` is shortcut-only: kept out of the
+/// LLM schema so the prompt stays byte-identical to Node.
 pub fn types() -> Vec<&'static str> {
-    MODULES.iter().flat_map(|m| m.actions.iter().map(|(k, _)| *k)).chain(["undo"]).collect()
+    MODULES.iter().flat_map(|m| m.actions.iter().map(|(k, _)| *k)).filter(|k| *k != "voice_volume").chain(["undo"]).collect()
 }
 
 // ---------- Running steps (batch R3b) ----------

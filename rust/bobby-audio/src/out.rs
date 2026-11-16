@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 const ECHO: Duration = Duration::from_millis(200);
 
 /// Beep(s) as a mono s16 WAV, one `ms` long sine per frequency, 5 ms fade in/out.
-pub fn tone(freqs: &[f32], ms: u32, rate: u32) -> Vec<u8> {
+/// `volume` is a percent: amplitude = 0.3 * volume / 100 (30 gives 0.09).
+pub fn tone(freqs: &[f32], ms: u32, rate: u32, volume: u8) -> Vec<u8> {
+    let amp = 0.3 * volume.min(100) as f64 / 100.0;
     let n = (rate as u64 * ms as u64 / 1000) as usize;
     let mut out = Cursor::new(Vec::new());
     let spec = hound::WavSpec { channels: 1, sample_rate: rate, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
@@ -18,7 +20,7 @@ pub fn tone(freqs: &[f32], ms: u32, rate: u32) -> Vec<u8> {
             let t = i as f64 / rate as f64;
             let tr = (n - 1 - i) as f64 / rate as f64;
             let env = (t.min(tr) * 200.0).min(1.0);
-            let v = (2.0 * std::f64::consts::PI * f as f64 * t).sin() * env * 0.3;
+            let v = (2.0 * std::f64::consts::PI * f as f64 * t).sin() * env * amp;
             w.write_sample((v * 32767.0) as i16).expect("wav sample");
         }
     }
@@ -27,8 +29,24 @@ pub fn tone(freqs: &[f32], ms: u32, rate: u32) -> Vec<u8> {
 }
 
 /// "nope" = two low notes, anything else = the short "yes" beep.
-pub fn beep(kind: &str) -> Vec<u8> {
-    if kind == "nope" { tone(&[330.0, 247.0], 140, 22050) } else { tone(&[880.0], 110, 22050) }
+pub fn beep(kind: &str, volume: u8) -> Vec<u8> {
+    if kind == "nope" { tone(&[330.0, 247.0], 140, 22050, volume) } else { tone(&[880.0], 110, 22050, volume) }
+}
+
+/// Scales the samples of a 16-bit WAV by `percent` / 100 (100 or an unreadable WAV: returned as is).
+pub fn scale_wav(wav: &[u8], percent: u8) -> Vec<u8> {
+    if percent == 100 { return wav.to_vec(); }
+    let Ok(mut r) = hound::WavReader::new(Cursor::new(wav)) else { return wav.to_vec() };
+    let spec = r.spec();
+    if spec.sample_format != hound::SampleFormat::Int || spec.bits_per_sample != 16 { return wav.to_vec(); }
+    let k = percent as f32 / 100.0;
+    let mut out = Cursor::new(Vec::new());
+    let Ok(mut w) = hound::WavWriter::new(&mut out, spec) else { return wav.to_vec() };
+    for s in r.samples::<i16>().flatten() {
+        let _ = w.write_sample((s as f32 * k).round().clamp(-32768.0, 32767.0) as i16);
+    }
+    if w.finalize().is_err() { return wav.to_vec(); }
+    out.into_inner()
 }
 
 #[derive(Default)]
@@ -111,7 +129,7 @@ mod tests {
 
     #[test]
     fn tone_header_and_shape() {
-        let wav = tone(&[880.0], 110, 22050);
+        let wav = tone(&[880.0], 110, 22050, 100);
         assert_eq!(&wav[0..4], b"RIFF");
         assert_eq!(&wav[8..12], b"WAVE");
         let r = hound::WavReader::new(Cursor::new(&wav)).unwrap();
@@ -120,7 +138,20 @@ mod tests {
         assert_eq!(s.len(), 2425);
         assert!(s[0].abs() < 50 && s[s.len() - 1].abs() < 800, "fade: {} {}", s[0], s[s.len() - 1]);
         assert!(s.iter().any(|v| v.abs() > 8000));
-        assert_eq!(samples(&beep("nope")).len(), 2 * 3087);
+        assert_eq!(samples(&beep("nope", 30)).len(), 2 * 3087);
+    }
+
+    #[test]
+    fn volume_scales_beep_and_voice() {
+        let peak = |w: &[u8]| samples(w).iter().map(|v| v.unsigned_abs()).max().unwrap();
+        assert!(peak(&tone(&[880.0], 110, 22050, 10)) < peak(&tone(&[880.0], 110, 22050, 100)) / 5);
+        let p30 = peak(&beep("yes", 30)) as f32;
+        assert!((p30 - 0.09 * 32767.0).abs() < 100.0, "{p30}");
+        let loud = tone(&[880.0], 110, 22050, 100);
+        let half = peak(&scale_wav(&loud, 50)) as f32;
+        assert!((half - peak(&loud) as f32 / 2.0).abs() <= 1.0);
+        assert_eq!(scale_wav(&loud, 100), loud);
+        assert_eq!(scale_wav(b"junk", 50), b"junk");
     }
 
     /// Live check: plays a real (very quiet) sound on the PC speakers, so it is not part of the normal run.

@@ -255,12 +255,11 @@ function listen(connection, guild, io) {
       const result = await new Promise((resolve, reject) => {
         ws.addEventListener('message', (ev) => {
           const m = JSON.parse(ev.data);
-          if (m.type === 'wake') { io.ring(true, userId); return; }
+          if (m.type === 'wake') { io.beep(); io.ring(true, userId); return; } // the beep as soon as "Bobby" is heard
           if (m.type === 'gate') {
             gate = m;
             io.ringStop(userId);
-            // No ack here: before Whisper, Bobby cannot tell "Bobby ?" (-> "Oui ?") from an order (-> "Ça marche"),
-            // and Whisper answers ~0.1 s after this point anyway (2026-11-13). The brain acks once it has the text.
+            // No spoken ack here: before Whisper, Bobby cannot tell "Bobby ?" from an order. The brain acks once it has the text.
             return m.wake === false ? resolve(null) : undefined;
           }
           if (m.type === 'text') resolve(m);
@@ -276,7 +275,7 @@ function listen(connection, guild, io) {
         const { text, lang, ms } = result;
         console.log(`
 [heard] ${member.displayName}: "${text}" (${lang}, whisper ${ms} ms${gate?.wake ? ', wake word heard' : ''})`);
-        await brain.hear({ text, lang, score: gate?.score ?? null, member, guild, tEnd, sttMs: ms, io, expected });
+        await brain.hear({ text, lang, score: gate?.score ?? null, member, guild, tEnd, sttMs: ms, io, expected, woke: !!gate?.wake });
       }
     } catch (e) {
       console.error(`[voice] ${e.cause?.code === 'ECONNREFUSED' ? `voice service not reachable at ${VOICE_URL} (is it running?)` : e.message}`);
@@ -402,14 +401,14 @@ require('http').createServer(async (req, res) => {
   let body = '';
   for await (const c of req) body += c;
   try {
-    const { text, lang = 'fr', score = null, ms = null } = JSON.parse(body);
+    const { text, lang = 'fr', score = null, ms = null, woke = false } = JSON.parse(body);
     const guild = client.guilds.cache.get(process.env.GUILD_ID);
     const id = roles.people().supers[0];
     const member = guild && id && (guild.members.cache.get(id) || (await guild.members.fetch(id).catch(() => null)));
     if (!member || getVoiceConnection(guild.id)) return reply(200, { expect: false }); // on Discord: the PC is not listened to
     console.log(`
 [heard on the PC] ${member.displayName}: "${text}" (${lang}, whisper ${ms} ms${score != null ? `, wake ${score}` : ''})`);
-    await brain.hear({ text, lang, score, member, guild, tEnd: performance.now(), sttMs: ms, io: localIo(guild), expected: score == null });
+    await brain.hear({ text, lang, score, member, guild, tEnd: performance.now(), sttMs: ms, io: localIo(guild), expected: score == null, woke });
     reply(200, { expect: brain.expecting(member.id) });
   } catch (e) {
     console.error('[local]', e.message);

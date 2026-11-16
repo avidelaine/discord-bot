@@ -570,7 +570,7 @@ const planText = (plan) => plan.map((x) => `${x.type}${x.targets ? ` -> ${x.targ
 
 // The wake word model upstream is a cheap, lenient filter; the transcript must still contain "Bobby",
 // so a false trigger ("beau bilan") costs one transcription and never an action.
-async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttMs, io, acked = false, ackMs = null, expected = false }) {
+async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttMs, io, acked = false, ackMs = null, expected = false, woke = false }) {
   let p = pending.get(member.id);
   // expected: the window was open when the sentence started (bot.js), even if it closed while the person was talking
   if (p && Date.now() > p.until && !expected) p = null;
@@ -636,7 +636,7 @@ async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttM
     console.log(`[query] "${query}" (${lang})`);
     if (query.replace(/[^\p{L}]/gu, '').length < 2) {
       // "Bobby ?" alone: a beep, then the next sentence is the order (no "Bobby" needed).
-      io.beep?.(); // the short beep (it also lights Bobby's ring): heard, go on
+      if (!woke) io.beep?.(); // the short beep (it also lights Bobby's ring): heard, go on; already played at the wake word
       pending.set(member.id, { until: Date.now() + 8000 });
       rec.outcome = 'waiting';
       return console.log('[waiting] "Bobby" alone: next sentence is the command (8 s)');

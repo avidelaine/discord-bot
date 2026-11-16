@@ -20,8 +20,9 @@ MAX_S = 15
 class Local:
     """Cuts the microphone into sentences with an energy gate, then hands each one to `on_sentence(audio)`."""
 
-    def __init__(self, on_sentence):
-        self.on_sentence = on_sentence
+    def __init__(self, on_sentence, wake=None, threshold=0.0, on_wake=None):
+        self.on_sentence = on_sentence  # on_sentence(audio, score): score None = no wake word check (forced, or no model)
+        self.wake, self.threshold, self.on_wake = wake, threshold, on_wake  # wake: a wakescan.MicWake
         self.enabled = False
         self.speaking = False  # Bobby talks on the speakers: the mic is ignored (no echo of its own voice)
         self.force_until = 0.0  # Bobby waits for the next sentence ("Bobby" said alone): no wake word needed
@@ -37,6 +38,7 @@ class Local:
         import sounddevice as sd  # only imported when local mode is used
 
         noise, voiced, quiet, pre, buf = 0.005, False, 0, [], []
+        scoring = woke = False
         try:
             with sd.InputStream(samplerate=RATE, channels=1, dtype="float32", blocksize=BLOCK) as mic:
                 print(f"[local] listening on the PC microphone ({sd.query_devices(kind='input')['name']})", flush=True)
@@ -52,16 +54,29 @@ class Local:
                     loud = rms > max(0.01, noise * 3)
                     if not voiced:
                         pre = (pre + [block])[-PREROLL:]
-                        if loud:
-                            voiced, quiet, buf = True, 0, list(pre)
-                        continue
-                    buf.append(block)
+                        if not loud:
+                            continue
+                        voiced, quiet, buf = True, 0, list(pre)
+                        scoring, woke = self.wake is not None and time.time() > self.force_until, False
+                        if scoring:
+                            self.wake.start()
+                            for b in buf[:-1]:
+                                self.wake.feed(b)
+                    else:
+                        buf.append(block)
+                    # "Bobby" is heard while the sentence goes on: the beep comes at once, not after the transcript
+                    if scoring and not woke and self.wake.feed(block) >= self.threshold:
+                        woke = True
+                        print(f"[local] 'Bobby' heard mid-sentence (score {self.wake.score:.2f}): beep", flush=True)
+                        if self.on_wake:
+                            self.on_wake()
                     quiet = 0 if loud else quiet + 1
                     if quiet * BLOCK / RATE >= SILENCE_S or len(buf) * BLOCK / RATE >= MAX_S:
                         audio = np.concatenate(buf)
                         voiced, buf, pre = False, [], []
+                        score = self.wake.end() if scoring else None
                         if len(audio) / RATE >= 0.4:
-                            threading.Thread(target=self.on_sentence, args=(audio,), daemon=True).start()
+                            threading.Thread(target=self.on_sentence, args=(audio, score), daemon=True).start()
         except Exception as e:  # noqa: BLE001  (no microphone, device unplugged)
             print(f"[local] microphone unavailable: {e}", flush=True)
         print("[local] stopped listening on the PC microphone", flush=True)
@@ -74,6 +89,10 @@ class Local:
         finally:
             time.sleep(0.2)  # room echo
             self.speaking = False
+
+    def chirp(self, wav: bytes):
+        """Plays a short WAV without muting the mic: the sentence is still being spoken."""
+        threading.Thread(target=winsound.PlaySound, args=(wav, winsound.SND_MEMORY), daemon=True).start()
 
     def hush(self):
         winsound.PlaySound(None, winsound.SND_PURGE)

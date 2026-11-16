@@ -24,7 +24,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from faster_whisper import WhisperModel
 from piper import PiperVoice
-from wakescan import WakeScan, to_16k  # live wake word scoring (testable without Whisper)
+from wakescan import MicWake, WakeScan, to_16k  # live wake word scoring (testable without Whisper)
 from local import Local, post, tone  # local mode: PC microphone and speakers
 
 try:  # PC control is optional: without its packages (requirements-pc.txt), STT and TTS still work
@@ -248,17 +248,14 @@ async def listen(ws: WebSocket, force: str = "0", hotwords: str = ""):
 
 # ---------- Local mode (PC microphone and speakers), driven by the bot ----------
 BOT_URL = os.getenv("BOT_URL", "http://127.0.0.1:3001")
-local_wake = new_wake() if wake is not None else None
-local_wake_lock = threading.Lock()
+local_wake = MicWake(new_wake()) if wake is not None else None  # scored in the mic thread, while the sentence is spoken
 
 
-def local_sentence(audio: np.ndarray):
+def local_sentence(audio: np.ndarray, score):
     t = time.perf_counter()
-    score = None
-    if local_wake is not None and time.time() > local.force_until:
-        with local_wake_lock:
-            score = bobby_score(audio, local_wake)
+    if score is not None:
         if score < WAKE_THRESHOLD:
+            print(f"[local] no Bobby (score {score:.3f}, {len(audio) / 16000:.1f} s)", flush=True)
             collect(audio, score, where="pc")
             return  # not for Bobby: never transcribed, like on Discord
     text, lang = run_whisper(audio, None)
@@ -268,14 +265,14 @@ def local_sentence(audio: np.ndarray):
     if not text:
         return
     try:
-        r = post(f"{BOT_URL}/local", {"text": text, "lang": lang, "score": None if score is None else round(score, 3), "ms": ms})
+        r = post(f"{BOT_URL}/local", {"text": text, "lang": lang, "score": None if score is None else round(score, 3), "ms": ms, "woke": score is not None})
         local.force_until = time.time() + 8 if r.get("expect") else 0
     except Exception as e:  # noqa: BLE001
         print(f"[local] bot not reachable at {BOT_URL}: {e}", flush=True)
 
 
-local = Local(local_sentence)
 BEEPS = {"yes": tone([880]), "nope": tone([330, 247], 140)}
+local = Local(local_sentence, local_wake, WAKE_THRESHOLD, lambda: local.chirp(BEEPS["yes"]))
 
 
 @app.post("/local/{state}")

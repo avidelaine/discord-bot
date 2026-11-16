@@ -1,0 +1,865 @@
+{
+ "todo": [
+  {
+   "id": 1,
+   "text": "Mettre des fondus dans la musique",
+   "list": "general",
+   "author": {
+    "id": "261531632589078528",
+    "name": "WakandeX"
+   },
+   "at": "2026-11-12T22:15:08.000Z",
+   "done": false
+  },
+  {
+   "id": 2,
+   "text": "Une voix différente pour Claude",
+   "list": "general",
+   "author": {
+    "id": "261531632589078528",
+    "name": "WakandeX"
+   },
+   "at": "2026-11-12T22:24:03.000Z",
+   "done": false
+  }
+ ],
+ "cases": [
+  [
+   "coupe le micro de Kévin",
+   "mute:Kévin"
+  ],
+  [
+   "mute ziklone",
+   "mute:Zyklon"
+  ],
+  [
+   "rends la parole à Kevin",
+   "unmute:Kévin"
+  ],
+  [
+   "coupe le son de Marie",
+   "deafen:Marie"
+  ],
+  [
+   "Marie peut réentendre",
+   "undeafen:Marie"
+  ],
+  [
+   "déplace Zyklon dans gaming",
+   "move:Zyklon>Gaming"
+  ],
+  [
+   "envoie Lucas en AFK",
+   "move:Lucas>AFK"
+  ],
+  [
+   "mets-moi dans la salle de réunion",
+   "move:Alex>Réunion"
+  ],
+  [
+   "ramène Marie ici",
+   "move:Marie>Général"
+  ],
+  [
+   "tout le monde dans gaming",
+   "move:Alex,Kévin,Lucas,Marie,Prime Ilias,Sorciax,WakandeX,Zyklon>Gaming"
+  ],
+  [
+   "coupe tout le monde sauf Kévin",
+   "mute:Zyklon"
+  ],
+  [
+   "vire Lucas du vocal",
+   "disconnect:Lucas"
+  ],
+  [
+   "déplace Kévin dans AFK et coupe son micro",
+   "move:Kévin>AFK | mute:Kévin"
+  ],
+  [
+   "écris dans annonces que la soirée commence à 21 heures",
+   "message:>annonces"
+  ],
+  [
+   "ajoute acheter du pain à ma liste",
+   "todo_add:"
+  ],
+  [
+   "qu'est-ce que j'ai sur ma liste",
+   "todo_list:"
+  ],
+  [
+   "enlève le pain de ma liste",
+   "todo_remove:"
+  ],
+  [
+   "annule",
+   "undo:"
+  ],
+  [
+   "laisse tomber, reviens en arrière",
+   "undo:"
+  ],
+  [
+   "tu peux partir",
+   "leave:"
+  ],
+  [
+   "quelle heure est-il",
+   "time:"
+  ],
+  [
+   "raconte-moi une blague",
+   "ask:"
+  ],
+  [
+   "déplace Bernard dans gaming",
+   "ERR"
+  ],
+  [
+   "mute Zyklon et Kévin",
+   "mute:Kévin,Zyklon"
+  ],
+  [
+   "euh coupe le micro de... de Marie",
+   "mute:Marie"
+  ],
+  [
+   "mets du hard rock",
+   "music_play:"
+  ],
+  [
+   "est-ce que tu peux jouer Alors on danse de Stromae",
+   "music_play:"
+  ],
+  [
+   "ajoute Blinding Lights à la file",
+   "music_add:"
+  ],
+  [
+   "la chanson suivante",
+   "music_skip:"
+  ],
+  [
+   "mets le volume un peu moins fort à 30",
+   "music_volume:"
+  ],
+  [
+   "play Around the World by Daft Punk",
+   "music_play:"
+  ],
+  [
+   "put on some chill lofi",
+   "music_play:"
+  ],
+  [
+   "add Starboy to the queue",
+   "music_add:"
+  ],
+  [
+   "what song is playing right now",
+   "music_now:"
+  ],
+  [
+   "turn the music down",
+   "music_volume:"
+  ],
+  [
+   "pause the music on Spotify",
+   "pc_media:"
+  ],
+  [
+   "mute Kevin",
+   "mute:Kévin"
+  ],
+  [
+   "give Zyklon his mic back",
+   "unmute:Zyklon"
+  ],
+  [
+   "deafen Marie please",
+   "deafen:Marie"
+  ],
+  [
+   "move Lucas to the AFK channel",
+   "move:Lucas>AFK"
+  ],
+  [
+   "bring Marie over here",
+   "move:Marie>Général"
+  ],
+  [
+   "take me to gaming",
+   "move:Alex>Gaming"
+  ],
+  [
+   "mute everyone except Kevin",
+   "mute:Zyklon"
+  ],
+  [
+   "kick Lucas out of voice",
+   "disconnect:Lucas"
+  ],
+  [
+   "post in announcements that the game starts at nine",
+   "message:>annonces"
+  ],
+  [
+   "add buy milk to my list",
+   "todo_add:"
+  ],
+  [
+   "undo that",
+   "undo:"
+  ],
+  [
+   "you can go now",
+   "leave:"
+  ],
+  [
+   "how are you doing",
+   []
+  ],
+  [
+   "appelle Kévin le Boss",
+   "alias_add:Kévin"
+  ],
+  [
+   "Zyklon ne s'appelle plus le Grec",
+   "alias_remove:Zyklon"
+  ],
+  [
+   "vire le Grec du vocal",
+   "disconnect:Zyklon"
+  ],
+  [
+   "coupe le micro du Grec",
+   "mute:Zyklon"
+  ],
+  [
+   "call Lucas the rookie",
+   "alias_add:Lucas"
+  ],
+  [
+   "qui a quel surnom sur le serveur",
+   "alias_list:"
+  ],
+  [
+   "who has which nickname",
+   "alias_list:"
+  ],
+  [
+   "change le surnom le Grec en le Spartiate",
+   "alias_rename:"
+  ],
+  [
+   "efface le surnom le Grec de Zyklon",
+   "alias_remove:Zyklon"
+  ],
+  [
+   "remove the nickname le Grec from Zyklon",
+   "alias_remove:Zyklon"
+  ],
+  [
+   "c'est quoi la capitale de l'Australie",
+   "ask:"
+  ],
+  [
+   "explique-moi comment marche un trou noir",
+   "ask:"
+  ],
+  [
+   "combien font 17 fois 23",
+   "ask:"
+  ],
+  [
+   "who won the last world cup",
+   "ask:"
+  ],
+  [
+   "salut Bobby ça va",
+   []
+  ],
+  [
+   "il est quelle heure ?",
+   "time:"
+  ],
+  [
+   "est-ce que tu peux me dire la population de la République démocratique du Congo ?",
+   "ask:"
+  ],
+  [
+   "c'est quoi la République Démocratique du Congo ?",
+   "ask:"
+  ],
+  [
+   "est-ce que tu peux me lister les features qu'on t'a déjà implémentées ?",
+   "help:"
+  ],
+  [
+   "est-ce que tu peux kick Sorciax s'il te plaît ?",
+   "disconnect:Sorciax"
+  ],
+  [
+   "est-ce que tu peux renommer Lucas en le Boss ?",
+   "alias_add:Lucas"
+  ],
+  [
+   "peux-tu draguer Sorciax ?",
+   "move:Sorciax>Général"
+  ],
+  [
+   "vas-y mute moi",
+   "mute:Alex"
+  ],
+  [
+   "can you mute Prime Ilias please?",
+   "mute:Prime Ilias"
+  ],
+  [
+   "est-ce que tu peux me mute micro et casque s'il te plaît ?",
+   "mute:Alex | deafen:Alex"
+  ],
+  [
+   "Mute Bobby",
+   []
+  ],
+  [
+   "tu peux venir avec nous dans gaming",
+   "come:>Gaming"
+  ],
+  [
+   "viens nous rejoindre",
+   "come:>Général"
+  ],
+  [
+   "tu sais faire quoi",
+   "help:"
+  ],
+  [
+   "what time is it",
+   "time:"
+  ],
+  [
+   "t'es qui toi",
+   "about:"
+  ],
+  [
+   "mets un surnom à Marie, la Reine",
+   "alias_add:Marie"
+  ],
+  [
+   "écris dans memes que Lucas a perdu",
+   "message:>memes"
+  ],
+  [
+   "pourquoi le ciel est bleu",
+   "ask:"
+  ],
+  [
+   "quel temps fait-il à Paris demain",
+   "ask:"
+  ],
+  [
+   "how many people live in Canada",
+   "ask:"
+  ],
+  [
+   "donne-moi une idée de recette pour ce soir",
+   "ask:"
+  ],
+  [
+   "mets la musique du PC en pause",
+   "pc_media:"
+  ],
+  [
+   "est-ce que tu peux passer au morceau suivant sur Spotify",
+   "pc_media:"
+  ],
+  [
+   "baisse le volume de Windows à 20",
+   "pc_volume:"
+  ],
+  [
+   "démarre le jeu Valorant",
+   "pc_launch:"
+  ],
+  [
+   "turn the PC volume up",
+   "pc_volume:"
+  ],
+  [
+   "what is the temperature of my graphics card",
+   "pc_gpu:"
+  ],
+  [
+   "put my computer to sleep",
+   "pc_sleep:"
+  ],
+  [
+   "enlève les permissions de Lucas",
+   "perm_revoke:Lucas"
+  ],
+  [
+   "passe Marie admin",
+   "admin_add:Marie"
+  ]
+ ],
+ "routing": [
+  [
+   "est-ce que tu penses que tu es meilleur que Iris ?",
+   [],
+   "about:"
+  ],
+  [
+   "est-ce que tu peux expliquer à Ilias en une phrase, c'est quoi les permissions qu'il y a sur toi ?",
+   [],
+   "!ask"
+  ],
+  [
+   "je trouve que ta détection n'est pas encore parfaite sur ton mode d'activation.",
+   [],
+   "about:"
+  ],
+  [
+   "j'aimerais que quand Claude me réponde, ça soit une voix différente. Est-ce que tu peux le noter dans la liste ?",
+   [],
+   "todo_add:"
+  ],
+  [
+   "il faut que tu retiennes pour la prochaine fois. On va vouloir mettre des fondus là, ça va pas.",
+   [],
+   "todo_add:"
+  ],
+  [
+   "il faudrait que tu gardes l'historique des quelques dernières demandes qui t'ont été faites, parce que des fois tu ne comprends pas, et il faudrait que tu réessayes.",
+   [],
+   "todo_add:"
+  ],
+  [
+   "est-ce que tu peux noter dans la liste des choses à faire ? Il faut que tu aies absolument en connaissance, un beau contexte, que ce soit sur toi ce que tu es capable de faire.",
+   [],
+   "todo_add:"
+  ],
+  [
+   "tu peux rajouter à la to-do list que Ilias doit avoir absolument tous les droits à partir de maintenant sur le bot ?",
+   [],
+   "todo_add:"
+  ],
+  [
+   "est-ce que tu peux noter dans ta liste que tu dois être capable d'éditer tes propres messages que tu as envoyés sur Discord ?",
+   [],
+   "todo_add:"
+  ],
+  [
+   "montre-moi la liste de tout ce que tu as retenu.",
+   [],
+   "todo_list:"
+  ],
+  [
+   "tu peux me dire ce qu'il y a sur la to-do list ?",
+   [],
+   "todo_list:"
+  ],
+  [
+   "peux-tu afficher ma liste ?",
+   [],
+   "todo_list:"
+  ],
+  [
+   "ferme Apex Legends",
+   [],
+   "pc_close:"
+  ],
+  [
+   "STOP",
+   [],
+   "music_stop:"
+  ],
+  [
+   "lance l'implémentation du dernier point qu'on t'a revouté dans la liste",
+   [],
+   "!ask"
+  ],
+  [
+   "j'aimerais que tu fasses un clean-up du channel dev-bot test. Est-ce que tu peux supprimer tous les messages ?",
+   [],
+   "clean:>dev-bot-test"
+  ],
+  [
+   "qui t'a créé ?",
+   [],
+   "!ask"
+  ],
+  [
+   "c'est quoi ton mot d'activation",
+   [],
+   "about:"
+  ],
+  [
+   "quels sont les droits de Lucas",
+   [],
+   "perm_show:Lucas"
+  ],
+  [
+   "qui est admin sur le serveur",
+   [],
+   "!ask"
+  ],
+  [
+   "tu as quelle voix",
+   [],
+   "!ask"
+  ],
+  [
+   "qu'est-ce que tu penses de Zyklon",
+   [],
+   "!ask"
+  ],
+  [
+   "t'es nul Bobby",
+   [],
+   "!ask"
+  ],
+  [
+   "merci Bobby",
+   [],
+   "!ask"
+  ],
+  [
+   "pourquoi tu n'as pas compris tout à l'heure",
+   [],
+   "!ask"
+  ],
+  [
+   "qu'est-ce que je t'ai demandé avant",
+   [],
+   "!ask"
+  ],
+  [
+   "est-ce que Marie est là ?",
+   [],
+   "!ask"
+  ],
+  [
+   "retiens que Lucas préfère le jazz",
+   [],
+   "todo_add:"
+  ],
+  [
+   "pour la prochaine fois, il faudrait que tu parles moins vite",
+   [],
+   "todo_add:"
+  ],
+  [
+   "tu es meilleur que Siri ou pas ?",
+   [],
+   "!ask"
+  ],
+  [
+   "ta voix est trop aiguë",
+   [],
+   "!ask"
+  ],
+  [
+   "qui a le droit de te parler",
+   [],
+   "!ask"
+  ],
+  [
+   "passe Marie super admin",
+   [],
+   "super_admin:"
+  ],
+  [
+   "Stop",
+   [],
+   "music_stop:"
+  ],
+  [
+   "who are you",
+   [],
+   "!ask"
+  ],
+  [
+   "what are Marie's rights",
+   [],
+   "perm_show:Marie"
+  ],
+  [
+   "are you better than Alexa?",
+   [],
+   "!ask"
+  ],
+  [
+   "note that we need a new radio",
+   [],
+   "todo_add:"
+  ],
+  [
+   "your wake word detection is not great",
+   [],
+   "!ask"
+  ],
+  [
+   "c'est quoi la capitale du Japon",
+   [],
+   "ask:"
+  ],
+  [
+   "explique-moi la photosynthèse",
+   [],
+   "ask:"
+  ],
+  [
+   "qui a gagné la coupe du monde 2018",
+   [],
+   "ask:"
+  ],
+  [
+   "donne-moi la recette des crêpes",
+   [],
+   "ask:"
+  ],
+  [
+   "quelle est la distance entre la Terre et la Lune",
+   [],
+   "ask:"
+  ],
+  [
+   "qui a écrit Les Misérables",
+   [],
+   "ask:"
+  ],
+  [
+   "quelle est la population du Brésil",
+   [],
+   "ask:"
+  ],
+  [
+   "what is the speed of light",
+   [],
+   "ask:"
+  ],
+  [
+   "explain how vaccines work",
+   [],
+   "ask:"
+  ],
+  [
+   "quelles sont les actualités du jour",
+   [],
+   "ask:"
+  ],
+  [
+   "réessaie",
+   [
+    {
+     "ago_ms": 0,
+     "query": "mute Kévin",
+     "reply": "Mon cerveau ne répond pas."
+    }
+   ],
+   "mute:Kévin"
+  ],
+  [
+   "Pourquoi il était perdu ?",
+   [
+    {
+     "ago_ms": 0,
+     "query": "lance Apex Legends",
+     "reply": "Je lance Apex Legends."
+    },
+    {
+     "ago_ms": 0,
+     "query": "ferme Apex Legends",
+     "reply": "Tu n'as pas le droit de me demander ça."
+    }
+   ],
+   "!ask"
+  ],
+  [
+   "le dernier point de la liste est fait",
+   [
+    {
+     "ago_ms": 0,
+     "query": "affiche la liste",
+     "reply": "La liste générale : 2 points."
+    }
+   ],
+   "todo_done:"
+  ]
+ ],
+ "batch4": [
+  [
+   "es-tu capable de supprimer mes messages à moi ?",
+   [],
+   {
+    "decision_not": "run"
+   }
+  ],
+  [
+   "est-ce que tu peux supprimer aussi tous les messages que j'ai mis dans le channel memes ?",
+   [],
+   {
+    "decision": "answer"
+   }
+  ],
+  [
+   "quelle est ta range de volume sonore que tu peux atteindre ?",
+   [],
+   {
+    "decision_not": "run"
+   }
+  ],
+  [
+   "est-ce que tu es capable de crier ?",
+   [],
+   {
+    "decision_not": "run"
+   }
+  ],
+  [
+   "est-ce que tu peux augmenter le son de la musique à 200% ?",
+   [],
+   {
+    "got": "music_volume:",
+    "decision": "run"
+   }
+  ],
+  [
+   "explique dans le chat ce que tu sais faire",
+   [],
+   {
+    "got": "help:",
+    "written": true
+   }
+  ],
+  [
+   "est-ce que tu es capable de m'expliquer dans le chat dev-bot-test ce que tu es capable de faire ?",
+   [],
+   {
+    "got": "help:",
+    "written": true,
+    "decision": "run"
+   }
+  ],
+  [
+   "quand je te demande ça, c'est la précédente demande que je t'ai faite. Tu es censé être capable de me formater ça autrement qu'en langage naturel, j'aurais voulu des tableaux, des trucs comme ça.",
+   [
+    {
+     "ago_ms": 60000,
+     "id": "Alex",
+     "who": "Alex",
+     "query": "explique dans le chat ce que tu sais faire",
+     "did": "help",
+     "reply": "Je t'envoie ça dans dev-bot-test."
+    }
+   ],
+   {
+    "got": "help:",
+    "written": true
+   }
+  ],
+  [
+   "est-ce que tu peux me dire ce qui a déjà été fait dans cette liste ?",
+   [],
+   {
+    "got": "todo_list:",
+    "filter": "done"
+   }
+  ],
+  [
+   "est-ce que tu peux me arrobas dans devbot test pour me demander de lancer Apex ?",
+   [],
+   {
+    "got": "ping:Alex>dev-bot-test"
+   }
+  ],
+  [
+   "est-ce que tu peux me ping sur DevBotTest, s'il te plaît ?",
+   [],
+   {
+    "got": "ping:Alex>dev-bot-test"
+   }
+  ],
+  [
+   "est-ce que tu peux m'appeler sur Discord ?",
+   [],
+   {
+    "decision": "offer"
+   }
+  ],
+  [
+   "peux-tu mute Kévin",
+   [],
+   {
+    "got": "mute:Kévin",
+    "decision": "run"
+   }
+  ],
+  [
+   "es-tu capable de couper le micro de Lucas ?",
+   [],
+   {
+    "decision_not": "run"
+   }
+  ],
+  [
+   "non pas lui, Zyklon",
+   [
+    {
+     "ago_ms": 60000,
+     "id": "Alex",
+     "who": "Alex",
+     "query": "mute Kévin",
+     "did": "mute -> Kévin",
+     "reply": ""
+    }
+   ],
+   {
+    "got_re": "(?:^| )mute:Zyklon"
+   }
+  ],
+  [
+   "pareil pour Marie",
+   [
+    {
+     "ago_ms": 60000,
+     "id": "WakandeX",
+     "who": "WakandeX",
+     "query": "envoie Lucas en AFK",
+     "did": "move -> Lucas @ AFK",
+     "reply": ""
+    }
+   ],
+   {
+    "got": "move:Marie>AFK"
+   }
+  ],
+  [
+   "refais",
+   [
+    {
+     "ago_ms": 60000,
+     "id": "Alex",
+     "who": "Alex",
+     "query": "mute Kévin",
+     "did": "mute -> Kévin",
+     "reply": ""
+    },
+    {
+     "ago_ms": 60000,
+     "id": "WakandeX",
+     "who": "WakandeX",
+     "query": "quelle heure est-il",
+     "did": "time",
+     "reply": "Nous sommes jeudi."
+    }
+   ],
+   {
+    "got": "mute:Kévin"
+   }
+  ]
+ ]
+}

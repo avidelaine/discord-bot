@@ -8,6 +8,8 @@ pub mod onnx;
 #[cfg(feature = "onnx")]
 pub mod wake;
 #[cfg(feature = "onnx")]
+pub mod listen; // R5 5.4: the /listen exchange in process (Discord sentences)
+#[cfg(feature = "onnx")]
 pub mod vad; // R5 5.2: Silero VAD (faster-whisper vad_filter)
 #[cfg(feature = "ct2")]
 pub mod stt; // R5 5.2: in-process Whisper (LocalStt)

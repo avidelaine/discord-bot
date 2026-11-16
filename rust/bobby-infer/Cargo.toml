@@ -17,15 +17,31 @@ chrono = { workspace = true, optional = true }
 ct2rs = { version = "=0.11.2", optional = true, default-features = false, features = ["whisper", "cuda", "cuda-dynamic-loading", "ruy"] }
 ct2rs-sys = { version = "=0.11.2", optional = true, default-features = false, features = ["cuda", "cuda-dynamic-loading", "ruy"] }
 rustfft = { version = "6", optional = true }
+# Piper: Unicode NFD of phonemes (as Python unicodedata), espeak-ng built by build.rs.
+unicode-normalization = { version = "0.1", optional = true }
+
+[build-dependencies]
+cmake = { version = "0.1", optional = true }
 
 [features]
 onnx = ["dep:ort", "dep:hound", "dep:chrono"]
 ct2 = ["onnx", "dep:ct2rs", "dep:ct2rs-sys", "dep:rustfft"]
-piper = ["onnx"]
+piper = ["onnx", "dep:unicode-normalization", "dep:cmake"]
 
 [dev-dependencies]
 anyhow = "1"
 
+
 [[example]]
-name = "stt_spike"
+name = "tts_compare"
+required-features = ["piper"]
+
+[[example]]
+name = "gate_compare"
+required-features = ["onnx"]
+
+[[example]]
+name = "stt_compare"
 required-features = ["ct2"]
+
+["ct2"]

@@ -538,6 +538,7 @@ dependencies = [
  "anyhow",
  "bobby-proto",
  "chrono",
+ "cmake",
  "ct2rs",
  "ct2rs-sys",
  "hound",
@@ -546,6 +547,7 @@ dependencies = [
  "rustfft",
  "serde_json",
  "tokio",
+ "unicode-normalization",
 ]
 
 [[package]]

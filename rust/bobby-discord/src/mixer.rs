@@ -123,6 +123,19 @@ impl Mixer {
         self.over.is_some()
     }
 
+    /// Nobody pulls frames any more (not in voice, or the call is gone): the next sound sends `Start` again.
+    pub fn detach(&mut self) {
+        self.active = false;
+    }
+
+    /// A new call exists: start pulling if anything is waiting to be heard.
+    pub fn restart(&mut self) {
+        self.active = false;
+        if self.music.is_some() || self.fading.is_some() || self.over.is_some() {
+            self.ensure();
+        }
+    }
+
     fn ensure(&mut self) {
         if !self.active {
             self.active = true;

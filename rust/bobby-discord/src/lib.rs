@@ -13,6 +13,7 @@ pub mod context;
 pub mod client;
 pub mod receive;
 pub mod caps;
+pub mod speech;
 pub mod alone;
 
 pub use client::{run, Bot};

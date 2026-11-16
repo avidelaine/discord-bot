@@ -1,6 +1,8 @@
 //! The Discord connection: gateway, slash commands, voice join/leave, and the loop that serves the brain.
 //! Port of the connection part of `bot/bot.js`.
 
+use crate::mixer::{self, MixEvent, Mixer};
+use crate::player::Player;
 use crate::{caps, config::Config, context, receive};
 use bobby_proto::msg::{BrainMsg, CapKind, ClientKind, ClientMsg, Context as BrainContext, PROTO_VERSION};
 use serenity::all::{
@@ -42,6 +44,9 @@ pub struct Bot {
     state: Mutex<State>,
     /// Who is heard without a wake word, and who Bobby is answering (see `receive`).
     pub listen: std::sync::Mutex<receive::Listen>,
+    /// Everything audible: music underneath, beeps and Bobby's voice on top (see `mixer`).
+    pub mixer: Arc<Mutex<Mixer>>,
+    pub player: Player,
     next_id: AtomicU64,
 }
 
@@ -88,7 +93,11 @@ impl Bot {
         let call = self.songbird.get_or_insert(self.guild);
         receive::attach(&mut *call.lock().await, self.clone());
         match tokio::time::timeout(Duration::from_secs(20), self.songbird.join(self.guild, channel)).await {
-            Ok(Ok(_)) => Ok(()),
+            Ok(Ok(_)) => {
+                // Whatever the mixer had to play before this call existed starts now.
+                self.mixer.lock().unwrap().restart();
+                Ok(())
+            }
             _ => {
                 let _ = self.songbird.remove(self.guild).await;
                 Err("Connexion vocale impossible.".into())
@@ -96,8 +105,30 @@ impl Bot {
         }
     }
 
+    /// Moves the live call to another channel (`follow` of bot.js): songbird's join on an existing call only
+    /// sends a new voice state, so the receive handlers and the mixer track carry over. Returns the channel
+    /// Bobby left (for undo), or None when it was not connected or already there.
+    pub async fn move_to(&self, channel: ChannelId) -> Option<ChannelId> {
+        let call = self.songbird.get(self.guild)?;
+        let prev = call.lock().await.current_channel().map(|c| ChannelId::new(c.0.get()))?;
+        if prev == channel {
+            return None;
+        }
+        match tokio::time::timeout(Duration::from_secs(20), self.songbird.join(self.guild, channel)).await {
+            Ok(Ok(_)) => {
+                eprintln!("[voice] Bobby moves to {channel}");
+                Some(prev)
+            }
+            _ => {
+                eprintln!("[voice] move to {channel} failed");
+                None
+            }
+        }
+    }
+
     pub async fn leave(&self) {
         let _ = self.songbird.remove(self.guild).await;
+        self.mixer.lock().unwrap().detach();
     }
 
     /// `TEXT_CHANNEL` if it exists, else the channel where the command was typed (`textFor` of bot.js).
@@ -136,6 +167,22 @@ impl Bot {
         }
         if let Err(e) = cmd.create_response(&self.http, CreateInteractionResponse::Message(msg)).await {
             eprintln!("[command] reply failed: {e}");
+        }
+    }
+
+    /// Mixer events: (re)start the songbird track pulling the mixer, tell the player a track ended.
+    async fn mix_events(self: Arc<Self>, mut rx: UnboundedReceiver<MixEvent>) {
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                MixEvent::Start => match self.songbird.get(self.guild) {
+                    Some(call) => {
+                        call.lock().await.play_input(mixer::input(self.mixer.clone()));
+                    }
+                    // Not in voice: nobody pulls frames. `restart` after the next join plays what is left.
+                    None => self.mixer.lock().unwrap().detach(),
+                },
+                MixEvent::MusicEnded { tag, read } => self.player.on_ended(tag, read).await,
+            }
         }
     }
 
@@ -208,6 +255,8 @@ pub async fn run(cfg: Config, from_brain: UnboundedReceiver<BrainMsg>, to_brain:
         .register_songbird_with(songbird.clone())
         .await
         .map_err(|e| format!("discord client: {e}"))?;
+    let (mix_tx, mix_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mixer = Arc::new(Mutex::new(Mixer::new(mix_tx)));
     let bot = Arc::new(Bot {
         guild: GuildId::new(cfg.guild_id),
         cfg,
@@ -217,9 +266,12 @@ pub async fn run(cfg: Config, from_brain: UnboundedReceiver<BrainMsg>, to_brain:
         to_brain,
         state: Mutex::new(State::default()),
         listen: Default::default(),
+        player: Player::new(mixer.clone()),
+        mixer,
         next_id: AtomicU64::new(1),
     });
     let _ = slot.set(bot.clone());
+    tokio::spawn(bot.clone().mix_events(mix_rx));
     tokio::spawn(bot.brain_loop(from_brain));
     client.start().await.map_err(|e| format!("gateway: {e}"))
 }

@@ -1,6 +1,6 @@
 // Replays the real journal through Node's brain intent(): same sentences, same history, one JSON line each.
 // The Rust twin is examples/replay.rs; `replay --compare node.jsonl rust.jsonl` diffs the two outputs.
-//   node rust/bobby-core/tests/fixtures/replay-node.js --make-ctx    rebuilds replay-ctx.json from the journal
+//   node rust/bobby-core/tests/fixtures/replay-node.js --make-ctx    builds replay-ctx.json next to the journal (real names: never in git)
 //   LLM_URL=http://127.0.0.1:8080 node rust/bobby-core/tests/fixtures/replay-node.js [journal] > node.jsonl
 // Never touches data/ or _logs/ (temp DATA_DIR and JOURNAL_FILE); the journal is only read.
 const fs = require('fs');
@@ -8,9 +8,9 @@ const os = require('os');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..', '..', '..', '..');
-const CTX_FILE = path.join(__dirname, 'replay-ctx.json');
 const SUPER = '261531632589078528';
 const journalPath = process.argv.slice(2).find((a) => !a.startsWith('--')) || [path.join(ROOT, '_logs'), path.join(ROOT, '..', '..', '..', '_logs')].map((d) => path.join(d, 'conversations.jsonl')).find((p) => fs.existsSync(p)); // the journal is not in git: a worktree reads the main checkout's
+const CTX_FILE = path.join(path.dirname(journalPath), 'replay-ctx.json'); // _logs/, out of git like the journal
 const records = fs.readFileSync(journalPath, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 
 // ---------- --make-ctx: one fixed server snapshot built from the journal ----------

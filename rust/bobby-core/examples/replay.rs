@@ -91,7 +91,9 @@ fn fmt(plan: &[Step]) -> String {
 async fn replay(llm: &str, journal: Option<PathBuf>) {
     let path = journal.unwrap_or_else(default_journal);
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
-    let snap: Value = serde_json::from_str(include_str!("../tests/fixtures/replay-ctx.json")).unwrap();
+    // built by `replay-node.js --make-ctx` next to the journal (real names and ids: kept out of git)
+    let ctx_file = path.with_file_name("replay-ctx.json");
+    let snap: Value = serde_json::from_str(&std::fs::read_to_string(&ctx_file).unwrap_or_else(|e| die(&format!("{}: {e} (run replay-node.js --make-ctx first)", ctx_file.display())))).unwrap();
 
     // The same to-do list as bot/intent.test.js, so the list lines in the prompt are identical on both sides.
     let store = Store::temp();

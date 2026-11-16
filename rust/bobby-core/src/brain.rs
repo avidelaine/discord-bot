@@ -203,11 +203,8 @@ impl<L: Understand + Sync> Brain<L> {
         let mut memory = Memory::new();
         let n = memory.reload(&journal.path, now_ms());
         println!("[brain] {n} past exchange(s) reloaded from the journal");
-        // `claude.check()` at startup (bot.js ClientReady): logs whether the Claude CLI is usable; the result is cached
-        #[cfg(not(test))]
-        if let Ok(rt) = tokio::runtime::Handle::try_current() {
-            rt.spawn(ask::check());
-        }
+        // `claude.check()` is the host's job at startup (bot.js ClientReady): `tokio::spawn(actions::ask::check())`.
+        // Not here, so tests and the replay never start the real Claude CLI.
         Brain { store, llm, io, journal, state: Mutex::new(State { memory, ..Default::default() }) }
     }
 

@@ -53,6 +53,8 @@ struct Overlay {
 pub struct Mixer {
     events: UnboundedSender<MixEvent>,
     pub volume: f32,
+    /// Gain of Bobby's voice only (`[audio] voice_volume_discord`), never applied to the music.
+    pub voice_gain: f32,
     paused: bool,
     music: Option<Music>,
     fading: Option<Fading>,
@@ -65,7 +67,7 @@ pub struct Mixer {
 
 impl Mixer {
     pub fn new(events: UnboundedSender<MixEvent>) -> Mixer {
-        Mixer { events, volume: 0.5, paused: false, music: None, fading: None, over: None, mf: 1.0, mf_step: 0.0, gain: 0.0, active: false }
+        Mixer { events, volume: 0.5, voice_gain: 1.0, paused: false, music: None, fading: None, over: None, mf: 1.0, mf_step: 0.0, gain: 0.0, active: false }
     }
 
     /// `fade_in`: ramp the new track up over XFADE seconds (crossfade with the one fading out).
@@ -179,7 +181,7 @@ impl Mixer {
         for (i, s) in out.iter_mut().enumerate() {
             let t = i as f32 / FRAME as f32;
             let g = g0 + (g1 - g0) * t;
-            let v = m[i] as f32 * g * (mf0 + (mf1 - mf0) * t) + x[i] as f32 * g * (f0 + (f1 - f0) * t) + o[i] as f32;
+            let v = m[i] as f32 * g * (mf0 + (mf1 - mf0) * t) + x[i] as f32 * g * (f0 + (f1 - f0) * t) + o[i] as f32 * self.voice_gain;
             *s = v.round().clamp(-32768.0, 32767.0) as i16;
         }
 

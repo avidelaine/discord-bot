@@ -104,6 +104,40 @@ fn collect(mut rx: PcmRx) -> Vec<i16> {
     }
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// Loudness: every clip reaches the same level on Discord and on the PC.
+
+// ponytail: stub with the signature of `bobby_infer::loudness::normalize` (coming on v1-voice-actions):
+// same RMS target on voiced samples plus a limiter. Swap the body for the real call once it lands.
+fn normalize(wav: &[u8]) -> Vec<u8> {
+    wav.to_vec()
+}
+
+// ponytail: 1.0 until `[audio] voice_volume_discord` lands in bobby_proto::settings; then
+// `settings::load().audio.voice_volume_discord as f32 / 100.0`, read at each clip.
+fn voice_gain() -> f32 {
+    1.0
+}
+
+/// Generated PCM (beep, nope) through the same normalisation as the TTS: wrapped as a 48 kHz stereo WAV.
+fn loud(pcm: Vec<i16>) -> Vec<i16> {
+    let data: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
+    let mut wav = Vec::with_capacity(44 + data.len());
+    let u32le = |v: u32| v.to_le_bytes();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&u32le(36 + data.len() as u32));
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&u32le(16));
+    wav.extend_from_slice(&[1, 0, 2, 0]); // PCM, stereo
+    wav.extend_from_slice(&u32le(48_000));
+    wav.extend_from_slice(&u32le(48_000 * 4));
+    wav.extend_from_slice(&[4, 0, 16, 0]); // block align, bits
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&u32le(data.len() as u32));
+    wav.extend_from_slice(&data);
+    collect(decode_wav(normalize(&wav)))
+}
+
 async fn fetch_tts(voice_url: &str, lang: &str, voice: &str, text: &str) -> Result<Vec<i16>, String> {
     let client = reqwest::Client::builder().timeout(Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
     let res = client
@@ -116,7 +150,7 @@ async fn fetch_tts(voice_url: &str, lang: &str, voice: &str, text: &str) -> Resu
         return Err(format!("tts {}", res.status()));
     }
     let bytes = res.bytes().await.map_err(|e| e.to_string())?;
-    tokio::task::spawn_blocking(move || collect(decode_wav(bytes.to_vec()))).await.map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || collect(decode_wav(normalize(&bytes)))).await.map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -169,7 +203,11 @@ fn ring_core(mixer: &MixerRef, st: &Mutex<Speech>, on: bool, owner: Option<UserI
 /// Short clip (ack, beep, nope): stops the ring, plays as overlay; a reply that follows waits for its end.
 fn clip_core(mixer: &MixerRef, st: &Mutex<Speech>, pcm: Vec<i16>) {
     ring_stop_core(mixer, st, None);
-    let done = mixer.lock().unwrap().overlay(PcmRx::from_vec(pcm));
+    let done = {
+        let mut m = mixer.lock().unwrap();
+        m.voice_gain = voice_gain(); // read at each clip: a volume change applies to the next one
+        m.overlay(PcmRx::from_vec(pcm))
+    };
     let (tx, rx) = watch::channel(false);
     st.lock().unwrap().clip = Some(rx);
     tokio::spawn(async move {
@@ -198,11 +236,11 @@ fn signal_core(mixer: &MixerRef, st: &Mutex<Speech>, kind: SignalKind, speaker: 
     match kind {
         SignalKind::Ack => {
             if !ack_core(mixer, st) {
-                clip_core(mixer, st, beep_pcm());
+                clip_core(mixer, st, loud(beep_pcm()));
             }
         }
-        SignalKind::Beep => clip_core(mixer, st, beep_pcm()),
-        SignalKind::Nope => clip_core(mixer, st, nope_pcm()),
+        SignalKind::Beep => clip_core(mixer, st, loud(beep_pcm())),
+        SignalKind::Nope => clip_core(mixer, st, loud(nope_pcm())),
         SignalKind::Listening => ring_core(mixer, st, true, speaker),
     }
 }
@@ -299,7 +337,11 @@ async fn say_core(
     ring_stop_core(mixer, st, None);
     pcm.resize(pcm.len() + TAIL, 0);
     let secs = pcm.len() as u64 / (48_000 * 2) + 5;
-    let done = mixer.lock().unwrap().overlay(PcmRx::from_vec(pcm));
+    let done = {
+        let mut m = mixer.lock().unwrap();
+        m.voice_gain = voice_gain(); // read at each clip: a volume change applies to the next one
+        m.overlay(PcmRx::from_vec(pcm))
+    };
     if let Some(u) = to {
         st.lock().unwrap().told = true;
         speaking(Some(u.to_string()));
@@ -520,5 +562,11 @@ mod tests {
             assert_ne!(now, last);
             last = now;
         }
+    }
+
+    #[test]
+    fn loud_round_trips_generated_clips_through_wav() {
+        let b = beep_pcm();
+        assert_eq!(loud(b.clone()), b); // identity while `normalize` is the stub
     }
 }

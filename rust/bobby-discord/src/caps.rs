@@ -26,7 +26,16 @@ pub async fn run(bot: &Arc<Bot>, id: u64, cap: Cap) -> ClientMsg {
     }
 }
 
-/// Signal / Say / Hush / Expect (stub: logs only).
-pub async fn brain_msg(_bot: &Arc<Bot>, msg: BrainMsg) {
-    eprintln!("[caps] not implemented yet: {msg:?}");
+/// Lights (or clears) the speaking ring of `owner` (stub: a later task fills it).
+pub fn ring(_bot: &Arc<Bot>, _on: bool, _owner: UserId) {}
+
+/// Signal / Say / Hush (stub: logs only); Expect opens the no-wake-word window.
+pub async fn brain_msg(bot: &Arc<Bot>, msg: BrainMsg) {
+    match msg {
+        BrainMsg::Expect { user, ms } => match user.parse::<u64>() {
+            Ok(u) => bot.listen.lock().unwrap().expect(UserId::new(u), ms),
+            Err(_) => eprintln!("[caps] expect: bad user id {user}"),
+        },
+        other => eprintln!("[caps] not implemented yet: {other:?}"),
+    }
 }

@@ -40,6 +40,8 @@ pub struct Bot {
     pub songbird: Arc<Songbird>,
     pub to_brain: UnboundedSender<ClientMsg>,
     state: Mutex<State>,
+    /// Who is heard without a wake word, and who Bobby is answering (see `receive`).
+    pub listen: std::sync::Mutex<receive::Listen>,
     next_id: AtomicU64,
 }
 
@@ -214,6 +216,7 @@ pub async fn run(cfg: Config, from_brain: UnboundedReceiver<BrainMsg>, to_brain:
         songbird,
         to_brain,
         state: Mutex::new(State::default()),
+        listen: Default::default(),
         next_id: AtomicU64::new(1),
     });
     let _ = slot.set(bot.clone());

@@ -42,6 +42,27 @@ def sets():
         yield "collected real", pos, neg
 
 
+def lcg_noise(n):
+    """Same generator as rust/bobby-audio/src/wake.rs, so Rust and Python start from identical 'random' noise."""
+    s, out = 12345, []
+    for _ in range(n):
+        s = (s * 6364136223846793005 + 1442695040888963407) % 2**64
+        out.append((s >> 33) % 2000 - 1000)
+    return np.array(out, np.int64)
+
+
+def write_csv(mp, out):
+    """path,score for every clip of every set, with deterministic initial noise (CSV mode only)."""
+    noise = lcg_noise(64000)
+    np.random.randint = lambda lo, hi, size=None: noise.copy()
+    model = Model(wakeword_models=[mp], inference_framework="onnx")
+    with open(out, "w") as f:
+        for _, pos, neg in sets():
+            for p in pos + neg:
+                if (a := load(p)) is not None:
+                    f.write(f"{p},{score(model, a):.6f}\n")
+
+
 def main(paths, thresholds=(0.05, 0.10, 0.20, 0.30)):
     for mp in paths:
         model = Model(wakeword_models=[mp], inference_framework="onnx")
@@ -54,4 +75,10 @@ def main(paths, thresholds=(0.05, 0.10, 0.20, 0.30)):
 
 
 if __name__ == "__main__":
+    if "--csv" in sys.argv:
+        i = sys.argv.index("--csv")
+        out = sys.argv.pop(i + 1)
+        sys.argv.pop(i)
+        write_csv((sys.argv[1:] or [str(HERE.parent / "models" / "wakeword" / "bobby.onnx")])[0], out)
+        sys.exit()
     main(sys.argv[1:] or [str(HERE.parent / "models" / "wakeword" / "bobby.onnx")])

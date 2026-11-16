@@ -17,6 +17,36 @@ PREROLL = 4  # blocks kept before the voice starts (the "B" of "Bobby")
 MAX_S = 15
 
 
+class Gate:
+    """Energy gate: feed 80 ms blocks, get a whole sentence back when it ends. Pure, so the Rust port is tested on it."""
+
+    def __init__(self):
+        self.noise, self.voiced, self.quiet, self.pre, self.buf = 0.005, False, 0, [], []
+
+    def reset(self):  # Bobby speaks: drop what was heard (the noise floor is kept)
+        self.voiced, self.buf, self.pre = False, [], []
+
+    def feed(self, block):
+        rms = float(np.sqrt(np.mean(block**2)))
+        # ponytail: energy gate with a slow noise floor; a VAD model would cut better in a noisy room
+        if not self.voiced:
+            self.noise = 0.98 * self.noise + 0.02 * rms if rms < self.noise * 3 else self.noise
+        loud = rms > max(0.01, self.noise * 3)
+        if not self.voiced:
+            self.pre = (self.pre + [block])[-PREROLL:]
+            if loud:
+                self.voiced, self.quiet, self.buf = True, 0, list(self.pre)
+            return None
+        self.buf.append(block)
+        self.quiet = 0 if loud else self.quiet + 1
+        if self.quiet * BLOCK / RATE >= SILENCE_S or len(self.buf) * BLOCK / RATE >= MAX_S:
+            audio = np.concatenate(self.buf)
+            self.reset()
+            if len(audio) / RATE >= 0.4:
+                return audio
+        return None
+
+
 class Local:
     """Cuts the microphone into sentences with an energy gate, then hands each one to `on_sentence(audio)`."""
 
@@ -37,7 +67,7 @@ class Local:
     def _run(self):
         import sounddevice as sd  # only imported when local mode is used
 
-        noise, voiced, quiet, pre, buf = 0.005, False, 0, [], []
+        gate = Gate()
         scoring = woke = False
         try:
             with sd.InputStream(samplerate=RATE, channels=1, dtype="float32", blocksize=BLOCK) as mic:
@@ -45,37 +75,29 @@ class Local:
                 while self.enabled:
                     block = mic.read(BLOCK)[0][:, 0].copy()
                     if self.speaking:
-                        voiced, buf, pre = False, [], []
+                        gate.reset()
+                        scoring = False
                         continue
-                    rms = float(np.sqrt(np.mean(block**2)))
-                    # ponytail: energy gate with a slow noise floor; a VAD model would cut better in a noisy room
-                    if not voiced:
-                        noise = 0.98 * noise + 0.02 * rms if rms < noise * 3 else noise
-                    loud = rms > max(0.01, noise * 3)
-                    if not voiced:
-                        pre = (pre + [block])[-PREROLL:]
-                        if not loud:
-                            continue
-                        voiced, quiet, buf = True, 0, list(pre)
+                    was = gate.voiced
+                    audio = gate.feed(block)
+                    if not was and gate.voiced:  # a sentence starts: score the preroll, then each block as it comes
                         scoring, woke = self.wake is not None and time.time() > self.force_until, False
                         if scoring:
                             self.wake.start()
-                            for b in buf[:-1]:
+                            for b in gate.buf[:-1]:
                                 self.wake.feed(b)
-                    else:
-                        buf.append(block)
+                    if not (was or gate.voiced):
+                        continue
                     # "Bobby" is heard while the sentence goes on: the beep comes at once, not after the transcript
                     if scoring and not woke and self.wake.feed(block) >= self.threshold:
                         woke = True
                         print(f"[local] 'Bobby' heard mid-sentence (score {self.wake.score:.2f}): beep", flush=True)
                         if self.on_wake:
                             self.on_wake()
-                    quiet = 0 if loud else quiet + 1
-                    if quiet * BLOCK / RATE >= SILENCE_S or len(buf) * BLOCK / RATE >= MAX_S:
-                        audio = np.concatenate(buf)
-                        voiced, buf, pre = False, [], []
+                    if was and not gate.voiced:  # the sentence ended (audio is None when it was too short)
                         score = self.wake.end() if scoring else None
-                        if len(audio) / RATE >= 0.4:
+                        scoring = False
+                        if audio is not None:
                             threading.Thread(target=self.on_sentence, args=(audio, score), daemon=True).start()
         except Exception as e:  # noqa: BLE001  (no microphone, device unplugged)
             print(f"[local] microphone unavailable: {e}", flush=True)

@@ -48,6 +48,16 @@ pub struct Supervisor {
     state: Mutex<State>,
     log_file: Mutex<Option<std::fs::File>>,
     bus: Bus,
+    env: Vec<(String, String)>,
+}
+
+/// Extra env for every part, from the `[run]` switches. Flip the switch back + restart = rollback.
+/// audio = rust: the bot sends local mode (/local, /speak, /beep, /hush) and /pc/* to this app instead of Python.
+pub fn part_env(cfg: &Config) -> Vec<(String, String)> {
+    match cfg.run.audio {
+        bobby_proto::settings::AudioImpl::Rust => vec![("LOCAL_URL".into(), format!("http://127.0.0.1:{}", cfg.port))],
+        bobby_proto::settings::AudioImpl::Python => vec![],
+    }
 }
 
 impl Supervisor {
@@ -62,6 +72,7 @@ impl Supervisor {
             state: Mutex::new(State { parts: cfg.parts.iter().map(|_| PartState::default()).collect(), ..Default::default() }),
             log_file: Mutex::new(log_file),
             bus,
+            env: part_env(cfg),
         })
     }
 
@@ -174,6 +185,7 @@ impl Supervisor {
                 .current_dir(def.dir(&self.root))
                 .env("PYTHONIOENCODING", "utf-8")
                 .env("PYTHONUNBUFFERED", "1")
+                .envs(self.env.iter().map(|(k, v)| (k, v)))
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -319,6 +331,14 @@ mod tests {
         }
     }
 
+    #[test]
+    fn audio_switch_sets_local_url() {
+        let mut c = Config { port: 4100, ..Config::default() };
+        assert!(part_env(&c).is_empty());
+        c.run.audio = bobby_proto::settings::AudioImpl::Rust;
+        assert_eq!(part_env(&c), [("LOCAL_URL".to_string(), "http://127.0.0.1:4100".to_string())]);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn restarts_crashed_part_and_stops_tree() {
         let dir = std::env::temp_dir().join(format!("bobby-sup-test-{}", std::process::id()));
@@ -356,6 +376,8 @@ mod tests {
         assert!(log.contains("[short] hi"));
 
         // pid guard: a live foreign pid in bobby.pid refuses the start
+        // killed by kill_tree below; reaping is not needed in a test
+        #[allow(clippy::zombie_processes)]
         let other = std::process::Command::new("cmd").args(["/c", "ping -n 5 127.0.0.1 >nul"]).creation_flags(CREATE_NO_WINDOW).spawn().unwrap();
         std::fs::write(dir.join("_logs/bobby.pid"), other.id().to_string()).unwrap();
         assert!(sup.start().unwrap_err().contains("already running"));

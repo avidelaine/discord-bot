@@ -181,7 +181,7 @@ pub async fn run(sup: Arc<Supervisor>, db: Db, bus: Bus) {
             let db = db.lock().unwrap();
             let _ = insert(&db, now, &acc.take());
             rows += 1;
-            if rows % 360 == 0 {
+            if rows.is_multiple_of(360) {
                 let _ = prune(&db); // hourly, so a long-running app keeps 30 days only
             }
             last_row = now;

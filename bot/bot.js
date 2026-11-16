@@ -356,7 +356,8 @@ async function joinVoice(channel, joinerId, text) {
 // and the PC stops listening; when Bobby leaves Discord (/leave, "Bobby, repasse en local"), the PC listens again.
 const BOT_PORT = parseInt(process.env.BOT_PORT || '3001');
 const LOCAL = process.env.LOCAL_MODE !== 'off';
-const voicePost = (p) => fetch(`${VOICE_URL}${p}`, { method: 'POST' });
+const LOCAL_URL = process.env.LOCAL_URL || VOICE_URL;
+const voicePost = (p) => fetch(`${LOCAL_URL}${p}`, { method: 'POST' });
 // ponytail: re-sent every 10 s and on each join/leave (idempotent), so a restarted voice service gets the state back.
 function syncLocal() {
   const guild = client.guilds.cache.get(process.env.GUILD_ID);

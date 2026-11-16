@@ -237,7 +237,7 @@ mod tests {
         write!(f, "{{\"at\":\"new\"}}\n{{\"at\":\"part").unwrap();
         let e = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await.unwrap().unwrap();
         assert_eq!(e.data["at"], "new");
-        write!(f, "ial\"}}\n").unwrap();
+        writeln!(f, "ial\"}}").unwrap();
         let e = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await.unwrap().unwrap();
         assert_eq!(e.data["at"], "partial");
         let _ = std::fs::remove_file(&p);

@@ -57,6 +57,13 @@ pub fn pick<'a, T: Named>(q: &str, items: &'a [T], kind: &str) -> Result<&'a T, 
     Ok(a)
 }
 
+/// The text channel a name means better than any voice channel, or None ("dev-bot-test" vs the voice "dev-bot").
+pub fn is_text<'a>(q: &str, ctx: &'a crate::types::Ctx) -> Option<&'a Chan> {
+    let best = |l: &[Chan]| l.iter().map(|c| sim(q, &c.name)).fold(0.0, f64::max);
+    let t = best(&ctx.text_channels);
+    if !q.is_empty() && t >= 0.8 && t > best(&ctx.voice_channels) { ctx.text_channels.iter().find(|c| sim(q, &c.name) == t) } else { None }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

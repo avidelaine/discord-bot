@@ -192,11 +192,11 @@ function renderLive(){
   let mx=g[2];if(typeof mx==='function'){mx=0;hist.forEach(m=>{try{mx=g[2](m)||mx}catch{}})}
   return `<div class="card"><h3>${g[0]}</h3><div class="big">${last.ts?g[3](last):'-'}</div>${spark(vals,mx,'var(--c'+(i+1)+')')}</div>`}).join('');
  const nm={llm:'LLM',voice:'Voix',bot:'Bot'};
- let h='<tr><th>Composant</th><th>CPU %</th><th>CPU (2 min)</th><th>RAM</th><th>RAM (2 min)</th></tr>';
+ let h='<tr><th>Composant</th><th>CPU %</th><th>CPU (2 min)</th><th>RAM</th><th>RAM (2 min)</th><th>GPU %</th><th>GPU (2 min)</th><th>VRAM</th></tr>';
  for(const n of ['llm','voice','bot']){
-  const cur=last.parts&&last.parts[n];
-  const c=hist.map(m=>m.parts&&m.parts[n]?m.parts[n].cpu:null),r=hist.map(m=>m.parts&&m.parts[n]?m.parts[n].ram:null);
-  h+=`<tr><td>${nm[n]}</td><td>${cur?num(cur.cpu,1):'-'}</td><td style="width:30%">${spark(c,0)}</td><td>${cur?num(cur.ram/1024,2)+' Go':'-'}</td><td style="width:30%">${spark(r,0,'var(--c2)')}</td></tr>`}
+  const cur=last.parts&&last.parts[n],col=k=>hist.map(m=>m.parts&&m.parts[n]?m.parts[n][k]:null);
+  const g=cur&&cur.gpu!=null;
+  h+=`<tr><td>${nm[n]}</td><td>${cur?num(cur.cpu,1):'-'}</td><td style="width:20%">${spark(col('cpu'),0)}</td><td>${cur?num(cur.ram/1024,2)+' Go':'-'}</td><td style="width:20%">${spark(col('ram'),0,'var(--c2)')}</td><td>${g?num(cur.gpu,0):'-'}</td><td style="width:20%">${spark(col('gpu'),100,'var(--c3)')}</td><td>${g?num(cur.vram/1024,2)+' Go':'-'}</td></tr>`}
  $('#partTable').innerHTML=h;
 }
 async function seedHist(){

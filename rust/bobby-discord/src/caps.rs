@@ -27,7 +27,9 @@ pub async fn run(bot: &Arc<Bot>, id: u64, cap: Cap) -> ClientMsg {
 }
 
 /// Lights (or clears) the speaking ring of `owner` (stub: a later task fills it).
-pub fn ring(_bot: &Arc<Bot>, _on: bool, _owner: UserId) {}
+pub fn ring(bot: &Arc<Bot>, on: bool, owner: UserId) {
+    crate::speech::ring(bot, on, Some(owner));
+}
 
 /// Signal / Say / Hush (stub: logs only); Expect opens the no-wake-word window.
 pub async fn brain_msg(bot: &Arc<Bot>, msg: BrainMsg) {
@@ -36,6 +38,9 @@ pub async fn brain_msg(bot: &Arc<Bot>, msg: BrainMsg) {
             Ok(u) => bot.listen.lock().unwrap().expect(UserId::new(u), ms),
             Err(_) => eprintln!("[caps] expect: bad user id {user}"),
         },
+        BrainMsg::Signal { kind } => crate::speech::signal(bot, kind),
+        BrainMsg::Say { text, lang, voice, to_user } => crate::speech::say(bot, text, lang, voice, to_user),
+        BrainMsg::Hush => crate::speech::hush(bot),
         other => eprintln!("[caps] not implemented yet: {other:?}"),
     }
 }

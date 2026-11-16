@@ -47,6 +47,8 @@ pub struct Bot {
     /// Everything audible: music underneath, beeps and Bobby's voice on top (see `mixer`).
     pub mixer: Arc<Mutex<Mixer>>,
     pub player: Player,
+    /// Beep/ack/ring/TTS state (see `speech`).
+    pub speech: std::sync::Mutex<crate::speech::Speech>,
     next_id: AtomicU64,
 }
 
@@ -223,6 +225,7 @@ impl EventHandler for Handler {
             kind: ClientKind::Discord,
             caps: vec![CapKind::DiscordVoice, CapKind::DiscordText, CapKind::Music],
         });
+        crate::speech::spawn_acks(bot.clone());
         // Drop global commands left by older versions: only the server ones below remain.
         if let Err(e) = Command::set_global_commands(&bot.http, vec![]).await {
             eprintln!("[discord] clearing global commands failed: {e}");
@@ -266,6 +269,7 @@ pub async fn run(cfg: Config, from_brain: UnboundedReceiver<BrainMsg>, to_brain:
         to_brain,
         state: Mutex::new(State::default()),
         listen: Default::default(),
+        speech: Default::default(),
         player: Player::new(mixer.clone()),
         mixer,
         next_id: AtomicU64::new(1),

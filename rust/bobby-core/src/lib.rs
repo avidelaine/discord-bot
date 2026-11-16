@@ -5,6 +5,7 @@ pub mod context;
 pub mod format;
 pub mod guard;
 pub mod io;
+pub mod journal;
 pub mod prompt;
 pub mod resolve;
 pub mod roles;

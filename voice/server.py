@@ -25,7 +25,7 @@ from fastapi.responses import Response
 from faster_whisper import WhisperModel
 from piper import PiperVoice
 from wakescan import MicWake, WakeScan, to_16k  # live wake word scoring (testable without Whisper)
-from local import Local, post, tone  # local mode: PC microphone and speakers
+from local import Local, post, scale_wav, settings, tone, voice_volume  # local mode: PC microphone and speakers
 
 try:  # PC control is optional: without its packages (requirements-pc.txt), STT and TTS still work
     import pc
@@ -82,7 +82,7 @@ WAKE_MODEL = MODELS / "wakeword" / "bobby.onnx"
 # 0.10: 3 real "Bobby" scored 0.15 on 2026-11-12 (missed at 0.2) and 5 near-misses scored 0.06-0.12. On
 # _training/recordings (held-out pos_02,05..29 / neg_00..14) 0.10 keeps 9/10 and 1/15; 0.08 lets 2/15 through
 # (neg_03 at 0.081). A false trigger only costs one transcription: the transcript must still contain "Bobby".
-WAKE_THRESHOLD = float(os.getenv("WAKE_THRESHOLD", "0.10"))
+WAKE_THRESHOLD = float(os.getenv("WAKE_THRESHOLD") or settings().get("models", {}).get("wake_threshold", 0.10))  # read once at start
 wake = None
 if WAKE_MODEL.exists():
     from openwakeword.model import Model
@@ -251,7 +251,19 @@ BOT_URL = os.getenv("BOT_URL", "http://127.0.0.1:3001")
 local_wake = MicWake(new_wake()) if wake is not None else None  # scored in the mic thread, while the sentence is spoken
 
 
+local_turn = threading.Lock()  # one PC sentence at a time, in the order spoken
+
+
 def local_sentence(audio: np.ndarray, score):
+    # The beep comes mid-sentence, so "Bobby ?" + the order often overlap: the order starts before the bot has
+    # answered "Bobby ?". Judging the wake word only once the previous sentence is done lets the order through.
+    with local_turn:
+        if score is not None and time.time() < local.force_until:
+            score = None
+        _local_sentence(audio, score)
+
+
+def _local_sentence(audio: np.ndarray, score):
     t = time.perf_counter()
     if score is not None:
         if score < WAKE_THRESHOLD:
@@ -271,8 +283,12 @@ def local_sentence(audio: np.ndarray, score):
         print(f"[local] bot not reachable at {BOT_URL}: {e}", flush=True)
 
 
-BEEPS = {"yes": tone([880]), "nope": tone([330, 247], 140)}
-local = Local(local_sentence, local_wake, WAKE_THRESHOLD, lambda: local.chirp(BEEPS["yes"]))
+def beep_wav(kind: str = "yes") -> bytes:
+    """Built at each use with the current beep_volume setting, so a change applies at once."""
+    return tone([330, 247], 140) if kind == "nope" else tone([880])
+
+
+local = Local(local_sentence, local_wake, WAKE_THRESHOLD, lambda: local.chirp(beep_wav("yes")))
 
 
 @app.post("/local/{state}")
@@ -286,13 +302,13 @@ def local_switch(state: str):
 
 @app.post("/speak")
 async def speak(text: str, lang: str = "fr", voice: str = "bobby"):
-    await asyncio.to_thread(local.play, tts(text, lang, voice).body)  # returns once spoken (the bot awaits it)
+    await asyncio.to_thread(local.play, scale_wav(tts(text, lang, voice).body, voice_volume()))  # returns once spoken (the bot awaits it)
     return {"ok": True}
 
 
 @app.post("/beep")
 async def beep(kind: str = "yes"):
-    await asyncio.to_thread(local.play, BEEPS.get(kind, BEEPS["yes"]))
+    await asyncio.to_thread(local.play, beep_wav(kind))
     return {"ok": True}
 
 

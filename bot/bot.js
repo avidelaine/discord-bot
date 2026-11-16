@@ -249,7 +249,8 @@ function listen(connection, guild, io) {
       const queue = []; // PCM decoded before the socket is open (and the final 'end')
       const flush = () => { while (queue.length && ws.readyState === 1) ws.send(queue.shift()); };
       ws.addEventListener('open', flush);
-      pcm.on('data', (b) => { queue.push(b); flush(); });
+      const raw = []; // kept for a late "expected" (below)
+      pcm.on('data', (b) => { raw.push(b); queue.push(b); flush(); });
       pcm.on('end', () => { queue.push('end'); flush(); });
       let gate = null;
       const result = await new Promise((resolve, reject) => {
@@ -267,7 +268,15 @@ function listen(connection, guild, io) {
         ws.addEventListener('error', () => reject(Object.assign(new Error('voice service not reachable'), { cause: { code: 'ECONNREFUSED' } })));
         ws.addEventListener('close', () => (gate ? resolve(null) : reject(Object.assign(new Error('voice service closed the stream'), { cause: { code: 'ECONNREFUSED' } }))));
       });
-      if (gate?.wake === false) {
+      // "Bobby ?" then the order at once (the beep is instant): the order began before the brain waited for it.
+      // No "Bobby" in it, but the brain expects it now: transcribe it anyway.
+      if (gate?.wake === false && brain.expecting(userId)) {
+        const r = await fetch(`${VOICE_URL}/transcribe`, { method: 'POST', headers: { 'x-force': '1', 'x-hotwords': hotwords }, body: Buffer.concat(raw) }).then((x) => x.json());
+        if (r.text) {
+          console.log(`\n[heard] ${member.displayName}: "${r.text}" (${r.lang}, whisper ${r.ms} ms, expected after "Bobby")`);
+          await brain.hear({ text: r.text, lang: r.lang, score: null, member, guild, tEnd, sttMs: r.ms, io, expected: true });
+        }
+      } else if (gate?.wake === false) {
         console.log(`[skipped] ${member.displayName}: no "Bobby" in the audio (score ${gate.score})`);
         // metadata only: this speech was not addressed to Bobby and was never transcribed
         brain.journal({ at: new Date().toISOString(), who: member.displayName, id: member.id, outcome: 'skipped', wakeScore: gate.score, seconds: gate.seconds });

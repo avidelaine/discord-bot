@@ -2,8 +2,10 @@
 PC speakers. The bot turns it on and off (POST /local/on|off); sentences go to the bot like Discord ones."""
 import io
 import json
+import os
 import threading
 import time
+import tomllib
 import urllib.request
 import wave
 import winsound
@@ -120,13 +122,65 @@ class Local:
         winsound.PlaySound(None, winsound.SND_PURGE)
 
 
-def tone(freqs, ms=110, rate=22050):
-    """Short beep(s) as a WAV: [880] = heard, [330, 247] = not understood / no rights."""
+_cfg = {"mtime": None, "path": None, "data": {}}
+
+
+def settings() -> dict:
+    """Bobby's settings file (same as the Rust app: BOBBY_CONFIG, else %APPDATA%\\Bobby\\bobby.toml), cached by mtime.
+    A missing or broken file gives {} (callers use their defaults)."""
+    path = os.environ.get("BOBBY_CONFIG") or os.path.join(os.environ.get("APPDATA", "."), "Bobby", "bobby.toml")
+    try:
+        mtime = os.stat(path).st_mtime_ns
+        if mtime != _cfg["mtime"] or path != _cfg["path"]:
+            with open(path, "rb") as f:
+                _cfg.update(mtime=mtime, path=path, data=tomllib.load(f))
+    except (OSError, tomllib.TOMLDecodeError):
+        _cfg.update(mtime=None, path=path, data={})
+    return _cfg["data"]
+
+
+def _volume(key: str, default: int) -> int:
+    v = settings().get("audio", {}).get(key, default)
+    return max(0, min(100, v)) if isinstance(v, int) and not isinstance(v, bool) else default
+
+
+def beep_volume() -> int:
+    return _volume("beep_volume", 30)
+
+
+def voice_volume() -> int:
+    a = settings().get("audio", {})
+    return _volume("voice_volume_pc" if "voice_volume_pc" in a else "voice_volume", 100)
+
+
+def scale_wav(wav: bytes, percent: int) -> bytes:
+    """Scales the samples of a 16-bit WAV by percent / 100 (100 or an odd WAV: unchanged)."""
+    if percent >= 100:
+        return wav
+    try:
+        with wave.open(io.BytesIO(wav)) as r:
+            p, frames = r.getparams(), r.readframes(r.getnframes())
+        if p.sampwidth != 2:
+            return wav
+        pcm = (np.frombuffer(frames, dtype=np.int16) * (percent / 100)).astype(np.int16)
+        out = io.BytesIO()
+        with wave.open(out, "wb") as w:
+            w.setparams(p)
+            w.writeframes(pcm.tobytes())
+        return out.getvalue()
+    except (wave.Error, EOFError):
+        return wav
+
+
+def tone(freqs, ms=110, rate=22050, volume=None):
+    """Short beep(s) as a WAV: [880] = heard, [330, 247] = not understood / no rights.
+    volume is a percent (default: the beep_volume setting): amplitude = 0.3 * volume / 100."""
+    amp = 0.3 * (beep_volume() if volume is None else volume) / 100
     parts = []
     for f in freqs:
         t = np.arange(int(rate * ms / 1000)) / rate
         env = np.minimum(1, np.minimum(t, t[::-1]) * 200)  # 5 ms fade in/out: no click
-        parts.append(np.sin(2 * np.pi * f * t) * env * 0.3)
+        parts.append(np.sin(2 * np.pi * f * t) * env * amp)
     pcm = (np.concatenate(parts) * 32767).astype(np.int16)
     out = io.BytesIO()
     with wave.open(out, "wb") as w:
@@ -143,4 +197,8 @@ def post(url: str, body: dict) -> dict:
 if __name__ == "__main__":  # self-check without microphone or speakers
     w = tone([880])
     assert w[:4] == b"RIFF" and len(w) > 2000
+    peak = lambda b: int(np.abs(np.frombuffer(b[44:], dtype=np.int16)).max())
+    assert peak(tone([880], volume=10)) < peak(tone([880], volume=100))
+    assert abs(peak(tone([880], volume=30)) - 0.09 * 32767) < 100
+    assert peak(scale_wav(tone([880], volume=100), 50)) < peak(tone([880], volume=100)) * 0.51
     print("local: ok")

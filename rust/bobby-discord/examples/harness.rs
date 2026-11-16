@@ -6,6 +6,39 @@
 //! Stub brain: `/join` joins the typer's voice channel, `/leave` leaves, `/surnoms` answers a fixed text.
 //! Every `ClientMsg` is printed as one JSON line; every stdin line that parses as a `BrainMsg` is forwarded,
 //! e.g. `{"type":"run","id":1,"cap":{"cap":"leave"}}`.
+//!
+//! Ready-to-paste lines for the live test of every cap (replace the <PLACEHOLDERS> with real ids; each
+//! `Result` comes back as one readable `[result]` line):
+//! ```text
+//! {"type":"run","id":10,"cap":{"cap":"mute","users":["<USER_ID>"],"on":true}}
+//! {"type":"run","id":11,"cap":{"cap":"mute","users":["<USER_ID>"],"on":false}}
+//! {"type":"run","id":12,"cap":{"cap":"deafen","users":["<USER_ID>"],"on":true}}
+//! {"type":"run","id":13,"cap":{"cap":"deafen","users":["<USER_ID>"],"on":false}}
+//! {"type":"run","id":14,"cap":{"cap":"move","users":["<USER_ID>"],"channel":"<VOICE_CHANNEL_ID>"}}
+//! {"type":"run","id":15,"cap":{"cap":"disconnect","users":["<USER_ID>"]}}
+//! {"type":"run","id":16,"cap":{"cap":"join","channel":"<VOICE_CHANNEL_ID>"}}
+//! {"type":"run","id":17,"cap":{"cap":"leave"}}
+//! {"type":"run","id":20,"cap":{"cap":"post","channel":null,"text":"hello","embeds":[{"title":"Title","description":"Body","color":255}]}}
+//! {"type":"run","id":21,"cap":{"cap":"post","channel":"<TEXT_CHANNEL_ID_OR_NAME>","text":"hi @everyone (must stay inert)","embeds":[]}}
+//! {"type":"run","id":22,"cap":{"cap":"ping","users":["<USER_ID>"],"channel":null,"text":"wake up @everyone"}}
+//! {"type":"run","id":23,"cap":{"cap":"edit_last","channel":null,"text":"edited"}}
+//! {"type":"run","id":24,"cap":{"cap":"delete_last","channel":null}}
+//! {"type":"run","id":25,"cap":{"cap":"clean","channel":"<TEXT_CHANNEL_ID_OR_NAME>"}}
+//! {"type":"run","id":26,"cap":{"cap":"member_name","id":"<USER_ID>"}}
+//! {"type":"run","id":30,"cap":{"cap":"music_play","item":{"kind":"radio","style":"jazz"},"add":false}}
+//! {"type":"run","id":31,"cap":{"cap":"music_play","item":{"kind":"youtube","query":"daft punk around the world","endless":"similar","seed":null},"add":true}}
+//! {"type":"run","id":32,"cap":{"cap":"music_play","item":{"kind":"style","style":"lofi"},"add":false}}
+//! {"type":"run","id":33,"cap":{"cap":"music_now"}}
+//! {"type":"run","id":34,"cap":{"cap":"music_queue"}}
+//! {"type":"run","id":35,"cap":{"cap":"music_pause"}}
+//! {"type":"run","id":36,"cap":{"cap":"music_resume"}}
+//! {"type":"run","id":37,"cap":{"cap":"music_skip"}}
+//! {"type":"run","id":38,"cap":{"cap":"music_replay"}}
+//! {"type":"run","id":39,"cap":{"cap":"music_volume","op":{"op":"set","level":40}}}
+//! {"type":"run","id":40,"cap":{"cap":"music_volume","op":{"op":"delta","delta":-10}}}
+//! {"type":"run","id":41,"cap":{"cap":"music_volume","op":{"op":"get"}}}
+//! {"type":"run","id":42,"cap":{"cap":"music_stop"}}
+//! ```
 
 use bobby_discord::config::Config;
 use bobby_proto::msg::{BrainMsg, Cap, ClientMsg, Context};
@@ -53,7 +86,12 @@ async fn main() -> Result<(), String> {
     tokio::spawn(async move {
         let mut ctx = Context::default();
         while let Some(msg) = from_client.recv().await {
-            println!("{}", serde_json::to_string(&msg).unwrap_or_default());
+            match &msg {
+                ClientMsg::Result { id, ok, data, error } => {
+                    println!("[result {id}] {} data={data}{}", if *ok { "OK" } else { "FAILED" }, error.as_ref().map_or(String::new(), |e| format!(" error={e}")));
+                }
+                _ => println!("{}", serde_json::to_string(&msg).unwrap_or_default()),
+            }
             for out in stub(&msg, &mut ctx) {
                 let _ = tx.send(out);
             }

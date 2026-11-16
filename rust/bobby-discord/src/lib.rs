@@ -14,3 +14,5 @@ pub mod client;
 pub mod receive;
 pub mod caps;
 pub mod alone;
+
+pub use client::{run, Bot};

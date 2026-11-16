@@ -70,6 +70,21 @@ While Bobby is not in a Discord voice channel, it listens to the PC microphone a
 
 ## Control app
 
+### Desktop app (Rust, `rust/bobby-app`)
+
+One program replaces `Bobby.cmd`, the Node server, the PowerShell sampler and `nvidia-smi`: a Tauri 2 app with an icon in the notification area. Build it with `cargo build --release` in `rust/`, then run `rust/target/release/bobby-app.exe` (stop the Node app first with `stop.cmd`: both want port 4100).
+
+- **Tray icon:** green = Bobby running, amber = started elsewhere (`start.cmd`, `node start.js`), grey = stopped. Left click opens the window; the menu has Ouvrir, Démarrer, Arrêter, Redémarrer, Lancer au démarrage de Windows (a per-user registry entry that starts the app hidden) and Quitter.
+- **Window:** the same UI as below, served by the app on http://127.0.0.1:4100 (also usable from a browser). Closing the window destroys the webview, so the app goes back to about 57 MB, and leaves Bobby running. A second launch only brings the window back.
+- **Quitter stops Bobby too**, since nothing would restart or monitor the parts once the app is gone. When the app starts, it starts Bobby unless Bobby already runs elsewhere (`start_bobby_on_launch`).
+- **Supervisor:** the same rules as `app/supervisor.js`: a part that exits is restarted after 3 s, Stop kills each part's whole process tree, `_logs/bobby.pid` keeps a single Bobby at a time, part output goes to `_logs/bobby.log`, and a running `llama-server.exe` that the app did not start means "started elsewhere" (Start is refused, Stop runs `stop.cmd keep-app`).
+- **Metrics:** by direct system calls (`sysinfo` for CPU, RAM and the parts with their child processes, NVML from the NVIDIA driver for GPU, VRAM and temperature): no PowerShell, no `nvidia-smi`. Same sampling as before (2 s live, one row per 10 s kept for 30 days) in the same `_logs/metrics.db`, so the history carries over.
+- **Settings:** one file, `%APPDATA%\Bobby\bobby.toml` (or the path in `BOBBY_CONFIG`), written with today's values on first run: `port`, `root` (Bobby's folder, found from the exe location), `start_bobby_on_launch`, and each part's `cmd`, `args`, `cwd` and `keep` (log filter).
+
+`cargo test` in `rust/` covers the journal read from the end, log tails, metrics bucketing, settings parsing, the origin check and the supervisor (restart and stop with dummy parts).
+
+### Node app (kept until the desktop app is validated)
+
 Double-click `Bobby.cmd`: it starts the control server (`app/server.js`, http://127.0.0.1:4100, hidden) if needed and opens it in its own Edge window. Closing the window leaves Bobby running; `stop.cmd` stops Bobby and the server.
 
 - **Header:** Bobby's state and Start / Restart / Stop (it also stops a Bobby started with `start.cmd`).

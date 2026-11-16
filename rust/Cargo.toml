@@ -1,0 +1,11 @@
+# Bobby in Rust. Later crates (bobby-core, bobby-discord, bobby-audio, bobby-pc) join this workspace as they are ported.
+[workspace]
+resolver = "2"
+members = ["bobby-app"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

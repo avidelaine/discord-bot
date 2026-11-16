@@ -1,0 +1,7 @@
+[package]
+name = "bobby-pc"
+version = "0.1.0"
+edition = "2021"
+description = "Windows PC commands: volume, media, apps, power"
+
+[dependencies]

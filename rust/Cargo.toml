@@ -1,7 +1,33 @@
-# Bobby in Rust. Later crates (bobby-core, bobby-discord, bobby-audio, bobby-pc) join this workspace as they are ported.
+# Bobby in Rust. Crates map to the target architecture (doc section "Bobby en Rust, en local").
+# bobby-proto: messages, settings, inference traits (serde only). bobby-infer: model calls by address.
+# bobby-core: the brain (no Discord, no hardware). bobby-audio / bobby-pc: PC client. bobby-discord: Discord client.
 [workspace]
 resolver = "2"
-members = ["bobby-app"]
+members = ["bobby-app", "bobby-proto", "bobby-infer", "bobby-core", "bobby-audio", "bobby-pc", "bobby-discord"]
+
+# Shared versions, pinned once here so parallel branches do not fight over Cargo.lock.
+# Fast-moving crates are pinned exactly (ort is still a release candidate).
+[workspace.dependencies]
+bobby-proto = { path = "bobby-proto" }
+bobby-infer = { path = "bobby-infer" }
+bobby-core = { path = "bobby-core" }
+bobby-audio = { path = "bobby-audio" }
+bobby-pc = { path = "bobby-pc" }
+bobby-discord = { path = "bobby-discord" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "process", "io-util", "net"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "=0.43.0", features = ["bundled"] }
+ort = "=2.0.0-rc.15"
+rubato = "=5.1.0"
+cpal = "0.18"
+windows = "0.62"
+serenity = { version = "0.12.5", default-features = false }
+songbird = "0.6.1"
+symphonia = "0.6"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 [profile.release]
 opt-level = "s"

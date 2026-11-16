@@ -315,6 +315,7 @@ mod tests {
             start_bobby_on_launch: false,
             // one part exits at once (restart check), one keeps running (stop check)
             parts: vec![part("short", &["/c", "echo hi"]), part("long", &["/c", "ping -n 60 127.0.0.1 >nul"])],
+            ..Config::default()
         }
     }
 

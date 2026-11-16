@@ -1,0 +1,11 @@
+[package]
+name = "bobby-infer"
+version = "0.1.0"
+edition = "2021"
+description = "Model calls by address: speech-to-text, LLM, text-to-speech"
+
+[dependencies]
+bobby-proto = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }

@@ -1,0 +1,8 @@
+[package]
+name = "bobby-audio"
+version = "0.1.0"
+edition = "2021"
+description = "PC microphone, wake word, speakers"
+
+[dependencies]
+bobby-proto = { workspace = true }

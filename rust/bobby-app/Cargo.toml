@@ -8,6 +8,7 @@ description = "Bobby's desktop control app: supervisor, metrics, journal, tray"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+bobby-proto = { workspace = true }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"

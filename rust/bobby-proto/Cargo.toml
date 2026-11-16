@@ -1,0 +1,10 @@
+[package]
+name = "bobby-proto"
+version = "0.1.0"
+edition = "2021"
+description = "Messages between the brain and its clients, the settings file, inference traits"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }

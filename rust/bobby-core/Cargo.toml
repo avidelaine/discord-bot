@@ -1,0 +1,8 @@
+[package]
+name = "bobby-core"
+version = "0.1.0"
+edition = "2021"
+description = "Bobby's brain: shortcuts, context, rights, actions, storage"
+
+[dependencies]
+bobby-proto = { workspace = true }

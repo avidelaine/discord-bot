@@ -1,0 +1,8 @@
+[package]
+name = "bobby-discord"
+version = "0.1.0"
+edition = "2021"
+description = "Discord connection, voice, music"
+
+[dependencies]
+bobby-proto = { workspace = true }

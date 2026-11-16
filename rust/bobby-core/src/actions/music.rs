@@ -299,6 +299,11 @@ pub fn module() -> Module {
     }
 }
 
+/// R3b: port of the module's `run` functions (one per action type).
+pub async fn run<L: bobby_proto::infer::Understand + Sync>(_s: &mut crate::types::Step, _env: &super::Env<'_, L>, _lang: &str) -> crate::util::Res<Vec<super::UndoOp>> {
+    Ok(vec![]) // R3b
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -272,6 +272,11 @@ pub fn module() -> Module {
 }
 
 /// Test helpers shared with the music tests: Node's `brain.js` `clean()` + `quick()` over discord, music and pc.
+/// R3b: port of the module's `run` functions (one per action type).
+pub async fn run<L: bobby_proto::infer::Understand + Sync>(_s: &mut crate::types::Step, _env: &super::Env<'_, L>, _lang: &str) -> crate::util::Res<Vec<super::UndoOp>> {
+    Ok(vec![]) // R3b
+}
+
 #[cfg(test)]
 pub(crate) mod testkit {
     use super::*;

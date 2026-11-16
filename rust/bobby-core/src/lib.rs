@@ -2,6 +2,7 @@
 //! It touches neither Discord nor hardware: every side effect is a `BrainMsg` to a client (see `io`).
 pub mod actions;
 pub mod context;
+pub mod format;
 pub mod guard;
 pub mod io;
 pub mod prompt;

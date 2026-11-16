@@ -332,7 +332,7 @@ mod tests {
     fn quick_regexes_compile() {
         let m = module();
         assert_eq!(m.quick.len(), 15);
-        assert_eq!(m.actions.len(), 10);
+        assert_eq!(m.actions.len(), 9);
     }
 
     #[test]

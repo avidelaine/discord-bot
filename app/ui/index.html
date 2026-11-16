@@ -72,6 +72,7 @@ pre{background:var(--panel2);padding:8px;border-radius:6px;overflow:auto;font:12
  <button data-t="journal">Journal</button>
  <button data-t="res">Ressources</button>
  <button data-t="logs">Journaux techniques</button>
+ <button data-t="set">Réglages</button>
 </nav>
 <header>
  <span class="dot" id="hdot"></span><span id="hstate">...</span>
@@ -119,6 +120,19 @@ pre{background:var(--panel2);padding:8px;border-radius:6px;overflow:auto;font:12
  </div>
  <div id="logbox"></div>
 </section>
+<section class="tab" id="t-set">
+ <h2 style="margin-top:0">Réglages</h2>
+ <div class="card" style="max-width:520px">
+  <p><label>Volume du bip : <b id="sBeepV">30</b> %<br><input type="range" id="sBeep" min="0" max="100" step="1" style="width:100%"></label></p>
+  <p><button class="btn" id="sTest">Tester le bip</button></p>
+  <p><label>Voix sur le PC : <b id="sVoiceV">100</b> %<br><input type="range" id="sVoice" min="0" max="100" step="1" style="width:100%"></label></p>
+  <p><button class="btn" id="sTestVoice">Tester la voix</button></p>
+  <p><label>Voix sur Discord : <b id="sVoiceDV">100</b> %<br><input type="range" id="sVoiceD" min="0" max="100" step="1" style="width:100%"></label><br><span class="mu">La voix Discord s'applique quand Discord passe en Rust.</span></p>
+  <p><label>Seuil du mot d'activation<br><input type="number" id="sWake" min="0.01" max="0.9" step="0.01"></label></p>
+  <p><button class="btn go" id="sSave">Enregistrer</button> <span class="mu" id="sMsg"></span></p>
+  <p class="mu">Les volumes s'appliquent tout de suite ; le seuil au prochain redémarrage de Bobby.</p>
+ </div>
+</section>
 </main>
 <aside id="panel"></aside>
 
@@ -131,6 +145,22 @@ const hhmmss=iso=>{const d=new Date(iso);return isNaN(d)?'-':d.toLocaleTimeStrin
 const dur=ms=>{if(!(ms>=0))return '-';let s=Math.floor(ms/1000),h=Math.floor(s/3600),m=Math.floor(s%3600/60);s%=60;return (h?h+'h ':'')+(h||m?m+'min ':'')+s+'s'};
 async function api(path,opt){const r=await fetch(path,opt);if(!r.ok)throw new Error(r.status);return r.json()}
 
+// ---------- settings ----------
+const sMsg=t=>{$('#sMsg').textContent=t};
+async function loadSet(){
+ try{const s=await api('/api/settings');
+  $('#sBeep').value=s.beep_volume;$('#sVoice').value=s.voice_volume_pc;$('#sVoiceD').value=s.voice_volume_discord;$('#sWake').value=s.wake_threshold;
+  $('#sBeepV').textContent=s.beep_volume;$('#sVoiceV').textContent=s.voice_volume_pc;$('#sVoiceDV').textContent=s.voice_volume_discord;sMsg('')}
+ catch(e){sMsg('Lecture impossible ('+e.message+')')}}
+$('#sBeep').oninput=()=>{$('#sBeepV').textContent=$('#sBeep').value};
+$('#sVoice').oninput=()=>{$('#sVoiceV').textContent=$('#sVoice').value};
+$('#sVoiceD').oninput=()=>{$('#sVoiceDV').textContent=$('#sVoiceD').value};
+const postJson=(path,body)=>api(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body||{})});
+const saveSet=()=>postJson('/api/settings',{beep_volume:+$('#sBeep').value,voice_volume_pc:+$('#sVoice').value,voice_volume_discord:+$('#sVoiceD').value,wake_threshold:+$('#sWake').value});
+$('#sSave').onclick=async()=>{try{await saveSet();sMsg('Enregistré.')}catch(e){sMsg('Refusé : valeurs invalides ('+e.message+')')}};
+$('#sTest').onclick=async()=>{try{await saveSet();await postJson('/api/settings/test-beep');sMsg('Bip joué (réglage enregistré).')}catch(e){sMsg('Échec ('+e.message+')')}};
+$('#sTestVoice').onclick=async()=>{try{await saveSet();sMsg('Lecture en cours...');await postJson('/api/settings/test-voice');sMsg('Voix jouée (réglage enregistré).')}catch(e){sMsg('Échec ('+e.message+')')}};
+
 // ---------- tabs ----------
 let curTab='dash';
 document.querySelectorAll('#side button').forEach(b=>b.onclick=()=>{
@@ -139,6 +169,7 @@ document.querySelectorAll('#side button').forEach(b=>b.onclick=()=>{
  document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.id==='t-'+curTab));
  if(curTab==='res')loadRes();
  if(curTab==='logs')loadLogs(logPart);
+ if(curTab==='set')loadSet();
  if(curTab==='journal'&&!jLoaded)loadJournal(true);
 });
 
@@ -192,11 +223,11 @@ function renderLive(){
   let mx=g[2];if(typeof mx==='function'){mx=0;hist.forEach(m=>{try{mx=g[2](m)||mx}catch{}})}
   return `<div class="card"><h3>${g[0]}</h3><div class="big">${last.ts?g[3](last):'-'}</div>${spark(vals,mx,'var(--c'+(i+1)+')')}</div>`}).join('');
  const nm={llm:'LLM',voice:'Voix',bot:'Bot'};
- let h='<tr><th>Composant</th><th>CPU %</th><th>CPU (2 min)</th><th>RAM</th><th>RAM (2 min)</th></tr>';
+ let h='<tr><th>Composant</th><th>CPU %</th><th>CPU (2 min)</th><th>RAM</th><th>RAM (2 min)</th><th>GPU %</th><th>GPU (2 min)</th><th>VRAM</th></tr>';
  for(const n of ['llm','voice','bot']){
-  const cur=last.parts&&last.parts[n];
-  const c=hist.map(m=>m.parts&&m.parts[n]?m.parts[n].cpu:null),r=hist.map(m=>m.parts&&m.parts[n]?m.parts[n].ram:null);
-  h+=`<tr><td>${nm[n]}</td><td>${cur?num(cur.cpu,1):'-'}</td><td style="width:30%">${spark(c,0)}</td><td>${cur?num(cur.ram/1024,2)+' Go':'-'}</td><td style="width:30%">${spark(r,0,'var(--c2)')}</td></tr>`}
+  const cur=last.parts&&last.parts[n],col=k=>hist.map(m=>m.parts&&m.parts[n]?m.parts[n][k]:null);
+  const g=cur&&cur.gpu!=null;
+  h+=`<tr><td>${nm[n]}</td><td>${cur?num(cur.cpu,1):'-'}</td><td style="width:20%">${spark(col('cpu'),0)}</td><td>${cur?num(cur.ram/1024,2)+' Go':'-'}</td><td style="width:20%">${spark(col('ram'),0,'var(--c2)')}</td><td>${g?num(cur.gpu,0):'-'}</td><td style="width:20%">${spark(col('gpu'),100,'var(--c3)')}</td><td>${g?num(cur.vram/1024,2)+' Go':'-'}</td></tr>`}
  $('#partTable').innerHTML=h;
 }
 async function seedHist(){

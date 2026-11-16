@@ -31,6 +31,8 @@ pub enum CapKind {
     PcVolume,
     PcApps,
     PcPower,
+    /// Every client that speaks (Discord or PC).
+    Voice,
 }
 
 // ---------- Context ----------
@@ -106,7 +108,7 @@ pub enum ClientMsg {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SignalKind {
-    /// Spoken or short "got it".
+    /// Spoken or short "got it": the client plays its spoken ack, or the beep if it has none yet.
     Ack,
     Beep,
     Nope,
@@ -130,7 +132,7 @@ pub enum BrainMsg {
     /// Stop speaking now.
     Hush,
     Run { id: u64, cap: Cap },
-    /// Listen to `user` without a wake word for `ms` milliseconds.
+    /// Listen to `user` without a wake word for `ms` milliseconds. `ms: 0` closes the window.
     Expect { user: String, ms: u32 },
     /// Answer to `ClientMsg::Command { id }`. `ephemeral`: only the person who typed it sees it.
     Reply { id: u64, text: Option<String>, embeds: Vec<Embed>, ephemeral: bool },
@@ -206,7 +208,9 @@ pub enum MediaCmd {
 /// - `post`: `{"channel": name}`; `edit_last`/`delete_last`: `{"found": bool}`
 /// - `clean`: `{"count": n, "channel": name}` (deletes in the background, answers at once)
 /// - `member_name`: `{"name": string}`
-/// - `music_*`: the player's plain result (`{"nowPlaying": ..}`, `{"queue": [..]}`, `{"error": ".."}` ...)
+/// - `music_*`: the player's plain result (`{"nowPlaying": ..}`, `{"queue": [..]}`, `{"error": ".."}` ...). The player's own
+///   errors arrive as `ok: true` data `{"error": ".."}`, including `"no player"` when the client has no Discord player;
+///   `ok: false` is a real failure of the cap.
 /// - `pc_now`: `{"playing": bool, "title": .., "artist": ..}`; `pc_volume`: see `VolumeOp`;
 ///   `pc_apps`/`pc_windows`: `{"items": [string]}`; `pc_launch`/`pc_close`: `{"found": name|null}`;
 ///   `pc_gpu`: `{"name", "temp", "load", "used", "total"}`
@@ -245,6 +249,10 @@ pub enum Cap {
     PcMedia { cmd: MediaCmd },
     PcNow,
     PcVolume { op: VolumeOp },
+    /// Volume of Bobby's own voice on the output he speaks on (Discord or PC), not the music, not Windows.
+    /// The client changes its own `[audio] voice_volume_discord` or `voice_volume_pc` and saves the settings file.
+    /// Accepts `Set` and `Delta`; answers `{"level": u8}`.
+    VoiceVolume { op: VolumeOp },
     PcApps,
     PcWindows,
     PcLaunch { name: String },
@@ -266,6 +274,7 @@ impl Cap {
             PcVolume { .. } => CapKind::PcVolume,
             PcApps | PcWindows | PcLaunch { .. } | PcClose { .. } => CapKind::PcApps,
             PcLock | PcSleep | PcShutdown | PcGpu => CapKind::PcPower,
+            VoiceVolume { .. } => CapKind::Voice,
         }
     }
 }
@@ -309,6 +318,8 @@ mod tests {
             Cap::PcNow,
             Cap::PcVolume { op: VolumeOp::Delta { delta: -10 } },
             Cap::PcVolume { op: VolumeOp::Mute },
+            Cap::VoiceVolume { op: VolumeOp::Delta { delta: 10 } },
+            Cap::VoiceVolume { op: VolumeOp::Set { level: 50 } },
             Cap::PcApps,
             Cap::PcWindows,
             Cap::PcLaunch { name: s("Valorant") },
@@ -337,7 +348,7 @@ mod tests {
     #[test]
     fn every_cap_family_is_covered() {
         let kinds: Vec<CapKind> = all_caps().iter().map(Cap::kind).collect();
-        for k in [CapKind::DiscordVoice, CapKind::DiscordText, CapKind::Music, CapKind::PcMedia, CapKind::PcVolume, CapKind::PcApps, CapKind::PcPower] {
+        for k in [CapKind::DiscordVoice, CapKind::DiscordText, CapKind::Music, CapKind::PcMedia, CapKind::PcVolume, CapKind::PcApps, CapKind::PcPower, CapKind::Voice] {
             assert!(kinds.contains(&k), "{k:?}");
         }
     }

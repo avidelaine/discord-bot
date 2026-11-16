@@ -105,21 +105,26 @@ pub fn history(db: &Connection, from: i64, to: i64, step: f64) -> rusqlite::Resu
 
 /// CPU (% of the whole machine) and RAM (MB) of a part: its process plus its direct children
 /// (voice's venv python.exe is only a launcher for the real interpreter).
-fn part_usage(sys: &System, pid: u32, ncpu: f32) -> Option<(f64, f64)> {
+fn part_usage(sys: &System, pid: u32, ncpu: f32, gpus: &crate::gpu_procs::Usage) -> Option<(f64, f64, f64, f64)> {
     let root = Pid::from_u32(pid);
     sys.process(root)?;
-    let (mut cpu, mut ram) = (0f32, 0u64);
+    let (mut cpu, mut ram, mut gpu, mut vram) = (0f32, 0u64, 0f64, 0f64);
     for (id, p) in sys.processes() {
         if *id == root || p.parent() == Some(root) {
             cpu += p.cpu_usage();
             ram += p.memory();
+            if let Some((g, v)) = gpus.get(&id.as_u32()) {
+                gpu += g;
+                vram += v;
+            }
         }
     }
-    Some((round((cpu / ncpu) as f64), round(ram as f64 / MB)))
+    Some((round((cpu / ncpu) as f64), round(ram as f64 / MB), round(gpu.min(100.0)), round(vram)))
 }
 
 pub async fn run(sup: Arc<Supervisor>, db: Db, bus: Bus) {
     let nvml = nvml_wrapper::Nvml::init().ok(); // loads nvml.dll from the NVIDIA driver; no GPU numbers without it
+    let mut gpu_procs = crate::gpu_procs::GpuProcs::open(); // per-part GPU; live only, not stored
     let mut sys = System::new().expect("sysinfo");
     let ncpu = std::thread::available_parallelism().map_or(1, |n| n.get()) as f32;
     let kind = ProcessRefreshKind::nothing().with_cpu().with_memory();
@@ -150,9 +155,11 @@ pub async fn run(sup: Arc<Supervisor>, db: Db, bus: Bus) {
         for n in sup.part_names() {
             parts.insert(n, Value::Null);
         }
+        let gpus = gpu_procs.as_mut().map(|g| g.sample()).unwrap_or_default();
         for (name, pid) in sup.pids() {
-            if let Some((cpu, ram)) = part_usage(&sys, pid, ncpu) {
-                parts.insert(name, json!({ "cpu": cpu, "ram": ram }));
+            if let Some((cpu, ram, gpu, vram)) = part_usage(&sys, pid, ncpu, &gpus) {
+                let (gpu, vram) = if gpu_procs.is_some() { (json!(gpu), json!(vram)) } else { (Value::Null, Value::Null) };
+                parts.insert(name, json!({ "cpu": cpu, "ram": ram, "gpu": gpu, "vram": vram }));
             }
         }
         let ram_total = sys.total_memory() as f64 / MB;
@@ -174,7 +181,7 @@ pub async fn run(sup: Arc<Supervisor>, db: Db, bus: Bus) {
             let db = db.lock().unwrap();
             let _ = insert(&db, now, &acc.take());
             rows += 1;
-            if rows % 360 == 0 {
+            if rows.is_multiple_of(360) {
                 let _ = prune(&db); // hourly, so a long-running app keeps 30 days only
             }
             last_row = now;

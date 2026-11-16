@@ -24,6 +24,27 @@ pub struct Config {
     /// Where the Discord client runs: "local" or a ws:// address.
     /// Secrets (the Discord token) stay in the `.env`, never here.
     pub discord: DiscordAt,
+    /// PC speaker volumes (editable live from the app).
+    pub audio: Audio,
+}
+
+/// Volumes of the PC speakers, in percent. Read at each use, so a change applies at once.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Audio {
+    /// Beep loudness, percent of the full beep amplitude (0.3): 30 is about -10 dB.
+    pub beep_volume: u8,
+    /// Bobby's voice on the PC speakers, percent of the normalized level (100 = full).
+    #[serde(alias = "voice_volume")]
+    pub voice_volume_pc: u8,
+    /// Bobby's voice on Discord, percent of the normalized level (applies once Discord runs in Rust).
+    pub voice_volume_discord: u8,
+}
+
+impl Default for Audio {
+    fn default() -> Self {
+        Audio { beep_volume: 30, voice_volume_pc: 100, voice_volume_discord: 100 }
+    }
 }
 
 /// Port switches. Flipping a switch back is the rollback of that port step.
@@ -162,6 +183,7 @@ impl Default for Config {
             data: Data::default(),
             brain: Brain::default(),
             discord: DiscordAt::default(),
+            audio: Audio::default(),
         }
     }
 }
@@ -293,6 +315,27 @@ cwd = "bot"
         let mut d = Config::default();
         d.root = PathBuf::from("C:/Bobby");
         assert_eq!(old, d);
+    }
+
+    #[test]
+    fn old_file_gets_default_audio() {
+        let c = parse(OLD_TOML).unwrap();
+        assert_eq!((c.audio.beep_volume, c.audio.voice_volume_pc, c.audio.voice_volume_discord), (30, 100, 100));
+    }
+
+    #[test]
+    fn previous_voice_volume_key_still_loads() {
+        let c = parse("[audio]\nvoice_volume = 55\n").unwrap();
+        assert_eq!((c.audio.voice_volume_pc, c.audio.voice_volume_discord), (55, 100));
+    }
+
+    #[test]
+    fn only_beep_volume_keeps_other_defaults() {
+        let c = parse("[audio]\nbeep_volume = 10\n").unwrap();
+        assert_eq!((c.audio.beep_volume, c.audio.voice_volume_pc), (10, 100));
+        let mut d = Config::default();
+        d.audio.beep_volume = 10;
+        assert_eq!(c, d);
     }
 
     #[test]

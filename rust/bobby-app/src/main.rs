@@ -2,7 +2,9 @@
 // Closing the window destroys the webview (so it costs nothing) and leaves Bobby running; "Quitter" stops Bobby and exits.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod bridge;
 mod config;
+mod gpu_procs;
 mod journal;
 mod metrics;
 mod server;
@@ -85,8 +87,9 @@ fn main() {
             let port = cfg.port;
             let listener = tauri::async_runtime::block_on(server::bind(port))
                 .map_err(|e| format!("port {port} is taken (is the Node app, Bobby.cmd, still running?): {e}"))?;
+            let bridge = bridge::routes(bridge::Bridge::new(&cfg, sup.clone()));
             tauri::async_runtime::spawn(async move {
-                let _ = axum::serve(listener, server::router(state)).await;
+                let _ = axum::serve(listener, server::router(state, bridge)).await;
             });
 
             // tray

@@ -6,6 +6,8 @@ description = "Discord connection, voice, music"
 
 [dependencies]
 bobby-proto = { workspace = true }
+bobby-infer = { workspace = true }
+toml = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

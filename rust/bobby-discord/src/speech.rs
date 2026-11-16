@@ -107,16 +107,11 @@ fn collect(mut rx: PcmRx) -> Vec<i16> {
 // ---------------------------------------------------------------------------------------------------------
 // Loudness: every clip reaches the same level on Discord and on the PC.
 
-// ponytail: stub with the signature of `bobby_infer::loudness::normalize` (coming on v1-voice-actions):
-// same RMS target on voiced samples plus a limiter. Swap the body for the real call once it lands.
-fn normalize(wav: &[u8]) -> Vec<u8> {
-    wav.to_vec()
-}
+use bobby_infer::loudness::normalize;
 
-// ponytail: 1.0 until `[audio] voice_volume_discord` lands in bobby_proto::settings; then
-// `settings::load().audio.voice_volume_discord as f32 / 100.0`, read at each clip.
+/// `[audio] voice_volume_discord` as a gain, read at each clip so a change applies to the next one.
 fn voice_gain() -> f32 {
-    1.0
+    bobby_proto::settings::load().audio.voice_volume_discord as f32 / 100.0
 }
 
 /// Generated PCM (beep, nope) through the same normalisation as the TTS: wrapped as a 48 kHz stereo WAV.
@@ -567,6 +562,27 @@ mod tests {
     #[test]
     fn loud_round_trips_generated_clips_through_wav() {
         let b = beep_pcm();
-        assert_eq!(loud(b.clone()), b); // identity while `normalize` is the stub
+        assert_eq!(loud(b.clone()).len(), b.len()); // same length, only the level changes
+    }
+
+    /// Same loudness as the PC: a normalized clip leaves the mixer (voice gain 100 %, no music) at the RMS
+    /// the PC plays it at (the PC path is `normalize` then its own volume, 100 % by default).
+    #[test]
+    fn mixer_output_keeps_the_normalized_rms() {
+        let tone: Vec<i16> = (0..48_000).flat_map(|i| {
+            let v = ((i as f32 * 0.05).sin() * 3000.0) as i16;
+            [v, v]
+        }).collect();
+        let clip = loud(tone);
+        let rms = |x: &[i16]| (x.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / x.len() as f64).sqrt();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut m = crate::mixer::Mixer::new(tx);
+        drop(m.overlay(PcmRx::from_vec(clip.clone())));
+        let mut out = Vec::new();
+        while let Some(f) = m.next_frame() {
+            out.extend_from_slice(&f);
+        }
+        let (a, b) = (rms(&clip), rms(&out[..clip.len()]));
+        assert!((a - b).abs() / a < 0.01, "mixer {b} vs clip {a}");
     }
 }

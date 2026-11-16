@@ -43,6 +43,28 @@ class WakeScan:
         return self.score
 
 
+class MicWake:
+    """Same score as bobby_score() in server.py, fed block by block from the PC microphone (16 kHz float32)."""
+
+    def __init__(self, model):
+        self.model = model
+
+    def start(self):
+        self.model.reset()
+        self.buf, self.score = PAD.copy(), 0.0
+
+    def feed(self, block: np.ndarray) -> float:
+        self.buf = np.concatenate([self.buf, (np.clip(block, -1, 1) * 32767).astype(np.int16)])
+        n = len(self.buf) // 1280 * 1280
+        for i in range(0, n, 1280):
+            self.score = max(self.score, float(max(self.model.predict(self.buf[i : i + 1280]).values())))
+        self.buf = self.buf[n:]
+        return self.score
+
+    def end(self) -> float:
+        return self.feed(PAD / 32767)
+
+
 if __name__ == "__main__":  # self-check against a whole-sentence scan, on the training recordings
     import sys
     import wave
@@ -70,5 +92,17 @@ if __name__ == "__main__":  # self-check against a whole-sentence scan, on the t
         ref = whole(raw)
         worst = max(worst, abs(live - ref))
         print(f"{f.name}: live {live:.3f}  whole {ref:.3f}")
+    mic = MicWake(model)
+    for f in [rec / "pos" / "pos_05.wav", rec / "pos" / "pos_20.wav", rec / "neg" / "neg_04.wav"]:  # PC mic path: 80 ms blocks at 16 kHz
+        mono = np.frombuffer(wave.open(str(f)).readframes(10**9), np.int16)
+        mic.start()
+        for i in range(0, len(mono), 1280):
+            mic.feed(mono[i : i + 1280] / 32768)
+        live = mic.end()
+        pcm = np.concatenate([PAD, (mono / 32768 * 32767).astype(np.int16), PAD])  # bobby_score() on the same audio
+        model.reset()
+        ref = max(max(model.predict(pcm[i : i + 1280]).values()) for i in range(0, len(pcm) - 1279, 1280))
+        worst = max(worst, abs(live - ref))
+        print(f"{f.name} (mic): live {live:.3f}  whole {ref:.3f}")
     print(f"max difference {worst:.3f}")
     sys.exit(0 if worst < 0.06 else 1)  # a negative near 0.4 moves by ~0.05; positives by ~0.01

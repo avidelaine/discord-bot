@@ -279,7 +279,7 @@ impl EventHandler for Handler {
             v: PROTO_VERSION,
             device: "discord".into(),
             kind: ClientKind::Discord,
-            caps: vec![CapKind::DiscordVoice, CapKind::DiscordText, CapKind::Music],
+            caps: vec![CapKind::DiscordVoice, CapKind::DiscordText, CapKind::Music, CapKind::Voice],
         });
         speech::spawn_acks(bot.clone());
         // Drop global commands left by older versions: only the server ones below remain.

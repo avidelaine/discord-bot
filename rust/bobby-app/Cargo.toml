@@ -18,8 +18,16 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = "0.3"
 sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 nvml-wrapper = "0.13"
+windows = { workspace = true, features = ["Win32_System_Performance"] }
 rusqlite = { version = "0.43", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+bobby-infer = { workspace = true }
+bobby-audio = { workspace = true }
+bobby-pc = { workspace = true }
+reqwest = { workspace = true }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

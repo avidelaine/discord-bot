@@ -72,6 +72,7 @@ async fn exec(bot: &Arc<Bot>, cap: Cap) -> Result<Value, (String, Value)> {
             VolumeOp::Delta { delta } => p.volume_down(-(delta as i64)).await,
             VolumeOp::Mute | VolumeOp::Unmute => return Err(("unsupported".into(), Value::Null)),
         },
+        Cap::VoiceVolume { op } => voice_volume(op).map_err(|e| (e, Value::Null))?,
         Cap::PcMedia { .. }
         | Cap::PcNow
         | Cap::PcVolume { .. }
@@ -307,6 +308,24 @@ fn resolve_channel(list: &[(u64, String)], key: &str) -> Option<u64> {
         .find(|(i, _)| i.to_string() == k)
         .or_else(|| list.iter().find(|(_, n)| n.eq_ignore_ascii_case(k)))
         .map(|(i, _)| *i)
+}
+
+/// Bobby's voice level on Discord (`[audio] voice_volume_discord`), saved to the settings file; the next clip
+/// reads it (see `speech::voice_gain`). Same write as the app's settings route.
+fn voice_volume(op: VolumeOp) -> Result<Value, String> {
+    let mut c = bobby_proto::settings::load();
+    let now = c.audio.voice_volume_discord as i32;
+    let level = match op {
+        VolumeOp::Get => return Ok(json!({ "level": now })),
+        VolumeOp::Set { level } => level as i32,
+        VolumeOp::Delta { delta } => now + delta as i32,
+        VolumeOp::Mute | VolumeOp::Unmute => return Err("unsupported".into()),
+    }
+    .clamp(0, 100) as u8;
+    c.audio.voice_volume_discord = level;
+    let text = toml::to_string_pretty(&c).map_err(|e| e.to_string())?;
+    std::fs::write(bobby_proto::settings::path(), text).map_err(|e| e.to_string())?;
+    Ok(json!({ "level": level }))
 }
 
 #[cfg(test)]

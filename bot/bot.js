@@ -249,18 +249,18 @@ function listen(connection, guild, io) {
       const queue = []; // PCM decoded before the socket is open (and the final 'end')
       const flush = () => { while (queue.length && ws.readyState === 1) ws.send(queue.shift()); };
       ws.addEventListener('open', flush);
-      pcm.on('data', (b) => { queue.push(b); flush(); });
+      const raw = []; // kept for a late "expected" (below)
+      pcm.on('data', (b) => { raw.push(b); queue.push(b); flush(); });
       pcm.on('end', () => { queue.push('end'); flush(); });
       let gate = null;
       const result = await new Promise((resolve, reject) => {
         ws.addEventListener('message', (ev) => {
           const m = JSON.parse(ev.data);
-          if (m.type === 'wake') { io.ring(true, userId); return; }
+          if (m.type === 'wake') { io.beep(); io.ring(true, userId); return; } // the beep as soon as "Bobby" is heard
           if (m.type === 'gate') {
             gate = m;
             io.ringStop(userId);
-            // No ack here: before Whisper, Bobby cannot tell "Bobby ?" (-> "Oui ?") from an order (-> "Ça marche"),
-            // and Whisper answers ~0.1 s after this point anyway (2026-11-13). The brain acks once it has the text.
+            // No spoken ack here: before Whisper, Bobby cannot tell "Bobby ?" from an order. The brain acks once it has the text.
             return m.wake === false ? resolve(null) : undefined;
           }
           if (m.type === 'text') resolve(m);
@@ -268,7 +268,15 @@ function listen(connection, guild, io) {
         ws.addEventListener('error', () => reject(Object.assign(new Error('voice service not reachable'), { cause: { code: 'ECONNREFUSED' } })));
         ws.addEventListener('close', () => (gate ? resolve(null) : reject(Object.assign(new Error('voice service closed the stream'), { cause: { code: 'ECONNREFUSED' } }))));
       });
-      if (gate?.wake === false) {
+      // "Bobby ?" then the order at once (the beep is instant): the order began before the brain waited for it.
+      // No "Bobby" in it, but the brain expects it now: transcribe it anyway.
+      if (gate?.wake === false && brain.expecting(userId)) {
+        const r = await fetch(`${VOICE_URL}/transcribe`, { method: 'POST', headers: { 'x-force': '1', 'x-hotwords': hotwords }, body: Buffer.concat(raw) }).then((x) => x.json());
+        if (r.text) {
+          console.log(`\n[heard] ${member.displayName}: "${r.text}" (${r.lang}, whisper ${r.ms} ms, expected after "Bobby")`);
+          await brain.hear({ text: r.text, lang: r.lang, score: null, member, guild, tEnd, sttMs: r.ms, io, expected: true });
+        }
+      } else if (gate?.wake === false) {
         console.log(`[skipped] ${member.displayName}: no "Bobby" in the audio (score ${gate.score})`);
         // metadata only: this speech was not addressed to Bobby and was never transcribed
         brain.journal({ at: new Date().toISOString(), who: member.displayName, id: member.id, outcome: 'skipped', wakeScore: gate.score, seconds: gate.seconds });
@@ -276,7 +284,7 @@ function listen(connection, guild, io) {
         const { text, lang, ms } = result;
         console.log(`
 [heard] ${member.displayName}: "${text}" (${lang}, whisper ${ms} ms${gate?.wake ? ', wake word heard' : ''})`);
-        await brain.hear({ text, lang, score: gate?.score ?? null, member, guild, tEnd, sttMs: ms, io, expected });
+        await brain.hear({ text, lang, score: gate?.score ?? null, member, guild, tEnd, sttMs: ms, io, expected, woke: !!gate?.wake });
       }
     } catch (e) {
       console.error(`[voice] ${e.cause?.code === 'ECONNREFUSED' ? `voice service not reachable at ${VOICE_URL} (is it running?)` : e.message}`);
@@ -357,7 +365,8 @@ async function joinVoice(channel, joinerId, text) {
 // and the PC stops listening; when Bobby leaves Discord (/leave, "Bobby, repasse en local"), the PC listens again.
 const BOT_PORT = parseInt(process.env.BOT_PORT || '3001');
 const LOCAL = process.env.LOCAL_MODE !== 'off';
-const voicePost = (p) => fetch(`${VOICE_URL}${p}`, { method: 'POST' });
+const LOCAL_URL = process.env.LOCAL_URL || VOICE_URL;
+const voicePost = (p) => fetch(`${LOCAL_URL}${p}`, { method: 'POST' });
 // ponytail: re-sent every 10 s and on each join/leave (idempotent), so a restarted voice service gets the state back.
 function syncLocal() {
   const guild = client.guilds.cache.get(process.env.GUILD_ID);
@@ -402,14 +411,14 @@ require('http').createServer(async (req, res) => {
   let body = '';
   for await (const c of req) body += c;
   try {
-    const { text, lang = 'fr', score = null, ms = null } = JSON.parse(body);
+    const { text, lang = 'fr', score = null, ms = null, woke = false } = JSON.parse(body);
     const guild = client.guilds.cache.get(process.env.GUILD_ID);
     const id = roles.people().supers[0];
     const member = guild && id && (guild.members.cache.get(id) || (await guild.members.fetch(id).catch(() => null)));
     if (!member || getVoiceConnection(guild.id)) return reply(200, { expect: false }); // on Discord: the PC is not listened to
     console.log(`
 [heard on the PC] ${member.displayName}: "${text}" (${lang}, whisper ${ms} ms${score != null ? `, wake ${score}` : ''})`);
-    await brain.hear({ text, lang, score, member, guild, tEnd: performance.now(), sttMs: ms, io: localIo(guild), expected: score == null });
+    await brain.hear({ text, lang, score, member, guild, tEnd: performance.now(), sttMs: ms, io: localIo(guild), expected: score == null, woke });
     reply(200, { expect: brain.expecting(member.id) });
   } catch (e) {
     console.error('[local]', e.message);

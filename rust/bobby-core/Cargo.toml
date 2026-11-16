@@ -6,3 +6,15 @@ description = "Bobby's brain: shortcuts, context, rights, actions, storage"
 
 [dependencies]
 bobby-proto = { workspace = true }
+serde = { workspace = true }
+# preserve_order: JSON keys keep their insertion order, like JSON.stringify (journal, data mirror)
+serde_json = { workspace = true, features = ["preserve_order"] }
+tokio = { workspace = true }
+rusqlite = { workspace = true }
+chrono = { workspace = true }
+fancy-regex = { workspace = true }
+unicode-normalization = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+bobby-infer = { workspace = true }

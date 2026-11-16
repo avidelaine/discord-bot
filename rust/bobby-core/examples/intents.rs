@@ -19,7 +19,7 @@ use std::time::Instant;
 fn ctx() -> Ctx {
     let m = |name: &str, channel: &str, id: &str, nicknames: &[&str]| {
         let n: Vec<String> = nicknames.iter().map(|s| s.to_string()).collect();
-        Person { id: id.into(), name: name.into(), channel: Some(channel.into()), nicknames: n.clone(), aliases: n }
+        Person { id: id.into(), name: name.into(), channel: Some(channel.into()), nicknames: n.clone(), aliases: n, roles: vec![] }
     };
     let chans = |names: &[&str]| names.iter().map(|n| Chan { id: n.to_string(), name: n.to_string() }).collect::<Vec<_>>();
     let members = vec![

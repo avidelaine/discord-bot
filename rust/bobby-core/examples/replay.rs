@@ -113,7 +113,7 @@ async fn replay(llm: &str, journal: Option<PathBuf>) {
         .as_array()
         .unwrap()
         .iter()
-        .map(|m| Person { id: m["id"].as_str().unwrap().into(), name: m["name"].as_str().unwrap().into(), channel: m["channel"].as_str().map(String::from), nicknames: vec![], aliases: vec![] })
+        .map(|m| Person { id: m["id"].as_str().unwrap().into(), name: m["name"].as_str().unwrap().into(), channel: m["channel"].as_str().map(String::from), nicknames: vec![], aliases: vec![], roles: vec![] })
         .collect();
     let voice = chans(&snap["voiceChannels"]);
     let text_ch = chans(&snap["textChannels"]);

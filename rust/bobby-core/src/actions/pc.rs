@@ -2,7 +2,9 @@
 //! games and apps and every side effect (media, volume, launch, close, lock, sleep, shutdown, GPU); the brain
 //! only caches the app names the client reports, to decide whether "ouvre X" is really an app.
 use crate::types::{ActionDef, Echo, Module, QuickFn, Role, SayFn, Step};
-use crate::util::{group, hit, re, replace1, sim};
+use crate::util::{group, re, replace1, sim};
+#[cfg(test)]
+use crate::util::hit;
 use fancy_regex::Regex;
 use serde_json::{json, Value};
 use std::sync::{LazyLock, RwLock};

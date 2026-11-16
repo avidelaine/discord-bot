@@ -116,6 +116,9 @@ pub fn prompt(ctx: &Ctx, query: &str, lang: &str, history: &[Hist], store: &Stor
             None => by_chan.push((chan, vec![who])),
         }
     }
+    // JS object key order: integer-like keys ("2", "100") come first, ascending
+    let int_key = |c: &str| (!c.is_empty() && c.len() < 10 && c.bytes().all(|b| b.is_ascii_digit()) && (c == "0" || !c.starts_with('0'))).then(|| c.parse::<u64>().unwrap());
+    by_chan.sort_by_key(|(c, _)| int_key(c).map_or((1, 0), |n| (0, n))); // stable: the others keep first-seen order
     let voice = by_chan.iter().map(|(c, n)| format!("{c} ({})", n.join(", "))).collect::<Vec<_>>().join(" ; ");
     let names = |v: &[crate::types::Chan]| v.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ");
     let mut lines = vec![

@@ -116,10 +116,19 @@ pub fn resolve(raw_actions: &[Value], ctx: &Ctx, store: &Store) -> Result<Vec<St
             // a module may fix a known LLM confusion
             let a = raw["type"].as_str().and_then(actions::def).and_then(|d| d.normalize).and_then(|f| f(raw)).unwrap_or_else(|| raw.clone());
             let Some(def) = a["type"].as_str().and_then(actions::def) else { return Err(Say::new("Je n'ai pas compris.", "Sorry, I didn't get that.")) };
-            let text = a["text"].as_str().unwrap_or("").to_string();
+            // the Claude fallback may answer a number ("text": 50): JS kept it truthy
+            let text = match &a["text"] { Value::String(t) => t.clone(), Value::Number(n) => n.to_string(), _ => String::new() };
             let mut step = Step { kind: a["type"].as_str().unwrap_or("").to_string(), text, by: By { id: ctx.speaker.id.clone(), name: ctx.speaker.name.clone(), role: ctx.role }, ..Default::default() };
             for (k, v) in a.as_object().into_iter().flatten() {
-                if !["type", "who", "except", "text", "channel", "list", "to"].contains(&k.as_str()) {
+                // raw fields a def does not resolve stay on the step as in JS ({...a}): alias_rename reads its raw "to"
+                let resolved = match k.as_str() {
+                    "type" | "who" | "except" | "text" => true,
+                    "channel" => def.channel != ChanKind::None,
+                    "list" => def.list,
+                    "to" => def.to,
+                    _ => false,
+                };
+                if !resolved {
                     step.f.insert(k.clone(), v.clone());
                 }
             }
@@ -278,5 +287,15 @@ mod tests {
         assert_eq!(pick("kev du 93", &roster, "person").unwrap().name, "Kévin");
         assert!(pick("Mari", &roster, "person").unwrap_err().fr.contains("tu veux dire"));
         assert!(pick("Bernard", &roster, "person").unwrap_err().fr.contains("Je ne trouve pas"));
+    }
+
+    // review of R3a: raw fields a def does not resolve stay on the step (alias_rename's "to"), numbers become text
+    #[test]
+    fn raw_fields_kept() {
+        let st = Store::temp();
+        let p = resolve(&[serde_json::json!({"type": "alias_rename", "text": "le rat", "to": "le spartiate"})], &crate::testing::ctx(), &st).unwrap();
+        assert_eq!(p[0].str("to"), Some("le spartiate"));
+        let p = resolve(&[serde_json::json!({"type": "music_volume", "text": 50})], &crate::testing::ctx(), &st).unwrap();
+        assert_eq!(p[0].text, "50");
     }
 }

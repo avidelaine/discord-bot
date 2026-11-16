@@ -133,7 +133,9 @@ pub fn messages(text: Option<&str>, embeds: &[Embed]) -> Vec<Out> {
     let first_embed = out.len(); // embeds never join a text message
     for e in embeds {
         let desc = (!e.description.is_empty()).then_some(e.description.as_str());
-        for eo in embed(&e.title, e.color.unwrap_or(COLOR_INFO), desc, &[], None) {
+        let fields: Vec<Field> =
+            e.fields.iter().map(|f| Field { name: f.name.clone(), value: f.value.clone(), inline: f.inline }).collect();
+        for eo in embed(&e.title, e.color.unwrap_or(COLOR_INFO), desc, &fields, e.footer.as_deref()) {
             let fits = out.len() > first_embed
                 && out.last().is_some_and(|m| {
                     m.embeds.len() < 10 && m.embeds.iter().map(size).sum::<usize>() + size(&eo) <= 6000
@@ -148,14 +150,9 @@ pub fn messages(text: Option<&str>, embeds: &[Embed]) -> Vec<Out> {
     out
 }
 
-/// Message payload that never pings: a YouTube title or nickname like "@everyone" stays inert.
-pub fn to_serenity(o: &Out) -> CreateMessage {
-    let mut m = CreateMessage::new().allowed_mentions(CreateAllowedMentions::new()); // empty = parse nothing
-    if let Some(c) = &o.content {
-        m = m.content(c);
-    }
-    let embeds: Vec<CreateEmbed> = o
-        .embeds
+/// Serenity embeds of one message.
+pub fn to_embeds(o: &Out) -> Vec<CreateEmbed> {
+    o.embeds
         .iter()
         .map(|e| {
             let mut ce = CreateEmbed::new().title(&e.title).color(e.color);
@@ -168,7 +165,16 @@ pub fn to_serenity(o: &Out) -> CreateMessage {
             }
             ce
         })
-        .collect();
+        .collect()
+}
+
+/// Message payload that never pings: a YouTube title or nickname like "@everyone" stays inert.
+pub fn to_serenity(o: &Out) -> CreateMessage {
+    let mut m = CreateMessage::new().allowed_mentions(CreateAllowedMentions::new()); // empty = parse nothing
+    if let Some(c) = &o.content {
+        m = m.content(c);
+    }
+    let embeds = to_embeds(o);
     if embeds.is_empty() {
         m
     } else {
@@ -187,7 +193,7 @@ mod tests {
         (0..300).map(|i| format!("ligne {i} {}", "x".repeat(20))).collect::<Vec<_>>().join("\n")
     }
     fn small(n: usize) -> Vec<Embed> {
-        (0..n).map(|_| Embed { title: "t".into(), description: String::new(), color: None }).collect()
+        (0..n).map(|_| Embed { title: "t".into(), description: String::new(), color: None, ..Default::default() }).collect()
     }
 
     #[test]
@@ -281,10 +287,21 @@ mod tests {
 
     #[test]
     fn embeds_group_by_6000_chars() {
-        let big = Embed { title: "t".into(), description: "d".repeat(3500), color: Some(1) };
+        let big = Embed { title: "t".into(), description: "d".repeat(3500), color: Some(1), ..Default::default() };
         let m = messages(None, &[big.clone(), big.clone(), big]);
         assert_eq!(m.iter().map(|x| x.embeds.len()).collect::<Vec<_>>(), vec![1, 1, 1]);
         assert_eq!(m[0].embeds[0].color, 1);
+    }
+
+    #[test]
+    fn card_with_30_fields_and_footer() {
+        let fields = (0..30).map(|i| bobby_proto::msg::EmbedField { name: format!("f{i}"), value: "v".into(), inline: true }).collect();
+        let e = Embed { title: "T".into(), fields, footer: Some("pied".into()), ..Default::default() };
+        let m = messages(None, &[e]);
+        let embeds: Vec<&EmbedOut> = m.iter().flat_map(|x| x.embeds.iter()).collect();
+        assert_eq!(embeds.iter().map(|x| x.fields.len()).collect::<Vec<_>>(), vec![25, 5]);
+        assert_eq!(embeds[1].footer.as_deref(), Some("pied"));
+        assert!(embeds[0].footer.is_none() && embeds[0].fields[0].inline);
     }
 
     #[test]

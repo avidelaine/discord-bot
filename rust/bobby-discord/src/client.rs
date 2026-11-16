@@ -3,11 +3,11 @@
 
 use crate::mixer::{self, MixEvent, Mixer};
 use crate::player::Player;
-use crate::{caps, config::Config, context, receive};
+use crate::{caps, config::Config, context, format, receive};
 use bobby_proto::msg::{BrainMsg, CapKind, ClientKind, ClientMsg, Context as BrainContext, PROTO_VERSION};
 use serenity::all::{
-    ChannelId, ChannelType, Command, CommandInteraction, CreateCommand, CreateEmbed, CreateInteractionResponse,
-    CreateInteractionResponseMessage, EventHandler, GatewayIntents, GuildId, Interaction, Ready, UserId,
+    ChannelId, ChannelType, Command, CommandInteraction, CreateAllowedMentions, CreateCommand, CreateInteractionResponse,
+    CreateInteractionResponseFollowup, CreateInteractionResponseMessage, EventHandler, GatewayIntents, GuildId, Interaction, Ready, UserId,
 };
 use serenity::cache::Cache;
 use serenity::http::Http;
@@ -17,7 +17,7 @@ use songbird::{SerenityInit, Songbird};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
@@ -29,6 +29,8 @@ struct State {
     /// Where Bobby posts, remembered from the last `/join` (or `TEXT_CHANNEL`, see `default_text`).
     text_channel: Option<ChannelId>,
     joiner: Option<UserId>,
+    /// Who typed the last `/join`, and when (see `Cap::Join`).
+    last_join_cmd: Option<(UserId, Instant)>,
     pending: HashMap<u64, oneshot::Sender<BrainMsg>>,
     /// Last context sent, so an unchanged one is not resent before every utterance.
     last_ctx: Option<BrainContext>,
@@ -57,6 +59,14 @@ pub struct Bot {
 impl Bot {
     pub fn joiner(&self) -> Option<UserId> {
         self.state.lock().unwrap().joiner
+    }
+
+    pub fn last_join_cmd(&self) -> Option<(UserId, Instant)> {
+        self.state.lock().unwrap().last_join_cmd
+    }
+
+    pub fn set_joiner(&self, u: UserId) {
+        self.state.lock().unwrap().joiner = Some(u);
     }
 
     pub fn send(&self, msg: ClientMsg) {
@@ -146,7 +156,9 @@ impl Bot {
         let user = cmd.user.id;
         let text = self.text_for(cmd.channel_id);
         if cmd.data.name == "join" {
-            self.state.lock().unwrap().text_channel = Some(text);
+            let mut st = self.state.lock().unwrap();
+            st.text_channel = Some(text);
+            st.last_join_cmd = Some((user, Instant::now()));
         }
         self.send_context(user);
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -154,25 +166,43 @@ impl Bot {
         self.state.lock().unwrap().pending.insert(id, tx);
         self.send(ClientMsg::Command { id, name: cmd.data.name.clone(), user: user.to_string(), text_channel: text.to_string() });
         let reply = tokio::time::timeout(REPLY_WAIT, rx).await;
-        let mut msg = CreateInteractionResponseMessage::new();
-        match reply {
-            Ok(Ok(BrainMsg::Reply { text, embeds, ephemeral, .. })) => {
-                msg = msg.ephemeral(ephemeral).content(text.unwrap_or_default());
-                for e in embeds {
-                    let mut em = CreateEmbed::new().title(e.title).description(e.description);
-                    if let Some(c) = e.color {
-                        em = em.color(c);
-                    }
-                    msg = msg.add_embed(em);
-                }
-            }
+        let (outs, ephemeral) = match reply {
+            Ok(Ok(BrainMsg::Reply { text, embeds, ephemeral, .. })) => (format::messages(text.as_deref(), &embeds), ephemeral),
             _ => {
                 self.state.lock().unwrap().pending.remove(&id);
-                msg = msg.ephemeral(true).content("Bobby ne répond pas.");
+                (vec![format::Out { content: Some("Bobby ne répond pas.".into()), embeds: vec![] }], true)
             }
+        };
+        let mut outs = outs.into_iter();
+        let first = outs.next().unwrap_or_default();
+        let mut msg = CreateInteractionResponseMessage::new()
+            .ephemeral(ephemeral)
+            .allowed_mentions(CreateAllowedMentions::new()); // empty = parse nothing
+        let embeds = format::to_embeds(&first);
+        msg = match first.content {
+            Some(c) => msg.content(c),
+            None if embeds.is_empty() => msg.content("…"),
+            None => msg,
+        };
+        if !embeds.is_empty() {
+            msg = msg.embeds(embeds);
         }
         if let Err(e) = cmd.create_response(&self.http, CreateInteractionResponse::Message(msg)).await {
             eprintln!("[command] reply failed: {e}");
+            return;
+        }
+        for o in outs {
+            let mut f = CreateInteractionResponseFollowup::new().ephemeral(ephemeral).allowed_mentions(CreateAllowedMentions::new());
+            let embeds = format::to_embeds(&o);
+            if let Some(c) = o.content {
+                f = f.content(c);
+            }
+            if !embeds.is_empty() {
+                f = f.embeds(embeds);
+            }
+            if let Err(e) = cmd.create_followup(&self.http, f).await {
+                eprintln!("[command] follow-up failed: {e}");
+            }
         }
     }
 

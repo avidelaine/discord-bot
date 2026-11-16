@@ -7,10 +7,29 @@ use serde_json::{json, Value};
 use serenity::all::{
     ChannelId, ChannelType, CreateAllowedMentions, CreateMessage, EditMember, EditMessage, GetMessages, Message, MessageId, UserId,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 type Res = Result<Value, String>;
+
+/// Bumped by every Join: a delayed Leave only disconnects if no join happened meanwhile.
+static JOIN_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// Discord error text; code 50013 (missing permissions) is prefixed so the brain can tell.
+fn dc(e: serenity::Error) -> String {
+    use serenity::http::HttpError;
+    if let serenity::Error::Http(HttpError::UnsuccessfulRequest(r)) = &e {
+        if let Some(t) = code_text(r.error.code, &r.error.message) {
+            return t;
+        }
+    }
+    e.to_string()
+}
+
+fn code_text(code: isize, message: &str) -> Option<String> {
+    (code == 50013).then(|| format!("50013 {message}"))
+}
 
 fn uid(s: &str) -> Result<UserId, String> {
     s.parse::<u64>().ok().filter(|n| *n > 0).map(UserId::new).ok_or_else(|| format!("bad user id {s}"))
@@ -86,7 +105,7 @@ async fn discord(bot: &Arc<Bot>, cap: Cap) -> Res {
                 let user = uid(u)?;
                 let before = bot.cache.guild(g).and_then(|gd| gd.voice_states.get(&user).and_then(|v| v.channel_id));
                 prev.insert(u.clone(), before.map_or(Value::Null, |c| json!(c.to_string())));
-                g.edit_member(h, user, EditMember::new().voice_channel(to)).await.map_err(|e| e.to_string())?;
+                g.edit_member(h, user, EditMember::new().voice_channel(to)).await.map_err(dc)?;
                 follow |= bot.joiner() == Some(user);
             }
             // Approximation of `io.follow` (bot.js): the client does not know who spoke, so Bobby follows
@@ -98,34 +117,50 @@ async fn discord(bot: &Arc<Bot>, cap: Cap) -> Res {
         }
         Cap::Disconnect { users } => {
             for u in &users {
-                g.disconnect_member(h, uid(u)?).await.map_err(|e| e.to_string())?;
+                g.disconnect_member(h, uid(u)?).await.map_err(dc)?;
             }
             Ok(Value::Null)
         }
         Cap::Join { channel } => {
             let c = cid(&channel)?;
-            if bot.songbird.get(g).is_some() {
-                // Keeps the receive handlers and the music running (a fresh join would drop them).
-                bot.move_to(c).await;
-                return Ok(Value::Null);
+            JOIN_GEN.fetch_add(1, Ordering::SeqCst);
+            // The person who just typed /join becomes the joiner (the one Bobby follows).
+            let typer = bot.last_join_cmd().filter(|(_, t)| t.elapsed() < Duration::from_secs(10)).map(|(u, _)| u);
+            if let Some(u) = typer {
+                bot.set_joiner(u);
             }
-            let j = bot.joiner().or_else(|| bot.cfg.super_admins.first().map(|u| UserId::new(*u))).ok_or("no joiner known")?;
-            bot.join(c, j).await.map(|_| Value::Null)
+            if let Some(call) = bot.songbird.get(g) {
+                // Keeps the receive handlers and the music running (a fresh join would drop them).
+                let prev = bot.move_to(c).await;
+                let here = call.lock().await.current_channel().map(|x| x.0.get());
+                if prev.is_none() && here != Some(c.get()) {
+                    return Err(format!("could not move to channel {channel}"));
+                }
+                return Ok(json!({ "prev": prev.map_or(Value::Null, |p| json!(p.to_string())) }));
+            }
+            let j = typer
+                .or_else(|| bot.joiner())
+                .or_else(|| bot.cfg.super_admins.first().filter(|u| **u > 0).map(|u| UserId::new(*u)))
+                .ok_or("no joiner known")?;
+            bot.join(c, j).await.map(|_| json!({ "prev": Value::Null }))
         }
         Cap::Leave => {
             // Music stops now, the connection goes 3 s later so the farewell is heard (bot.js `leave`).
             bot.player.stop().await;
             let b = bot.clone();
+            let gen = JOIN_GEN.load(Ordering::SeqCst);
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(3)).await;
-                b.leave().await;
+                if JOIN_GEN.load(Ordering::SeqCst) == gen {
+                    b.leave().await;
+                }
             });
             Ok(Value::Null)
         }
         Cap::Post { channel, text, embeds } => {
             let (ch, name) = text_channel(bot, channel.as_deref())?;
             for o in format::messages(text.as_deref(), &embeds) {
-                ch.send_message(h, format::to_serenity(&o)).await.map_err(|e| e.to_string())?;
+                ch.send_message(h, format::to_serenity(&o)).await.map_err(dc)?;
             }
             Ok(json!({ "channel": name }))
         }
@@ -133,14 +168,14 @@ async fn discord(bot: &Arc<Bot>, cap: Cap) -> Res {
             let (ch, _) = text_channel(bot, channel.as_deref())?;
             let ids = users.iter().map(|u| uid(u)).collect::<Result<Vec<_>, _>>()?;
             let m = CreateMessage::new().content(ping_content(&users, &text)).allowed_mentions(CreateAllowedMentions::new().users(ids));
-            ch.send_message(h, m).await.map_err(|e| e.to_string())?;
+            ch.send_message(h, m).await.map_err(dc)?;
             Ok(Value::Null)
         }
         Cap::EditLast { channel, text } => {
             let (ch, _) = text_channel(bot, channel.as_deref())?;
             let found = own(bot, ch, false, 300).await?.into_iter().next();
             if let Some(mut m) = found.clone() {
-                m.edit(h, EditMessage::new().content(text)).await.map_err(|e| e.to_string())?;
+                m.edit(h, EditMessage::new().content(edit_text(&text)).allowed_mentions(CreateAllowedMentions::new())).await.map_err(dc)?;
             }
             Ok(json!({ "found": found.is_some() }))
         }
@@ -148,7 +183,7 @@ async fn discord(bot: &Arc<Bot>, cap: Cap) -> Res {
             let (ch, _) = text_channel(bot, channel.as_deref())?;
             let found = own(bot, ch, false, 300).await?.into_iter().next();
             if let Some(m) = &found {
-                m.delete(h).await.map_err(|e| e.to_string())?;
+                m.delete(h).await.map_err(dc)?;
             }
             Ok(json!({ "found": found.is_some() }))
         }
@@ -186,7 +221,7 @@ async fn voice_set(bot: &Arc<Bot>, users: &[String], on: bool, mute: bool) -> Re
         let before = bot.cache.guild(bot.guild).and_then(|g| g.voice_states.get(&user).map(|v| if mute { v.mute } else { v.deaf }));
         prev.insert(u.clone(), json!(before.unwrap_or(false)));
         let edit = if mute { EditMember::new().mute(on) } else { EditMember::new().deafen(on) };
-        bot.guild.edit_member(&bot.http, user, edit).await.map_err(|e| e.to_string())?;
+        bot.guild.edit_member(&bot.http, user, edit).await.map_err(dc)?;
     }
     Ok(json!({ "prev": prev }))
 }
@@ -218,7 +253,7 @@ async fn own(bot: &Bot, ch: ChannelId, all: bool, max: usize) -> Result<Vec<Mess
         if let Some(b) = before {
             q = q.before(b);
         }
-        let batch = ch.messages(&bot.http, q).await.map_err(|e| e.to_string())?;
+        let batch = ch.messages(&bot.http, q).await.map_err(dc)?;
         let Some(last) = batch.last() else { break };
         before = Some(last.id);
         seen += batch.len();
@@ -249,6 +284,11 @@ fn neutralise(text: &str) -> String {
     out
 }
 
+/// Edited text: broadcast mentions neutralised, cut to Discord's 2000 chars.
+fn edit_text(text: &str) -> String {
+    neutralise(text).chars().take(2000).collect()
+}
+
 /// `<@id> <@id> text`, trimmed, with the broadcast mentions neutralised.
 fn ping_content(users: &[String], text: &str) -> String {
     let m: Vec<String> = users.iter().map(|u| format!("<@{u}>")).collect();
@@ -271,6 +311,24 @@ mod tests {
     #[test]
     fn neutralise_strips_broadcast_mentions() {
         assert_eq!(neutralise("hi @everyone and @Here, @bob @"), "hi everyone and Here, @bob @");
+    }
+
+    #[test]
+    fn edit_text_is_neutral_and_char_safe() {
+        assert_eq!(edit_text("@everyone"), "everyone");
+        assert_eq!(edit_text(&"é".repeat(2500)).chars().count(), 2000);
+    }
+
+    #[test]
+    fn permission_error_code_is_prefixed() {
+        assert_eq!(code_text(50013, "Missing Permissions").as_deref(), Some("50013 Missing Permissions"));
+        assert_eq!(code_text(10003, "Unknown Channel"), None);
+    }
+
+    #[test]
+    fn ids_of_zero_are_rejected() {
+        assert!(uid("0").is_err() && cid("0").is_err() && uid("x").is_err());
+        assert!(uid("5").is_ok());
     }
 
     #[test]
@@ -302,12 +360,12 @@ pub fn ring(bot: &Arc<Bot>, on: bool, owner: UserId) {
     crate::speech::ring(bot, on, Some(owner));
 }
 
-/// Signal / Say / Hush (stub: logs only); Expect opens the no-wake-word window.
+/// Signal / Say / Hush go to `speech`; Expect opens the no-wake-word window.
 pub async fn brain_msg(bot: &Arc<Bot>, msg: BrainMsg) {
     match msg {
-        BrainMsg::Expect { user, ms } => match user.parse::<u64>() {
-            Ok(u) => bot.listen.lock().unwrap().expect(UserId::new(u), ms),
-            Err(_) => eprintln!("[caps] expect: bad user id {user}"),
+        BrainMsg::Expect { user, ms } => match user.parse::<u64>().ok().filter(|&u| u > 0) {
+            Some(u) => bot.listen.lock().unwrap().expect(UserId::new(u), ms),
+            None => eprintln!("[caps] expect: bad user id {user}"),
         },
         BrainMsg::Signal { kind } => crate::speech::signal(bot, kind),
         BrainMsg::Say { text, lang, voice, to_user } => crate::speech::say(bot, text, lang, voice, to_user),

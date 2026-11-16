@@ -320,6 +320,7 @@ impl Player {
                 item.title = next.station.clone();
                 item.station = Some(next.station);
                 item.url = next.url;
+                drop_upcoming(&mut st);
                 self.start(&mut st, item, false);
                 return;
             }
@@ -333,7 +334,8 @@ impl Player {
         loop {
             let next = self.st.lock().await.queue.pop_front();
             let Some(it) = next else { break };
-            if self.play_src(Src::Item(it), false).await.get("error").is_none() {
+            let r = self.play_src(Src::Item(it), false).await;
+            if r.get("error").is_none() || r["error"] == "superseded" {
                 return;
             }
         }
@@ -354,7 +356,8 @@ impl Player {
                 }
             }
             if let Some(n) = next {
-                if self.play_src(Src::Resolved(n), false).await.get("error").is_none() {
+                let r = self.play_src(Src::Resolved(n), false).await;
+                if r.get("error").is_none() || r["error"] == "superseded" {
                     return;
                 }
             }
@@ -456,6 +459,7 @@ impl Player {
         let Some(item) = st.current.as_ref().map(|c| c.item.clone()) else { return json!({ "error": "nothing is playing" }) };
         self.mx().stop_music(Fade::None);
         self.set_paused(&mut st, false);
+        drop_upcoming(&mut st);
         let now = self.start(&mut st, item, false);
         json!({ "nowPlaying": now })
     }

@@ -6,3 +6,15 @@ description = "Discord connection, voice, music"
 
 [dependencies]
 bobby-proto = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true, features = ["blocking", "stream"] }
+serenity = { workspace = true, features = ["client", "gateway", "voice", "cache", "model", "rustls_backend"] }
+songbird = { workspace = true, features = ["receive"] }
+# songbird 0.6.1 is built on symphonia 0.5 (not the workspace's 0.6): one version for both songbird's
+# RawAdapter (`pcm`) and our own decoding of radio/TTS (mp3, aac, wav), so the binary carries one symphonia.
+symphonia = { version = "0.5", default-features = false, features = ["pcm", "wav", "mp3", "aac", "isomp4"] }
+rubato = { workspace = true }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"

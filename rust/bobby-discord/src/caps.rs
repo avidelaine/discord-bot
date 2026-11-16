@@ -126,15 +126,20 @@ async fn discord(bot: &Arc<Bot>, cap: Cap) -> Res {
             JOIN_GEN.fetch_add(1, Ordering::SeqCst);
             // The person who just typed /join becomes the joiner (the one Bobby follows).
             let typer = bot.last_join_cmd().filter(|(_, t)| t.elapsed() < Duration::from_secs(10)).map(|(u, _)| u);
-            if let Some(u) = typer {
-                bot.set_joiner(u);
-            }
-            if let Some(call) = bot.songbird.get(g) {
+            // A call kicked out of voice (no current channel) is not connected: join afresh.
+            let call = match bot.songbird.get(g) {
+                Some(call) if call.lock().await.current_channel().is_some() => Some(call),
+                _ => None,
+            };
+            if let Some(call) = call {
                 // Keeps the receive handlers and the music running (a fresh join would drop them).
                 let prev = bot.move_to(c).await;
                 let here = call.lock().await.current_channel().map(|x| x.0.get());
                 if prev.is_none() && here != Some(c.get()) {
                     return Err(format!("could not move to channel {channel}"));
+                }
+                if let Some(u) = typer {
+                    bot.set_joiner(u); // only once the join really happened
                 }
                 return Ok(json!({ "prev": prev.map_or(Value::Null, |p| json!(p.to_string())) }));
             }

@@ -125,6 +125,7 @@ pub fn embed(title: &str, color: u32, description: Option<&str>, fields: &[Field
 /// What a `Post` sends: text (content chunks of 2000) then embeds (split, grouped 10 and 6000 chars per message).
 pub fn messages(text: Option<&str>, embeds: &[Embed]) -> Vec<Out> {
     let mut out: Vec<Out> = text
+        .filter(|t| !t.trim().is_empty()) // Discord refuses a blank message
         .map(|t| chunks(t, 2000))
         .unwrap_or_default()
         .into_iter()

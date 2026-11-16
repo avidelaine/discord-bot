@@ -280,6 +280,7 @@ async fn say_core(
             eprintln!("[tts] {e}");
             if ours() {
                 clear_speech(st, listen);
+                end_speaking(st, speaking); // a reply this one interrupted may have said Speaking(Some)
             }
             return;
         }
@@ -289,7 +290,8 @@ async fn say_core(
     }
     let clip = st.lock().unwrap().clip.clone();
     if let Some(mut c) = clip {
-        let _ = c.wait_for(|v| *v).await; // the ack or the low sound just played ends first
+        // the ack or the low sound just played ends first (bounded: a clip nobody pulls must not hang the reply)
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), c.wait_for(|v| *v)).await;
     }
     if !ours() {
         return;

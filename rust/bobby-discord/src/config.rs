@@ -46,7 +46,7 @@ impl Config {
         let need = |k: &str| get(k).filter(|v| !v.is_empty()).ok_or_else(|| format!("{k} is missing"));
         Ok(Config {
             token: need("DISCORD_TOKEN")?,
-            guild_id: need("GUILD_ID")?.parse().map_err(|_| "GUILD_ID is not a number".to_string())?,
+            guild_id: need("GUILD_ID")?.parse().ok().filter(|&g: &u64| g > 0).ok_or_else(|| "GUILD_ID is not a valid id".to_string())?,
             text_channel: get("TEXT_CHANNEL").unwrap_or_default(),
             voice_url: get("VOICE_URL").filter(|v| !v.is_empty()).unwrap_or_else(|| "http://127.0.0.1:3000".into()),
             silence_ms: get("RECORD_SILENCE_MS").and_then(|v| v.trim().parse().ok()).unwrap_or(600),

@@ -10,7 +10,7 @@ use crate::mixer::Mixer;
 use crate::pcm::{pipe, PcmRx, FRAME};
 use crate::receive::Listen;
 use crate::sources::decode_wav;
-use bobby_proto::msg::{SignalKind, Voice};
+use bobby_proto::msg::{ClientMsg, SignalKind, Voice};
 use serenity::all::UserId;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -83,6 +83,8 @@ pub struct Speech {
     acks: HashMap<&'static str, Arc<Vec<i16>>>,
     last_ack: Option<&'static str>,
     acks_loading: bool,
+    /// A `Speaking { user: Some }` went out and its `None` has not.
+    told: bool,
 }
 
 type MixerRef = Arc<Mutex<Mixer>>;
@@ -103,7 +105,8 @@ fn collect(mut rx: PcmRx) -> Vec<i16> {
 }
 
 async fn fetch_tts(voice_url: &str, lang: &str, voice: &str, text: &str) -> Result<Vec<i16>, String> {
-    let res = reqwest::Client::new()
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
+    let res = client
         .get(format!("{}/tts", voice_url.trim_end_matches('/')))
         .query(&[("lang", lang), ("voice", voice), ("text", text)])
         .send()
@@ -242,8 +245,26 @@ fn clear_speech(st: &Mutex<Speech>, listen: &Mutex<Listen>) {
     listen.lock().unwrap().speaking_to = None;
 }
 
+/// Tells the brain Bobby stopped speaking, only if it was told he started.
+fn end_speaking(st: &Mutex<Speech>, speaking: &(dyn Fn(Option<String>) + Sync)) {
+    let was = std::mem::replace(&mut st.lock().unwrap().told, false);
+    if was {
+        speaking(None);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-async fn say_core(mixer: &MixerRef, st: &Mutex<Speech>, listen: &Mutex<Listen>, voice_url: &str, text: &str, lang: &str, voice: &str, to: Option<UserId>) {
+async fn say_core(
+    mixer: &MixerRef,
+    st: &Mutex<Speech>,
+    listen: &Mutex<Listen>,
+    speaking: &(dyn Fn(Option<String>) + Sync),
+    voice_url: &str,
+    text: &str,
+    lang: &str,
+    voice: &str,
+    to: Option<UserId>,
+) {
     eprintln!("[{voice}] {text}");
     let me = {
         let mut s = st.lock().unwrap();
@@ -275,14 +296,24 @@ async fn say_core(mixer: &MixerRef, st: &Mutex<Speech>, listen: &Mutex<Listen>, 
     }
     ring_stop_core(mixer, st, None);
     pcm.resize(pcm.len() + TAIL, 0);
+    let secs = pcm.len() as u64 / (48_000 * 2) + 5;
     let done = mixer.lock().unwrap().overlay(PcmRx::from_vec(pcm));
-    let _ = done.await;
+    if let Some(u) = to {
+        st.lock().unwrap().told = true;
+        speaking(Some(u.to_string()));
+    }
+    // Clip length + 5 s: a mixer nobody pulls (not in voice) must not hold this reply forever.
+    if tokio::time::timeout(Duration::from_secs(secs), done).await.is_err() && ours() {
+        mixer.lock().unwrap().stop_overlay();
+    }
     if ours() {
         clear_speech(st, listen);
+        end_speaking(st, speaking);
     }
 }
 
-fn hush_core(mixer: &MixerRef, st: &Mutex<Speech>, listen: &Mutex<Listen>) {
+fn hush_core(mixer: &MixerRef, st: &Mutex<Speech>, listen: &Mutex<Listen>, speaking: &(dyn Fn(Option<String>) + Sync)) {
+    end_speaking(st, speaking);
     clear_speech(st, listen);
     ring_stop_core(mixer, st, None);
     mixer.lock().unwrap().stop_overlay();
@@ -314,21 +345,24 @@ pub fn ring(bot: &Arc<Bot>, on: bool, owner: Option<UserId>) {
 /// Spawned, so the brain loop is not blocked while the reply is synthesized and played.
 pub fn say(bot: &Arc<Bot>, text: String, lang: String, voice: Voice, to_user: Option<String>) {
     let bot = bot.clone();
-    let to = to_user.and_then(|u| u.parse::<u64>().ok()).map(UserId::new);
+    let to = to_user.and_then(|u| u.parse::<u64>().ok()).filter(|&n| n > 0).map(UserId::new);
     let v = match voice {
         Voice::Bobby => "bobby",
         Voice::Claude => "claude",
     };
-    tokio::spawn(async move { say_core(&bot.mixer, &bot.speech, &bot.listen, &bot.cfg.voice_url, &text, &lang, v, to).await });
+    tokio::spawn(async move {
+        let speaking = |user| bot.send(ClientMsg::Speaking { user });
+        say_core(&bot.mixer, &bot.speech, &bot.listen, &speaking, &bot.cfg.voice_url, &text, &lang, v, to).await
+    });
 }
 
 pub fn hush(bot: &Arc<Bot>) {
-    hush_core(&bot.mixer, &bot.speech, &bot.listen);
+    hush_core(&bot.mixer, &bot.speech, &bot.listen, &|user| bot.send(ClientMsg::Speaking { user }));
 }
 
 /// Leave / disconnect: speech cleared, ring and overlay stopped.
 pub fn stop_all(bot: &Arc<Bot>) {
-    hush_core(&bot.mixer, &bot.speech, &bot.listen);
+    hush_core(&bot.mixer, &bot.speech, &bot.listen, &|user| bot.send(ClientMsg::Speaking { user }));
 }
 
 #[cfg(test)]
@@ -437,7 +471,7 @@ mod tests {
         let listen = Arc::new(Mutex::new(Listen::default()));
         let task = {
             let (m, st, listen) = (m.clone(), st.clone(), listen.clone());
-            tokio::spawn(async move { say_core(&m, &st, &listen, &url, "Salut", "fr", "bobby", Some(UserId::new(5))).await })
+            tokio::spawn(async move { say_core(&m, &st, &listen, &|_| {}, &url, "Salut", "fr", "bobby", Some(UserId::new(5))).await })
         };
         for _ in 0..200 {
             if m.lock().unwrap().has_overlay() {
@@ -462,7 +496,7 @@ mod tests {
         let (m, _ev) = mixer();
         let st = Mutex::new(Speech::default());
         let listen = Mutex::new(Listen::default());
-        say_core(&m, &st, &listen, "http://127.0.0.1:1", "x", "fr", "bobby", Some(UserId::new(1))).await;
+        say_core(&m, &st, &listen, &|_| {}, "http://127.0.0.1:1", "x", "fr", "bobby", Some(UserId::new(1))).await;
         assert!(listen.lock().unwrap().speaking_to.is_none() && !m.lock().unwrap().has_overlay());
     }
 

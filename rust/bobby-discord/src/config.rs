@@ -51,7 +51,7 @@ impl Config {
             voice_url: get("VOICE_URL").filter(|v| !v.is_empty()).unwrap_or_else(|| "http://127.0.0.1:3000".into()),
             silence_ms: get("RECORD_SILENCE_MS").and_then(|v| v.trim().parse().ok()).unwrap_or(600),
             super_admins: get("SUPER_ADMINS")
-                .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+                .map(|s| s.split(',').filter_map(|x| x.trim().parse::<u64>().ok()).filter(|&n| n > 0).collect())
                 .unwrap_or_default(),
         })
     }

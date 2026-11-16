@@ -281,7 +281,7 @@ impl VoiceHandler for Rx {
             let mut g = self.0.inner.lock().unwrap();
             match ctx {
                 EventContext::SpeakingStateUpdate(s) => {
-                    if let Some(u) = s.user_id {
+                    if let Some(u) = s.user_id.filter(|u| u.0 > 0) {
                         let user = UserId::new(u.0);
                         g.ssrc_user.insert(s.ssrc, user);
                         if !s.speaking.is_empty() {
@@ -376,7 +376,10 @@ impl Shared {
             .unwrap_or_else(|| "Bobby".into());
         let url = listen_url(&bot.cfg.voice_url, force, &hotwords);
         let b = bot.clone();
-        let res = exchange(&url, pcm, move |on| caps::ring(&b, on, user)).await;
+        let res = match tokio::time::timeout(Duration::from_secs(30), exchange(&url, pcm, move |on| caps::ring(&b, on, user))).await {
+            Ok(r) => r,
+            Err(_) => Err("voice service timed out (30 s)".to_string()),
+        };
         caps::ring(bot, false, user);
         match res {
             Ok(Outcome { gate: Some(Gate { wake: Some(false), score }), .. }) => {

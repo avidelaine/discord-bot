@@ -3,7 +3,7 @@
 
 use crate::mixer::{self, MixEvent, Mixer};
 use crate::player::Player;
-use crate::{caps, config::Config, context, receive};
+use crate::{caps, config::Config, context, receive, speech};
 use bobby_proto::msg::{BrainMsg, CapKind, ClientKind, ClientMsg, Context as BrainContext, PROTO_VERSION};
 use serenity::all::{
     ChannelId, ChannelType, Command, CommandInteraction, CreateCommand, CreateEmbed, CreateInteractionResponse,
@@ -15,7 +15,7 @@ use serenity::{async_trait, Client};
 use songbird::driver::{Channels, DecodeConfig, DecodeMode, SampleRate};
 use songbird::{SerenityInit, Songbird};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -52,11 +52,20 @@ pub struct Bot {
     /// Debounce and 2 minute leave timers of the never-alone behaviour (see `alone`).
     pub alone: std::sync::Mutex<crate::alone::Alone>,
     next_id: AtomicU64,
+    /// The mixer's songbird track: a duplicate `Start` replaces it instead of adding a second puller.
+    mix_track: Mutex<Option<songbird::tracks::TrackHandle>>,
+    /// `ready` fires again on a gateway re-identify: Hello and acks go out once per process.
+    hello_sent: AtomicBool,
 }
 
 impl Bot {
     pub fn joiner(&self) -> Option<UserId> {
         self.state.lock().unwrap().joiner
+    }
+
+    /// Who typed /join, for the never-alone behaviour (the brain sets it when it joins on someone's behalf).
+    pub fn set_joiner(&self, u: UserId) {
+        self.state.lock().unwrap().joiner = Some(u);
     }
 
     pub fn send(&self, msg: ClientMsg) {
@@ -92,6 +101,7 @@ impl Bot {
         // A second join must not stack a second listener (double actions): start from a fresh call.
         if self.songbird.get(self.guild).is_some() {
             let _ = self.songbird.remove(self.guild).await;
+            self.mixer.lock().unwrap().detach();
         }
         self.state.lock().unwrap().joiner = Some(joiner);
         crate::alone::reset(self);
@@ -105,6 +115,7 @@ impl Bot {
             }
             _ => {
                 let _ = self.songbird.remove(self.guild).await;
+                self.mixer.lock().unwrap().detach();
                 Err("Connexion vocale impossible.".into())
             }
         }
@@ -131,8 +142,9 @@ impl Bot {
         }
     }
 
-    pub async fn leave(&self) {
+    pub async fn leave(self: &Arc<Self>) {
         crate::alone::reset(self);
+        speech::stop_all(self);
         let _ = self.songbird.remove(self.guild).await;
         self.mixer.lock().unwrap().detach();
     }
@@ -182,12 +194,23 @@ impl Bot {
             match ev {
                 MixEvent::Start => match self.songbird.get(self.guild) {
                     Some(call) => {
-                        call.lock().await.play_input(mixer::input(self.mixer.clone()));
+                        // Stop the previous puller first: two inputs on one mixer play at double speed.
+                        let mut c = call.lock().await;
+                        let old = self.mix_track.lock().unwrap().take();
+                        if let Some(old) = old {
+                            let _ = old.stop();
+                        }
+                        let h = c.play_input(mixer::input(self.mixer.clone()));
+                        *self.mix_track.lock().unwrap() = Some(h);
                     }
                     // Not in voice: nobody pulls frames. `restart` after the next join plays what is left.
                     None => self.mixer.lock().unwrap().detach(),
                 },
-                MixEvent::MusicEnded { tag, read } => self.player.on_ended(tag, read).await,
+                // Spawned: on_ended may wait on yt-dlp for 20 s and Starts must not queue behind it.
+                MixEvent::MusicEnded { tag, read } => {
+                    let bot = self.clone();
+                    tokio::spawn(async move { bot.player.on_ended(tag, read).await });
+                }
             }
         }
     }
@@ -223,13 +246,16 @@ impl EventHandler for Handler {
     async fn ready(&self, _: serenity::all::Context, ready: Ready) {
         let Some(bot) = self.0.get() else { return };
         eprintln!("[discord] online as {}", ready.user.name);
+        if bot.hello_sent.swap(true, Ordering::SeqCst) {
+            return;
+        }
         bot.send(ClientMsg::Hello {
             v: PROTO_VERSION,
             device: "discord".into(),
             kind: ClientKind::Discord,
             caps: vec![CapKind::DiscordVoice, CapKind::DiscordText, CapKind::Music],
         });
-        crate::speech::spawn_acks(bot.clone());
+        speech::spawn_acks(bot.clone());
         // Drop global commands left by older versions: only the server ones below remain.
         if let Err(e) = Command::set_global_commands(&bot.http, vec![]).await {
             eprintln!("[discord] clearing global commands failed: {e}");
@@ -286,6 +312,8 @@ pub async fn run(cfg: Config, from_brain: UnboundedReceiver<BrainMsg>, to_brain:
         player: Player::new(mixer.clone()),
         mixer,
         next_id: AtomicU64::new(1),
+        mix_track: Mutex::new(None),
+        hello_sent: AtomicBool::new(false),
     });
     let _ = slot.set(bot.clone());
     tokio::spawn(bot.clone().mix_events(mix_rx));

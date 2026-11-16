@@ -66,6 +66,7 @@ pub fn on_voice_update(bot: &Arc<Bot>) {
 async fn check(bot: &Arc<Bot>) {
     let Some(call) = bot.songbird.get(bot.guild) else { return };
     let Some(here) = call.lock().await.current_channel().map(|c| ChannelId::new(c.0.get())) else { return };
+    let me = bot.cache.current_user().id;
     let voice: Vec<(UserId, ChannelId)> = bot
         .cache
         .guild(bot.guild)
@@ -73,8 +74,9 @@ async fn check(bot: &Arc<Bot>) {
             g.voice_states
                 .values()
                 .filter_map(|v| {
-                    let bot_user = g.members.get(&v.user_id).map(|m| m.user.bot).unwrap_or(false);
-                    (!bot_user).then_some(()).and(v.channel_id).map(|c| (v.user_id, c))
+                    // Only a cached, non-bot member counts as a human (not Bobby himself).
+                    let human = v.user_id != me && g.members.get(&v.user_id).is_some_and(|m| !m.user.bot);
+                    human.then_some(()).and(v.channel_id).map(|c| (v.user_id, c))
                 })
                 .collect()
         })

@@ -124,8 +124,10 @@ impl Mixer {
     }
 
     /// Nobody pulls frames any more (not in voice, or the call is gone): the next sound sends `Start` again.
+    /// The overlay stops too: its waiters (a reply being spoken) resolve instead of hanging.
     pub fn detach(&mut self) {
         self.active = false;
+        self.stop_overlay();
     }
 
     /// A new call exists: start pulling if anything is waiting to be heard.
@@ -291,6 +293,17 @@ mod tests {
         let start = f.iter().position(|&v| v < 7900).expect("fade starts");
         assert!(f[f.len() - 1] < 250 && f.len() <= start + (FADE_OUT * 50.0) as usize + 3, "fades within FADE_OUT ({start}..{})", f.len());
         assert!(f[start..].windows(2).all(|w| w[1] <= w[0]), "monotonic decrease");
+    }
+
+    #[test]
+    fn detach_resolves_overlay_and_idle_restart_sends_no_start() {
+        let (mut m, mut ev) = mixer();
+        let mut done = m.overlay(dc(100, 50));
+        assert_eq!(ev.try_recv(), Ok(MixEvent::Start));
+        m.detach();
+        assert!(!m.has_overlay() && done.try_recv().is_ok(), "overlay receiver resolved");
+        m.restart();
+        assert!(ev.try_recv().is_err(), "nothing to play: no Start");
     }
 
     #[test]

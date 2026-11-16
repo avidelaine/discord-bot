@@ -2,11 +2,21 @@
 use crate::gate::{BLOCK, RATE};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use rubato::{Fft, FixedSync, Resampler};
 
 /// Keeps the stream alive; the microphone stops when this is dropped.
 pub struct Mic {
     _stream: cpal::Stream,
+    failed: Arc<AtomicBool>,
+}
+
+impl Mic {
+    /// Set by the stream's error callback (device unplugged, driver reset...): the stream is dead.
+    pub fn failed(&self) -> bool {
+        self.failed.load(Ordering::SeqCst)
+    }
 }
 
 /// Downmix to mono, resample to 16 kHz (state kept across calls), regroup into BLOCK-sample blocks.
@@ -15,17 +25,21 @@ pub struct To16k {
     resampler: Option<Fft<f32>>, // None when the device is already at 16 kHz
     mono: Vec<f32>,              // mono input waiting for a full resampler chunk
     out: Vec<f32>,               // 16 kHz output waiting for a full block
+    buf: Vec<f32>,               // resampler output scratch, allocated once
 }
 
 impl To16k {
     pub fn new(in_rate: usize, channels: usize) -> Result<Self, String> {
+        let mut buf = vec![];
         let resampler = if in_rate == RATE {
             None
         } else {
             // 10 ms chunks: low latency, and 480 -> 160 is exact for 48 kHz
-            Some(Fft::new(in_rate, RATE, in_rate / 100, 1, FixedSync::Input).map_err(|e| e.to_string())?)
+            let r = Fft::new(in_rate, RATE, in_rate / 100, 1, FixedSync::Input).map_err(|e| e.to_string())?;
+            buf = vec![0f32; r.output_frames_max()];
+            Some(r)
         };
-        Ok(Self { channels, resampler, mono: vec![], out: vec![] })
+        Ok(Self { channels, resampler, mono: vec![], out: vec![], buf })
     }
 
     /// `interleaved` is any number of frames of `channels` samples; `on_block` gets each complete block.
@@ -41,13 +55,16 @@ impl To16k {
                     if self.mono.len() < need {
                         break;
                     }
-                    let mut buf = vec![0f32; r.output_frames_max()];
+                    let max = self.buf.len();
                     let (input, mut output) = (
                         InterleavedSlice::new(&self.mono[..need], 1, need).unwrap(),
-                        InterleavedSlice::new_mut(&mut buf, 1, r.output_frames_max()).unwrap(),
+                        InterleavedSlice::new_mut(&mut self.buf, 1, max).unwrap(),
                     );
-                    let Ok((_, written)) = r.process_into_buffer(&input, &mut output, None) else { break };
-                    self.out.extend_from_slice(&buf[..written]);
+                    let Ok((_, written)) = r.process_into_buffer(&input, &mut output, None) else {
+                        self.mono.clear(); // do not let a failing resampler grow the backlog
+                        break;
+                    };
+                    self.out.extend_from_slice(&self.buf[..written]);
                     self.mono.drain(..need);
                 }
             }
@@ -67,17 +84,22 @@ pub fn start(mut on_block: impl FnMut(&[f32]) + Send + 'static) -> Result<Mic, S
         return Err(format!("unsupported microphone sample format {:?}", cfg.sample_format()));
     }
     let mut conv = To16k::new(cfg.sample_rate() as usize, cfg.channels() as usize)?;
+    let failed = Arc::new(AtomicBool::new(false));
+    let flag = failed.clone();
     let stream = device
         .build_input_stream::<f32, _, _>(
             cfg.config(),
             move |data, _| conv.push(data, &mut on_block),
-            |e| eprintln!("[local] microphone error: {e}"),
+            move |e| {
+                eprintln!("[local] microphone error: {e}");
+                flag.store(true, Ordering::SeqCst);
+            },
             None,
         )
         .map_err(|e| e.to_string())?;
     stream.play().map_err(|e| e.to_string())?;
     println!("[local] listening on the PC microphone ({name})");
-    Ok(Mic { _stream: stream })
+    Ok(Mic { _stream: stream, failed })
 }
 
 #[cfg(test)]

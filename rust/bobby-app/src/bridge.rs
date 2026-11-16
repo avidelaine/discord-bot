@@ -15,7 +15,7 @@ use bobby_proto::settings::Config;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 pub struct Bridge {
@@ -26,7 +26,10 @@ pub struct Bridge {
     stt: HttpStt,
     http: reqwest::Client,
     enabled: AtomicBool,
-    running: AtomicBool,
+    /// True while a listener thread exists. On/off decisions and the thread's exit check happen under this lock.
+    running: Mutex<bool>,
+    /// Wake model, loaded once per Bridge (None inside = no model file, no gate).
+    wake: OnceLock<Option<Arc<Mutex<Wake>>>>,
     /// Bobby waits for the next sentence ("Bobby" said alone): no wake word needed until then.
     force_until: Mutex<Instant>,
 }
@@ -41,7 +44,8 @@ impl Bridge {
             stt: HttpStt::new(&cfg.models.stt),
             http: reqwest::Client::new(),
             enabled: AtomicBool::new(false),
-            running: AtomicBool::new(false),
+            running: Mutex::new(false),
+            wake: OnceLock::new(),
             force_until: Mutex::new(Instant::now()),
         })
     }
@@ -52,21 +56,44 @@ impl Bridge {
 
     /// `/local/on|off`. One dedicated thread owns the microphone (a `Mic` is not Send) and drops it when switched off.
     fn set_local(self: &Arc<Self>, on: bool) {
+        let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         if on != self.enabled.swap(on, Ordering::SeqCst) {
             self.log(if on { "[local] on: Bobby listens on the PC" } else { "[local] off: Bobby is on Discord" });
         }
-        if on && !self.running.swap(true, Ordering::SeqCst) {
+        if on && !*running {
+            *running = true;
             let me = self.clone();
-            std::thread::spawn(move || {
+            std::thread::spawn(move || loop {
                 me.listen();
-                me.running.store(false, Ordering::SeqCst);
+                // Decide under the same lock as set_local: a /local/on that arrived meanwhile keeps the thread going.
+                let mut running = me.running.lock().unwrap_or_else(|e| e.into_inner());
+                if !me.enabled.load(Ordering::SeqCst) {
+                    *running = false;
+                    return;
+                }
             });
         }
     }
 
+    /// No `bobby.onnx`: no gate (Ok(None)), every sentence is transcribed like the Python service.
+    /// A model that exists but fails to load is an error: never run ungated by accident.
+    fn wake_model(&self) -> Result<Option<Arc<Mutex<Wake>>>, String> {
+        if let Some(w) = self.wake.get() {
+            return Ok(w.clone());
+        }
+        let dir = self.cfg.models_dir().join("wakeword");
+        let w = if dir.join("bobby.onnx").exists() { Some(Arc::new(Mutex::new(Wake::new(&dir)?))) } else { None };
+        Ok(self.wake.get_or_init(|| w).clone())
+    }
+
     fn listen(self: &Arc<Self>) {
-        // no wake models: no gate, every sentence is transcribed (like the Python service)
-        let wake = Wake::new(&self.cfg.models_dir().join("wakeword")).ok().map(|w| Arc::new(Mutex::new(w)));
+        let wake = match self.wake_model() {
+            Ok(w) => w,
+            Err(e) => {
+                self.enabled.store(false, Ordering::SeqCst);
+                return self.log(&format!("[local] wake model failed to load, local mode not started: {e}"));
+            }
+        };
         let (me, mut gate) = (self.clone(), Gate::new());
         let started = mic::start(move |block| {
             if me.speaker.is_speaking() {
@@ -86,6 +113,11 @@ impl Bridge {
         };
         self.log("[local] listening on the PC microphone");
         while self.enabled.load(Ordering::SeqCst) {
+            if _mic.failed() {
+                // the bot's periodic /local/on resync restarts the listener
+                self.enabled.store(false, Ordering::SeqCst);
+                return self.log("[local] microphone unavailable: the input stream failed");
+            }
             std::thread::sleep(Duration::from_millis(100));
         }
         self.log("[local] stopped listening on the PC microphone");
@@ -95,8 +127,8 @@ impl Bridge {
         let t = Instant::now();
         let mut score = None;
         if let Some(w) = wake {
-            if Instant::now() >= *self.force_until.lock().unwrap() {
-                let s = w.lock().unwrap().score(&audio);
+            if Instant::now() >= *self.force_until.lock().unwrap_or_else(|e| e.into_inner()) {
+                let s = w.lock().unwrap_or_else(|e| e.into_inner()).score(&audio);
                 if s < self.cfg.models.wake_threshold {
                     collect(&self.cfg.root, &audio, Some(s), None, "pc");
                     return; // not for Bobby: never transcribed
@@ -104,9 +136,10 @@ impl Bridge {
                 score = Some(s);
             }
         }
-        let tr = match tauri::async_runtime::block_on(self.stt.transcribe(&audio, "")) {
-            Ok(tr) => tr,
-            Err(e) => return self.log(&format!("[local] transcription failed: {e}")),
+        let tr = match tauri::async_runtime::block_on(tokio::time::timeout(Duration::from_secs(60), self.stt.transcribe(&audio, ""))) {
+            Ok(Ok(tr)) => tr,
+            Ok(Err(e)) => return self.log(&format!("[local] transcription failed: {e}")),
+            Err(_) => return self.log("[local] transcription timed out after 60 s, sentence dropped"),
         };
         collect(&self.cfg.root, &audio, score, Some(&tr.text), "pc");
         let ms = t.elapsed().as_millis();
@@ -121,7 +154,7 @@ impl Bridge {
             r.json::<Value>().await
         });
         match reply {
-            Ok(r) => *self.force_until.lock().unwrap() = Instant::now() + Duration::from_secs(if r["expect"] == true { 8 } else { 0 }),
+            Ok(r) => *self.force_until.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now() + Duration::from_secs(if r["expect"] == true { 8 } else { 0 }),
             Err(e) => self.log(&format!("[local] bot not reachable at {bot}: {e}")),
         }
     }
@@ -155,12 +188,18 @@ async fn local_h(State(b): S, UrlPath(state): UrlPath<String>, h: HeaderMap) -> 
 async fn speak_h(State(b): S, Query(q): Q, h: HeaderMap) -> Response {
     if let Some(r) = forbidden(&h) { return r; }
     let get = |k: &str, d: &str| q.get(k).cloned().unwrap_or_else(|| d.to_string());
-    match b.tts.speak(&get("text", ""), &get("lang", "fr"), &get("voice", "bobby")).await {
-        Ok(wav) => {
+    let text = get("text", "");
+    if text.is_empty() {
+        return reply(StatusCode::BAD_REQUEST, json!({ "detail": "text is required" }));
+    }
+    let spoken = tokio::time::timeout(Duration::from_secs(30), b.tts.speak(&text, &get("lang", "fr"), &get("voice", "bobby"))).await;
+    match spoken {
+        Err(_) => reply(StatusCode::GATEWAY_TIMEOUT, json!({ "error": "tts timed out" })),
+        Ok(Ok(wav)) => {
             let _ = tokio::task::spawn_blocking(move || b.speaker.play(&wav.0)).await; // returns once spoken
             reply(StatusCode::OK, json!({ "ok": true }))
         }
-        Err(e) => reply(StatusCode::BAD_GATEWAY, json!({ "error": e.to_string() })),
+        Ok(Err(e)) => reply(StatusCode::BAD_GATEWAY, json!({ "error": e.to_string() })),
     }
 }
 
@@ -246,8 +285,7 @@ mod tests {
     use tower::ServiceExt;
 
     fn app() -> Router {
-        let mut cfg = Config::default();
-        cfg.root = std::env::temp_dir().join("bobby-bridge-test");
+        let cfg = Config { root: std::env::temp_dir().join("bobby-bridge-test"), ..Default::default() };
         let (bus, _) = tokio::sync::broadcast::channel(8);
         routes(Bridge::new(&cfg, Supervisor::new(&cfg, bus)))
     }
@@ -269,10 +307,14 @@ mod tests {
         assert_eq!(code, StatusCode::OK);
         let level = v["level"].as_i64().expect("level");
         assert!(v["muted"].is_boolean());
-        // same level again: nothing audible changes
-        let (code, v2) = call("POST", &format!("/pc/volume?level={level}"), None).await;
-        assert_eq!(code, StatusCode::OK);
-        assert_eq!(v2["level"], v["level"]);
+        // same level again changes nothing audible, but only if the raw volume is a whole percent (else it would snap)
+        if bobby_pc::volume::raw_is_whole_percent() {
+            let (code, v2) = call("POST", &format!("/pc/volume?level={level}"), None).await;
+            assert_eq!(code, StatusCode::OK);
+            assert_eq!(v2["level"], v["level"]);
+        } else {
+            println!("volume is not a whole percent: skipping the same-level POST");
+        }
         assert_eq!(call("POST", "/pc/volume?level=abc", None).await.0, StatusCode::BAD_REQUEST);
         assert_eq!(call("POST", "/pc/media/explode", None).await.0, StatusCode::BAD_REQUEST);
         for (m, u) in [("GET", "/pc/volume"), ("POST", "/pc/volume?mute=true"), ("POST", "/hush"), ("POST", "/local/off"), ("POST", "/pc/media/pause")] {

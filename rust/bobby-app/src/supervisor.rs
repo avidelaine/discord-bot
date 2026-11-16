@@ -376,6 +376,8 @@ mod tests {
         assert!(log.contains("[short] hi"));
 
         // pid guard: a live foreign pid in bobby.pid refuses the start
+        // killed by kill_tree below; reaping is not needed in a test
+        #[allow(clippy::zombie_processes)]
         let other = std::process::Command::new("cmd").args(["/c", "ping -n 5 127.0.0.1 >nul"]).creation_flags(CREATE_NO_WINDOW).spawn().unwrap();
         std::fs::write(dir.join("_logs/bobby.pid"), other.id().to_string()).unwrap();
         assert!(sup.start().unwrap_err().contains("already running"));

@@ -38,6 +38,11 @@ pub struct Speaker {
     returned_at: Mutex<Option<Instant>>,
     /// Set by `hush`; wakes the waiting `play`.
     stop: (Mutex<bool>, Condvar),
+    /// Serializes `play` so overlapping sounds cannot reset `stop`/`speaking` under each other (`hush` skips it).
+    gate: Mutex<()>,
+    /// Copy of the WAV handed to PlaySound (SND_MEMORY|SND_ASYNC reads it after the call returns);
+    /// kept until the next `play` replaces it.
+    buf: Mutex<Vec<u8>>,
 }
 
 impl Speaker {
@@ -51,15 +56,20 @@ impl Speaker {
         impl Drop for Reset<'_> {
             fn drop(&mut self) { std::thread::sleep(ECHO); self.0.store(false, Ordering::SeqCst); }
         }
+        let _gate = self.gate.lock().unwrap_or_else(|e| e.into_inner());
         self.speaking.store(true, Ordering::SeqCst);
         let _reset = Reset(&self.speaking);
         *self.stop.0.lock().unwrap() = false;
-        let ok = play_start(wav);
+        // Previous sound is over (its play waited for it or was hushed), so the buffer can be replaced.
+        let mut buf = self.buf.lock().unwrap_or_else(|e| e.into_inner());
+        *buf = wav.to_vec();
+        let ok = play_start(&buf);
+        drop(buf);
         if ok {
             // Async playback (a synchronous PlaySound cannot be interrupted from another thread):
             // wait for the WAV's length, or for `hush`.
             let n = hound::WavReader::new(Cursor::new(wav)).map(|r| r.duration() as f64 / r.spec().sample_rate as f64).unwrap_or(0.0);
-            let end = Duration::from_secs_f64(n) + Duration::from_millis(100);
+            let end = Duration::from_secs_f64(n) + Duration::from_millis(500);
             let _ = self.stop.1.wait_timeout_while(self.stop.0.lock().unwrap(), end, |s| !*s);
         }
         *self.returned_at.lock().unwrap() = Some(Instant::now());
@@ -113,7 +123,9 @@ mod tests {
         assert_eq!(samples(&beep("nope")).len(), 2 * 3087);
     }
 
+    /// Live check: plays a real (very quiet) sound on the PC speakers, so it is not part of the normal run.
     #[test]
+    #[ignore]
     fn hush_stops_play_quickly() {
         let rate = 22050u32;
         let amp = 0.01f32;

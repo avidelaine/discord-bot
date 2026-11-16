@@ -36,11 +36,12 @@ pub fn record(call: &[&str]) {
 pub fn sh(file: &str, args: &[&str]) {
     let mut call = vec![file];
     call.extend_from_slice(args);
-    record(&call);
     if dry() {
+        record(&call);
         return;
     }
-    // DETACHED_PROCESS | CREATE_NO_WINDOW
+    // DETACHED_PROCESS | CREATE_NO_WINDOW; the child is deliberately never waited on (detached launch)
+    #[allow(clippy::zombie_processes)]
     let _ = Command::new(file).args(args).creation_flags(0x0800_0008).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
 }
 
@@ -110,7 +111,14 @@ fn app(name: &str, kind: &str, target: &str) -> App {
 
 fn walk(dir: &Path) -> Vec<PathBuf> {
     let Ok(rd) = std::fs::read_dir(dir) else { return vec![] };
-    rd.flatten().flat_map(|e| if e.path().is_dir() { walk(&e.path()) } else { vec![e.path()] }).collect()
+    // file_type() does not follow symlinks/junctions, so they are skipped (no loops, no escaping the folder)
+    rd.flatten()
+        .flat_map(|e| match e.file_type() {
+            Ok(t) if t.is_symlink() => vec![],
+            Ok(t) if t.is_dir() => walk(&e.path()),
+            _ => vec![e.path()],
+        })
+        .collect()
 }
 fn read(p: &Path) -> String {
     std::fs::read_to_string(p).unwrap_or_default()

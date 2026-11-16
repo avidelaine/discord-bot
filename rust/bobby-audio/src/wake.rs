@@ -26,7 +26,9 @@ fn e<T: std::fmt::Display>(x: T) -> String {
 
 /// Link workaround: ONNX Runtime's prebuilt static lib (ort-sys) calls two MSVC STL helpers that only exist in
 /// toolset 14.44+ (VS Build Tools 17.14); this machine has 14.43. Same contract as the STL's: position of the first
-/// haystack element found in the needle set, or usize::MAX. Remove once the build tools are >= 14.44.
+/// haystack element found in the needle set, or usize::MAX.
+/// Removal condition: MSVC build tools >= 14.44 (VS 17.14). If a duplicate-symbol link error appears after upgrading,
+/// the real STL now provides these symbols: delete this module.
 #[cfg(all(windows, target_env = "msvc"))]
 mod stl_shim {
     unsafe fn find<T: PartialEq + Copy>(h: *const T, hn: usize, n: *const T, nn: usize) -> usize {
@@ -40,6 +42,24 @@ mod stl_shim {
     #[no_mangle]
     pub unsafe extern "C" fn __std_find_first_of_trivial_pos_2(h: *const u16, hn: usize, n: *const u16, nn: usize) -> usize {
         find(h, hn, n, nn)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn find_first_of() {
+            unsafe {
+                let h = b"hello world";
+                assert_eq!(__std_find_first_of_trivial_pos_1(h.as_ptr(), h.len(), b"xwo".as_ptr(), 3), 4);
+                assert_eq!(__std_find_first_of_trivial_pos_1(h.as_ptr(), h.len(), b"xyz".as_ptr(), 3), usize::MAX);
+                assert_eq!(__std_find_first_of_trivial_pos_1(h.as_ptr(), h.len(), b"".as_ptr(), 0), usize::MAX);
+                let (h, n) = ([1u16, 2, 300, 4], [300u16, 9]);
+                assert_eq!(__std_find_first_of_trivial_pos_2(h.as_ptr(), h.len(), n.as_ptr(), n.len()), 2);
+                assert_eq!(__std_find_first_of_trivial_pos_2(h.as_ptr(), h.len(), n.as_ptr(), 0), usize::MAX);
+            }
+        }
     }
 }
 
@@ -154,7 +174,7 @@ impl Wake {
     pub fn score_i16(&mut self, audio16k: &[i16]) -> f32 {
         let mut pcm = vec![0i16; 8000];
         pcm.extend_from_slice(audio16k);
-        pcm.extend(std::iter::repeat(0i16).take(8000));
+        pcm.extend(std::iter::repeat_n(0i16, 8000));
         self.reset();
         pcm.chunks_exact(FRAME).map(|c| self.predict(c)).fold(0.0, f32::max)
     }

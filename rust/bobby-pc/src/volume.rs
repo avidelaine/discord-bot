@@ -43,6 +43,14 @@ pub fn apply(op: VolumeOp) -> Result<Value, String> {
     read(&v)
 }
 
+/// True when the raw endpoint scalar is already a whole percent, so writing that level back changes nothing.
+/// Tests that write the real volume check this first (otherwise e.g. 34.6 % would snap to 35 %).
+pub fn raw_is_whole_percent() -> bool {
+    let Ok(v) = endpoint() else { return false };
+    let Ok(s) = (unsafe { v.GetMasterVolumeLevelScalar() }) else { return false };
+    (s * 100.0 - (s * 100.0).round()).abs() < 0.01
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -57,6 +65,10 @@ mod tests {
 
     #[test]
     fn set_to_current_level_is_stable() {
+        if !raw_is_whole_percent() {
+            println!("volume is not a whole percent: skipping the write test (it would snap it)");
+            return;
+        }
         let cur = state().unwrap()["level"].as_u64().unwrap() as u8;
         let s = apply(VolumeOp::Set { level: cur }).unwrap();
         assert_eq!(s["level"].as_u64().unwrap(), cur as u64);

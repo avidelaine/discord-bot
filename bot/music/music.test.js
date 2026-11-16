@@ -91,9 +91,36 @@ async function network() {
   console.log('ok  network: radio by tag and YouTube both decode to non-silent PCM through the mixer');
 }
 
+// Endless mode (2026-11-16): a style keeps going with similar songs, "only this artist" keeps to the artist.
+async function endless() {
+  const mixer = new Mixer(null);
+  sink(mixer, 20);
+  const player = new Player(mixer);
+  const norm = (t) => t.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  for (const [item, check] of [
+    [{ kind: 'style', style: 'hardstyle' }, (t) => t],
+    [{ kind: 'youtube', query: 'Adèle Castillon', endless: 'artist', seed: 'Adèle Castillon' }, (t) => norm(t).includes('adele castillon') || norm(t).includes('videoclub')],
+  ]) {
+    const first = await player.playNow(item);
+    assert(!first.error && first.endless, `endless starts (${first.error})`);
+    const titles = [first.title];
+    for (let i = 0; i < 2; i++) {
+      const t0 = Date.now(), r = await player.skip();
+      assert(r.nowPlaying, `skip ${i + 1} found a next track`);
+      titles.push(r.nowPlaying.title);
+      console.log(`    ${first.endless}: "${r.nowPlaying.title}" after ${Date.now() - t0} ms`);
+    }
+    assert.strictEqual(new Set(titles).size, 3, `no repeat: ${titles.join(' | ')}`);
+    assert(titles.every(check), `stays on the artist: ${titles.join(' | ')}`);
+    player.stop();
+  }
+  console.log('ok  endless: a style and an artist both go on by themselves, no repeats, artist mode keeps to the artist');
+}
+
 (async () => {
   await synthetic();
   await fades();
   await network();
+  await endless();
   process.exit(0);
 })().catch((e) => { console.error('FAIL', e.message); process.exit(1); });

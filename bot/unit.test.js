@@ -241,7 +241,14 @@ console.log('PC shortcuts and rights: ok');
     const a = quick(phrase);
     assert(a && a.length === 1 && a[0].type === type && a[0].text === text, `music shortcut: "${phrase}" -> ${JSON.stringify(a)}`);
   }
-  assert.strictEqual(quick('joue du hardstyle')[0].kind, 'radio');
+  // 2026-11-16: a style plays endlessly from YouTube; "radio" alone means a web radio; "que du X" = only X; "juste X" = X alone
+  const qk = (t) => { const [x] = quick(t); return [x.text, x.kind, x.mode || '']; };
+  assert.deepStrictEqual(qk('joue du hardstyle'), ['hardstyle', 'style', '']);
+  assert.deepStrictEqual(qk('mets une radio jazz'), ['jazz', 'radio', '']);
+  assert.deepStrictEqual(qk('play some lofi radio'), ['lofi', 'radio', '']);
+  assert.deepStrictEqual(qk('joue-moi que du adèle castillon'), ['adèle castillon', 'youtube', 'artiste']);
+  assert.deepStrictEqual(qk('mets uniquement daft punk'), ['daft punk', 'youtube', 'artiste']);
+  assert.deepStrictEqual(qk('joue juste bohemian rhapsody'), ['bohemian rhapsody', 'youtube', 'unique']);
   assert.strictEqual(quick('joue Bohemian Rhapsody')[0].kind, 'youtube');
   for (const phrase of ['mets pause sur le PC', 'monte le son du PC', 'musique suivante sur Spotify', 'lance Valorant']) assert(!quick(phrase)?.some((s) => s.type.startsWith('music_')), `not music: "${phrase}"`);
   assert.strictEqual(quick('mets pause sur le PC')[0].type, 'pc_media');
@@ -261,7 +268,13 @@ console.log('PC shortcuts and rights: ok');
   };
   const say = async (steps, lang = 'fr') => { const p = resolve(steps, ctx); await run(p, { music: fake }, lang); return describe(p, lang); };
   assert.strictEqual(await say([{ type: 'music_play', text: 'Bohemian Rhapsody', kind: 'youtube' }]), 'Je lance Bohemian Rhapsody.');
+  assert.deepStrictEqual(fake.calls.pop(), { kind: 'youtube', query: 'Bohemian Rhapsody', endless: 'similar' }); // endless by default
+  await say([{ type: 'music_play', text: 'Bohemian Rhapsody', kind: 'youtube', mode: 'unique' }]);
   assert.deepStrictEqual(fake.calls.pop(), { kind: 'youtube', query: 'Bohemian Rhapsody' });
+  await say([{ type: 'music_play', text: 'Daft Punk', kind: 'youtube', mode: 'artiste' }]);
+  assert.deepStrictEqual(fake.calls.pop(), { kind: 'youtube', query: 'Daft Punk', endless: 'artist', seed: 'Daft Punk' });
+  await say([{ type: 'music_play', text: 'hardstyle', kind: 'style' }]);
+  assert.deepStrictEqual(fake.calls.pop(), { kind: 'style', style: 'hardstyle' });
   assert.strictEqual(await say([{ type: 'music_play', text: 'jazz', kind: 'radio' }]), 'Radio jazz : Jazz FM.');
   assert.deepStrictEqual(fake.calls.pop(), { kind: 'radio', style: 'jazz' });
   assert.strictEqual(await say([{ type: 'music_play', text: 'jazz', kind: 'radio' }], 'en'), 'jazz radio: Jazz FM.');

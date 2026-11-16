@@ -36,7 +36,9 @@ async function radio(style) {
   throw new Error(`no radio found for "${style}"`);
 }
 
-// Search text or URL -> { title, url } of the best audio stream.
+const kill = (child) => (process.platform === 'win32' ? spawn('taskkill', ['/pid', String(child.pid), '/T', '/F']) : child.kill('SIGKILL'));
+
+// Search text or URL -> { id, title, url } of the best audio stream.
 // -I 1: an artist name ("Adèle Castillon") makes ytsearch1 return a whole shelf of videos, 33 s instead of 3.5 s.
 const youtube = (query) => new Promise((resolve, reject) => {
   const target = /^https?:\/\//.test(query) ? query : `ytsearch1:${query.replace(/^ytsearch1:/, '')}`;
@@ -46,14 +48,25 @@ const youtube = (query) => new Promise((resolve, reject) => {
     let j = null;
     try { j = JSON.parse(out.split('\n')[0]); } catch { /* no result: empty output */ }
     if (!j?.url) return reject(new Error(`nothing found on YouTube for "${query}"`));
-    resolve({ title: j.title, url: j.url });
+    resolve({ id: j.id, title: j.title, url: j.url });
   });
   // execFile's own timeout kills yt-dlp.exe but not its child (PyInstaller), which keeps the pipes open: the
   // callback never came and the request hung forever (2026-11-13). Reject ourselves and kill the whole tree.
   const timer = setTimeout(() => {
     reject(new Error('yt-dlp failed: no answer after 20 s'));
-    if (process.platform === 'win32') spawn('taskkill', ['/pid', String(child.pid), '/T', '/F']); else child.kill('SIGKILL');
+    kill(child);
   }, 20000);
 });
 
-module.exports = { decode, radio, youtube };
+// Video list without resolving streams (about 2 s): a search ("ytsearch30:...") or a YouTube Mix ("watch?v=ID&list=RDID",
+// related tracks of the same style; -I caps it, the mix is endless). -> [{ id, title, channel, duration }]
+const listing = (target, n = 25) => new Promise((resolve, reject) => {
+  const child = execFile(YTDLP, ['--flat-playlist', '-J', '--no-warnings', '-I', `1:${n}`, target], { maxBuffer: 1 << 26 }, (err, out) => {
+    clearTimeout(timer);
+    if (err) return reject(new Error(`yt-dlp failed: ${err.message.split('\n')[0]}`));
+    try { resolve((JSON.parse(out).entries || []).map((e) => ({ id: e.id, title: e.title, channel: e.channel || e.uploader || '', duration: e.duration }))); } catch { resolve([]); }
+  });
+  const timer = setTimeout(() => { reject(new Error('yt-dlp failed: no answer after 20 s')); kill(child); }, 20000); // see youtube()
+});
+
+module.exports = { decode, radio, youtube, listing };

@@ -1,0 +1,4 @@
+# Static C runtime on Windows: CTranslate2 (ct2rs, in-process Whisper) only builds with /MT, and every C/C++ object
+# in one binary must use the same runtime. ONNX Runtime is loaded as a DLL (ort `load-dynamic`) so it does not care.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

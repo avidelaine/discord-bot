@@ -1,6 +1,21 @@
 //! Model calls by address: speech-to-text, LLM, text-to-speech.
 //! HTTP clients for today's services (voice/server.py on :3000, llama-server on :8080).
 //! Later an in-process engine implements the same traits; the setting value "local" selects it.
+#[cfg(feature = "onnx")]
+pub mod collect;
+#[cfg(feature = "onnx")]
+pub mod onnx;
+#[cfg(feature = "onnx")]
+pub mod wake;
+#[cfg(feature = "onnx")]
+pub mod listen; // R5 5.4: the /listen exchange in process (Discord sentences)
+#[cfg(feature = "onnx")]
+pub mod vad; // R5 5.2: Silero VAD (faster-whisper vad_filter)
+#[cfg(feature = "ct2")]
+pub mod stt; // R5 5.2: in-process Whisper (LocalStt)
+#[cfg(feature = "piper")]
+pub mod tts; // R5 5.3: in-process Piper (LocalTts)
+
 use bobby_proto::infer::{ChatMsg, InferError, InferErrorKind, Speak, Transcribe, Transcript, Understand, Wav};
 pub mod loudness;
 use std::time::Duration;

@@ -151,26 +151,11 @@ impl Watchdog {
 
 // ---------- /listen exchange ----------
 
-/// The gate message of the voice service: `wake` is `None` when the gate was bypassed (`force=1`).
-#[derive(Debug, Clone, PartialEq)]
-pub struct Gate {
-    pub wake: Option<bool>,
-    pub score: Option<f32>,
-}
+pub use bobby_infer::listen::{Gate, Outcome};
+pub use bobby_proto::infer::Transcript;
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Transcript {
-    pub text: String,
-    pub lang: String,
-    pub ms: u32,
-}
-
-#[derive(Debug, Default, PartialEq)]
-pub struct Outcome {
-    pub gate: Option<Gate>,
-    /// `None` when the gate said this was not for Bobby.
-    pub transcript: Option<Transcript>,
-}
+/// The in-process listener (`VOICE_URL=local`), loaded once by `client::run`.
+pub static LOCAL_LISTENER: std::sync::OnceLock<Arc<bobby_infer::listen::Listener<bobby_infer::Stt>>> = std::sync::OnceLock::new();
 
 /// `http://host:port` -> `ws://host:port/listen?force=..&hotwords=..`.
 pub fn listen_url(voice_url: &str, force: bool, hotwords: &str) -> String {
@@ -376,7 +361,18 @@ impl Shared {
             .unwrap_or_else(|| "Bobby".into());
         let url = listen_url(&bot.cfg.voice_url, force, &hotwords);
         let b = bot.clone();
-        let res = match tokio::time::timeout(Duration::from_secs(30), exchange(&url, pcm, move |on| caps::ring(&b, on, user))).await {
+        let ring = move |on| caps::ring(&b, on, user);
+        let run = async {
+            if bobby_infer::is_local(&bot.cfg.voice_url) {
+                match LOCAL_LISTENER.get() {
+                    Some(l) => l.listen(pcm, force, &hotwords, ring).await,
+                    None => Err("connect: local engine not loaded".to_string()),
+                }
+            } else {
+                exchange(&url, pcm, ring).await
+            }
+        };
+        let res = match tokio::time::timeout(Duration::from_secs(30), run).await {
             Ok(r) => r,
             Err(_) => Err("voice service timed out (30 s)".to_string()),
         };
@@ -399,7 +395,7 @@ impl Shared {
                 });
             }
             Ok(_) => {}
-            Err(e) if e.starts_with("connect") => eprintln!("[voice] voice service not reachable at {} (is it running?)", bot.cfg.voice_url),
+            Err(e) if e.starts_with("connect") && !bobby_infer::is_local(&bot.cfg.voice_url) => eprintln!("[voice] voice service not reachable at {} (is it running?)", bot.cfg.voice_url),
             Err(e) => eprintln!("[voice] {e}"),
         }
     }

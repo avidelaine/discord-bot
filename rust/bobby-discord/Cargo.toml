@@ -6,7 +6,7 @@ description = "Discord connection, voice, music"
 
 [dependencies]
 bobby-proto = { workspace = true }
-bobby-infer = { workspace = true }
+bobby-infer = { workspace = true, features = ["onnx"] }
 toml = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -20,3 +20,7 @@ symphonia = { version = "0.5", default-features = false, features = ["pcm", "wav
 rubato = { workspace = true }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
+
+[features]
+local-stt = ["bobby-infer/ct2"]
+local-tts = ["bobby-infer/piper"]

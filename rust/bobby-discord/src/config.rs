@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::path::PathBuf;
 
 #[derive(Clone)]
 pub struct Config {
@@ -14,6 +15,8 @@ pub struct Config {
     /// Silence that ends a sentence (`RECORD_SILENCE_MS`).
     pub silence_ms: u64,
     pub super_admins: Vec<u64>,
+    /// Local models (`MODELS_DIR`, default `models` next to the `.env`); used when `VOICE_URL=local`.
+    pub models_dir: PathBuf,
 }
 
 // Custom Debug: a stray `{:?}` in a log must never leak the token.
@@ -43,6 +46,11 @@ pub fn parse_env(text: &str) -> HashMap<String, String> {
 impl Config {
     /// Builds the config from a key lookup (`get` returns None for unset keys).
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Config, String> {
+        Config::from_lookup_in(get, std::path::Path::new("."))
+    }
+
+    /// Like `from_lookup`; `env_dir` is the folder of the `.env` (home of the default `models` folder).
+    pub fn from_lookup_in(get: impl Fn(&str) -> Option<String>, env_dir: &std::path::Path) -> Result<Config, String> {
         let need = |k: &str| get(k).filter(|v| !v.is_empty()).ok_or_else(|| format!("{k} is missing"));
         Ok(Config {
             token: need("DISCORD_TOKEN")?,
@@ -53,6 +61,7 @@ impl Config {
             super_admins: get("SUPER_ADMINS")
                 .map(|s| s.split(',').filter_map(|x| x.trim().parse::<u64>().ok()).filter(|&n| n > 0).collect())
                 .unwrap_or_default(),
+            models_dir: get("MODELS_DIR").filter(|v| !v.is_empty()).map_or_else(|| env_dir.join("models"), PathBuf::from),
         })
     }
 
@@ -63,7 +72,8 @@ impl Config {
             .unwrap_or_else(|_| r"C:\Users\alexa\Desktop\Personal Projects\discord-bot\.env".into());
         let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
         let file = parse_env(&text);
-        Config::from_lookup(|k| std::env::var(k).ok().or_else(|| file.get(k).cloned()))
+        let dir = std::path::Path::new(&path).parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+        Config::from_lookup_in(|k| std::env::var(k).ok().or_else(|| file.get(k).cloned()), &dir)
     }
 }
 
@@ -78,6 +88,7 @@ mod tests {
         assert_eq!((cfg.token.as_str(), cfg.guild_id, cfg.silence_ms), ("abc", 42, 900));
         assert_eq!(cfg.super_admins, vec![1, 2]);
         assert_eq!(cfg.voice_url, "http://127.0.0.1:3000");
+        assert_eq!(cfg.models_dir, std::path::Path::new(".").join("models"));
         assert!(!format!("{cfg:?}").contains("abc"));
     }
 

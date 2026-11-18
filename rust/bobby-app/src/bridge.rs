@@ -8,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use bobby_audio::{collect::collect, gate::Gate, mic, out, out::Speaker, wake::Wake};
-use bobby_infer::{HttpStt, HttpTts};
+use bobby_infer::{HttpStt, HttpTts, Stt, Tts};
 use bobby_proto::infer::{Speak, Transcribe};
 use bobby_proto::msg::{MediaCmd, VolumeOp};
 use bobby_proto::settings::Config;
@@ -22,8 +22,8 @@ pub struct Bridge {
     cfg: Config,
     sup: Arc<Supervisor>,
     speaker: Speaker,
-    tts: HttpTts,
-    stt: HttpStt,
+    tts: Tts,
+    stt: Stt,
     http: reqwest::Client,
     enabled: AtomicBool,
     /// True while a listener thread exists. On/off decisions and the thread's exit check happen under this lock.
@@ -36,12 +36,23 @@ pub struct Bridge {
 
 impl Bridge {
     pub fn new(cfg: &Config, sup: Arc<Supervisor>) -> Arc<Self> {
+        // Engines load once, here ("local" = in-process Whisper/Piper); on failure the app still starts on the HTTP engine.
+        const FALLBACK: &str = "http://127.0.0.1:3000";
+        let models = cfg.models_dir();
+        let stt = Stt::from_addr(&cfg.models.stt, &models).unwrap_or_else(|e| {
+            sup.log("audio", &format!("[stt] {} failed to load, falling back to {FALLBACK}: {e}", cfg.models.stt));
+            Stt::Http(HttpStt::new(FALLBACK))
+        });
+        let tts = Tts::from_addr(&cfg.models.tts, &models).unwrap_or_else(|e| {
+            sup.log("audio", &format!("[tts] {} failed to load, falling back to {FALLBACK}: {e}", cfg.models.tts));
+            Tts::Http(HttpTts::new(FALLBACK))
+        });
         Arc::new(Self {
             cfg: cfg.clone(),
             sup,
             speaker: Speaker::new(),
-            tts: HttpTts::new(&cfg.models.tts),
-            stt: HttpStt::new(&cfg.models.stt),
+            tts,
+            stt,
             http: reqwest::Client::new(),
             enabled: AtomicBool::new(false),
             running: Mutex::new(false),

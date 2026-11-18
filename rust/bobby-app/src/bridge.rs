@@ -22,8 +22,8 @@ pub struct Bridge {
     cfg: Config,
     sup: Arc<Supervisor>,
     speaker: Speaker,
-    tts: Tts,
-    stt: Stt,
+    tts: Arc<OnceLock<Tts>>,
+    stt: Arc<OnceLock<Stt>>,
     http: reqwest::Client,
     enabled: AtomicBool,
     /// True while a listener thread exists. On/off decisions and the thread's exit check happen under this lock.
@@ -36,17 +36,35 @@ pub struct Bridge {
 
 impl Bridge {
     pub fn new(cfg: &Config, sup: Arc<Supervisor>) -> Arc<Self> {
-        // Engines load once, here ("local" = in-process Whisper/Piper); on failure the app still starts on the HTTP engine.
+        // Engines load once ("local" = in-process Whisper/Piper, slow: off the main thread); on failure the app still starts on the HTTP engine.
         const FALLBACK: &str = "http://127.0.0.1:3000";
         let models = cfg.models_dir();
-        let stt = Stt::from_addr(&cfg.models.stt, &models).unwrap_or_else(|e| {
-            sup.log("audio", &format!("[stt] {} failed to load, falling back to {FALLBACK}: {e}", cfg.models.stt));
-            Stt::Http(HttpStt::new(FALLBACK))
-        });
-        let tts = Tts::from_addr(&cfg.models.tts, &models).unwrap_or_else(|e| {
-            sup.log("audio", &format!("[tts] {} failed to load, falling back to {FALLBACK}: {e}", cfg.models.tts));
-            Tts::Http(HttpTts::new(FALLBACK))
-        });
+        let (stt, tts) = (Arc::new(OnceLock::new()), Arc::new(OnceLock::new()));
+        let (addr, cell, s2) = (cfg.models.stt.clone(), stt.clone(), sup.clone());
+        let m2 = models.clone();
+        let load = move || {
+            Stt::from_addr(&addr, &m2).unwrap_or_else(|e| {
+                s2.log("audio", &format!("[stt] {addr} failed to load, falling back to {FALLBACK}: {e}"));
+                Stt::Http(HttpStt::new(FALLBACK))
+            })
+        };
+        if bobby_infer::is_local(&cfg.models.stt) {
+            std::thread::spawn(move || { let _ = cell.set(load()); });
+        } else {
+            let _ = cell.set(load());
+        }
+        let (addr, cell, s2) = (cfg.models.tts.clone(), tts.clone(), sup.clone());
+        let load = move || {
+            Tts::from_addr(&addr, &models).unwrap_or_else(|e| {
+                s2.log("audio", &format!("[tts] {addr} failed to load, falling back to {FALLBACK}: {e}"));
+                Tts::Http(HttpTts::new(FALLBACK))
+            })
+        };
+        if bobby_infer::is_local(&cfg.models.tts) {
+            std::thread::spawn(move || { let _ = cell.set(load()); });
+        } else {
+            let _ = cell.set(load());
+        }
         Arc::new(Self {
             cfg: cfg.clone(),
             sup,
@@ -59,6 +77,11 @@ impl Bridge {
             wake: OnceLock::new(),
             force_until: Mutex::new(Instant::now()),
         })
+    }
+
+    /// The TTS slot, shared with the settings page's voice test (empty while a local engine loads).
+    pub fn tts_slot(&self) -> Arc<OnceLock<Tts>> {
+        self.tts.clone()
     }
 
     fn log(&self, line: &str) {
@@ -147,7 +170,10 @@ impl Bridge {
                 score = Some(s);
             }
         }
-        let tr = match tauri::async_runtime::block_on(tokio::time::timeout(Duration::from_secs(60), self.stt.transcribe(&audio, ""))) {
+        let Some(stt) = self.stt.get() else {
+            return self.log("[local] speech engine still loading, sentence dropped");
+        };
+        let tr = match tauri::async_runtime::block_on(tokio::time::timeout(Duration::from_secs(60), stt.transcribe(&audio, ""))) {
             Ok(Ok(tr)) => tr,
             Ok(Err(e)) => return self.log(&format!("[local] transcription failed: {e}")),
             Err(_) => return self.log("[local] transcription timed out after 60 s, sentence dropped"),
@@ -203,7 +229,11 @@ async fn speak_h(State(b): S, Query(q): Q, h: HeaderMap) -> Response {
     if text.is_empty() {
         return reply(StatusCode::BAD_REQUEST, json!({ "detail": "text is required" }));
     }
-    let spoken = tokio::time::timeout(Duration::from_secs(30), b.tts.speak(&text, &get("lang", "fr"), &get("voice", "bobby"))).await;
+    let Some(tts) = b.tts.get() else {
+        b.log("[tts] speech engine still loading, /speak refused");
+        return reply(StatusCode::SERVICE_UNAVAILABLE, json!({ "error": "speech engine still loading" }));
+    };
+    let spoken = tokio::time::timeout(Duration::from_secs(30), tts.speak(&text, &get("lang", "fr"), &get("voice", "bobby"))).await;
     match spoken {
         Err(_) => reply(StatusCode::GATEWAY_TIMEOUT, json!({ "error": "tts timed out" })),
         Ok(Ok(wav)) => {

@@ -83,11 +83,12 @@ fn main() {
             let db = Arc::new(Mutex::new(metrics::open(&logs.join("metrics.db"))?));
             tauri::async_runtime::spawn(metrics::run(sup.clone(), db.clone(), bus.clone()));
             tauri::async_runtime::spawn(journal::follow(logs.join("conversations.jsonl"), bus.clone()));
-            let state = server::AppState { sup: sup.clone(), db, bus: bus.clone(), logs: logs.clone() };
             let port = cfg.port;
             let listener = tauri::async_runtime::block_on(server::bind(port))
                 .map_err(|e| format!("port {port} is taken (is the Node app, Bobby.cmd, still running?): {e}"))?;
-            let bridge = bridge::routes(bridge::Bridge::new(&cfg, sup.clone()));
+            let bridge = bridge::Bridge::new(&cfg, sup.clone());
+            let state = server::AppState { sup: sup.clone(), db, bus: bus.clone(), logs: logs.clone(), tts: bridge.tts_slot() };
+            let bridge = bridge::routes(bridge);
             tauri::async_runtime::spawn(async move {
                 let _ = axum::serve(listener, server::router(state, bridge)).await;
             });

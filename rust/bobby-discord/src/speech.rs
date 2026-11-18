@@ -139,7 +139,10 @@ pub static LOCAL_TTS: std::sync::OnceLock<bobby_infer::Tts> = std::sync::OnceLoc
 async fn fetch_tts(voice_url: &str, lang: &str, voice: &str, text: &str) -> Result<Vec<i16>, String> {
     if bobby_infer::is_local(voice_url) {
         let tts = LOCAL_TTS.get().ok_or("local tts not loaded")?;
-        let wav = bobby_proto::infer::Speak::speak(tts, text, lang, voice).await.map_err(|e| e.to_string())?;
+        let wav = tokio::time::timeout(Duration::from_secs(20), bobby_proto::infer::Speak::speak(tts, text, lang, voice))
+            .await
+            .map_err(|_| "local tts timed out".to_string())?
+            .map_err(|e| e.to_string())?;
         return tokio::task::spawn_blocking(move || collect(decode_wav(normalize(&wav.0)))).await.map_err(|e| e.to_string());
     }
     let client = reqwest::Client::builder().timeout(Duration::from_secs(20)).build().map_err(|e| e.to_string())?;

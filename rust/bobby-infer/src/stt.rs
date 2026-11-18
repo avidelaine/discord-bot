@@ -323,6 +323,9 @@ impl Engine {
             let head: f64 = (0..MELS).flat_map(|m| (0..100.min(frames)).map(move |t| (m, t))).map(|(m, t)| feats[m * frames + t] as f64).sum();
             eprintln!("[stt] mel frames {frames} head100 sum {head:.4} total {:.4}", feats.iter().map(|v| *v as f64).sum::<f64>());
         }
+        if frames < 2 {
+            return empty();
+        }
         let size = FRAMES.min(frames - 1);
         let enc = self.encode_window(&feats, frames, 0, size)?;
         let det = self.whisper.detect_language(&enc).map_err(bad)?;
@@ -362,7 +365,7 @@ impl LocalStt {
         let stt = Self { engine: Arc::new(Mutex::new(engine)) };
         {
             // Warm up the GPU (silence would stop at the VAD, so go straight to the model).
-            let e = stt.engine.lock().map_err(|_| bad("STT engine poisoned"))?;
+            let e = stt.engine.lock().unwrap_or_else(|p| p.into_inner());
             let (feats, frames) = e.mel.compute(&vec![0.0; 16000]);
             let enc = e.encode_window(&feats, frames, 0, frames - 1)?;
             e.whisper.detect_language(&enc).map_err(bad)?;
@@ -372,7 +375,7 @@ impl LocalStt {
 
     /// Blocking: `(text, lang)` exactly like `_whisper`. Empty audio or no speech: `("", "fr")`.
     pub fn run(&self, pcm16k: &[f32], hotwords: &str) -> Result<(String, String), InferError> {
-        self.engine.lock().map_err(|_| bad("STT engine poisoned"))?.run(pcm16k, hotwords)
+        self.engine.lock().unwrap_or_else(|p| p.into_inner()).run(pcm16k, hotwords)
     }
 }
 

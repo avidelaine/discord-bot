@@ -323,7 +323,8 @@ pub async fn run(cfg: Config, from_brain: UnboundedReceiver<BrainMsg>, to_brain:
         .await
         .map_err(|e| format!("discord client: {e}"))?;
     if bobby_infer::is_local(&cfg.voice_url) {
-        load_local_engines(&cfg.models_dir).await;
+        // Models load in the background so the gateway starts at once; callers tolerate "not loaded yet".
+        tokio::spawn(load_local_engines(cfg.models_dir.clone()));
     }
     let (mix_tx, mix_rx) = tokio::sync::mpsc::unbounded_channel();
     let mixer = Arc::new(Mutex::new(Mixer::new(mix_tx)));
@@ -352,9 +353,8 @@ pub async fn run(cfg: Config, from_brain: UnboundedReceiver<BrainMsg>, to_brain:
 
 /// Loads Whisper, the wake word and Piper in process (slow: once, off the async threads). A failure is
 /// logged once and leaves the engine unset, which behaves like an unreachable voice service.
-async fn load_local_engines(models: &std::path::Path) {
+async fn load_local_engines(models: std::path::PathBuf) {
     use bobby_infer::listen::{wake_threshold, Listener};
-    let models = models.to_path_buf();
     let loaded = tokio::task::spawn_blocking(move || {
         let stt = bobby_infer::Stt::from_addr("local", &models).map_err(|e| format!("stt: {e}"))?;
         let root = models.parent().map(|p| p.to_path_buf());

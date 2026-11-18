@@ -95,6 +95,9 @@ pub enum ClientMsg {
     /// Answer to `BrainMsg::Run { id }`. `data` is the plain-data result (see `Cap` docs).
     /// `error` starting with "50013" means Discord refused for missing permissions (said as such to the user).
     Result { id: u64, ok: bool, data: Value, error: Option<String> },
+    /// A slash command (`join`, `leave`, `surnoms`) typed by `user` in `text_channel`. The brain decides
+    /// (roles, nicknames are its data) and answers with `BrainMsg::Reply { id }`, then any `Run`.
+    Command { id: u64, name: String, user: String, text_channel: String },
     /// Bobby's voice started (`user`: the person the reply is for, see `Say::to_user`) or ended (`None`).
     /// The brain needs it to let that person interrupt with a plain "stop".
     Speaking { user: Option<String> },
@@ -131,6 +134,8 @@ pub enum BrainMsg {
     Run { id: u64, cap: Cap },
     /// Listen to `user` without a wake word for `ms` milliseconds. `ms: 0` closes the window.
     Expect { user: String, ms: u32 },
+    /// Answer to `ClientMsg::Command { id }`. `ephemeral`: only the person who typed it sees it.
+    Reply { id: u64, text: Option<String>, embeds: Vec<Embed>, ephemeral: bool },
 }
 
 // ---------- Capabilities ----------
@@ -374,6 +379,7 @@ mod tests {
             ClientMsg::Heard { utterance: 5, user: s("1"), text: s("coupe le micro"), lang: s("fr"), score: Some(0.75), stt_ms: 120, expected: false },
             ClientMsg::Result { id: 7, ok: true, data: json!({"prev": {"1": false}}), error: None },
             ClientMsg::Result { id: 8, ok: false, data: Value::Null, error: Some(s("no player")) },
+            ClientMsg::Command { id: 9, name: s("join"), user: s("1"), text_channel: s("3") },
             ClientMsg::Speaking { user: Some(s("1")) },
         ];
         for m in &client {
@@ -387,6 +393,7 @@ mod tests {
             BrainMsg::Say { text: s("Salut"), lang: s("fr"), voice: Voice::Claude, to_user: Some(s("1")) },
             BrainMsg::Hush,
             BrainMsg::Expect { user: s("1"), ms: 8000 },
+            BrainMsg::Reply { id: 9, text: Some(s("À plus.")), embeds: vec![], ephemeral: true },
         ];
         for m in &brain {
             round_trip(m);

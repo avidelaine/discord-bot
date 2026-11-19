@@ -137,13 +137,17 @@ fn loud(pcm: Vec<i16>) -> Vec<i16> {
 pub static LOCAL_TTS: std::sync::OnceLock<bobby_infer::Tts> = std::sync::OnceLock::new();
 
 async fn fetch_tts(voice_url: &str, lang: &str, voice: &str, text: &str) -> Result<Vec<i16>, String> {
+    let t0 = std::time::Instant::now();
     if bobby_infer::is_local(voice_url) {
         let tts = LOCAL_TTS.get().ok_or("local tts not loaded")?;
         let wav = tokio::time::timeout(Duration::from_secs(20), bobby_proto::infer::Speak::speak(tts, text, lang, voice))
             .await
             .map_err(|_| "local tts timed out".to_string())?
             .map_err(|e| e.to_string())?;
-        return tokio::task::spawn_blocking(move || collect(decode_wav(normalize(&wav.0)))).await.map_err(|e| e.to_string());
+        let first = t0.elapsed().as_millis();
+        let out = tokio::task::spawn_blocking(move || collect(decode_wav(normalize(&wav.0)))).await.map_err(|e| e.to_string());
+        println!("[timing] tts first byte {first} ms, total {} ms", t0.elapsed().as_millis());
+        return out;
     }
     let client = reqwest::Client::builder().timeout(Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
     let res = client
@@ -155,8 +159,11 @@ async fn fetch_tts(voice_url: &str, lang: &str, voice: &str, text: &str) -> Resu
     if !res.status().is_success() {
         return Err(format!("tts {}", res.status()));
     }
+    let first = t0.elapsed().as_millis();
     let bytes = res.bytes().await.map_err(|e| e.to_string())?;
-    tokio::task::spawn_blocking(move || collect(decode_wav(normalize(&bytes)))).await.map_err(|e| e.to_string())
+    let out = tokio::task::spawn_blocking(move || collect(decode_wav(normalize(&bytes)))).await.map_err(|e| e.to_string());
+    println!("[timing] tts first byte {first} ms, total {} ms", t0.elapsed().as_millis());
+    out
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -207,12 +214,12 @@ fn ring_core(mixer: &MixerRef, st: &Mutex<Speech>, on: bool, owner: Option<UserI
 // Clips and signals
 
 /// Short clip (ack, beep, nope): stops the ring, plays as overlay; a reply that follows waits for its end.
-fn clip_core(mixer: &MixerRef, st: &Mutex<Speech>, pcm: Vec<i16>) {
+fn clip_core(mixer: &MixerRef, st: &Mutex<Speech>, pcm: Vec<i16>, beep: bool) {
     ring_stop_core(mixer, st, None);
     let done = {
         let mut m = mixer.lock().unwrap();
         m.voice_gain = voice_gain(); // read at each clip: a volume change applies to the next one
-        m.overlay(PcmRx::from_vec(pcm))
+        if beep { m.overlay_beep(PcmRx::from_vec(pcm)) } else { m.overlay(PcmRx::from_vec(pcm)) }
     };
     let (tx, rx) = watch::channel(false);
     st.lock().unwrap().clip = Some(rx);
@@ -234,7 +241,7 @@ fn ack_core(mixer: &MixerRef, st: &Mutex<Speech>) -> bool {
         s.last_ack = Some(t);
         s.acks[t].clone()
     };
-    clip_core(mixer, st, pcm.to_vec());
+    clip_core(mixer, st, pcm.to_vec(), false);
     true
 }
 
@@ -242,11 +249,11 @@ fn signal_core(mixer: &MixerRef, st: &Mutex<Speech>, kind: SignalKind, speaker: 
     match kind {
         SignalKind::Ack => {
             if !ack_core(mixer, st) {
-                clip_core(mixer, st, loud(beep_pcm()));
+                clip_core(mixer, st, loud(beep_pcm()), true);
             }
         }
-        SignalKind::Beep => clip_core(mixer, st, loud(beep_pcm())),
-        SignalKind::Nope => clip_core(mixer, st, loud(nope_pcm())),
+        SignalKind::Beep => clip_core(mixer, st, loud(beep_pcm()), true),
+        SignalKind::Nope => clip_core(mixer, st, loud(nope_pcm()), false),
         SignalKind::Listening => ring_core(mixer, st, true, speaker),
     }
 }
@@ -346,7 +353,7 @@ async fn say_core(
     let done = {
         let mut m = mixer.lock().unwrap();
         m.voice_gain = voice_gain(); // read at each clip: a volume change applies to the next one
-        m.overlay(PcmRx::from_vec(pcm))
+        m.overlay_reply(PcmRx::from_vec(pcm))
     };
     if let Some(u) = to {
         st.lock().unwrap().told = true;
@@ -384,7 +391,7 @@ pub fn signal(bot: &Arc<Bot>, kind: SignalKind) {
 
 /// Plays a short clip (48 kHz stereo i16) as overlay.
 pub fn clip(bot: &Arc<Bot>, pcm: Vec<i16>) {
-    clip_core(&bot.mixer, &bot.speech, pcm);
+    clip_core(&bot.mixer, &bot.speech, pcm, false);
 }
 
 /// Speaking ring on or off; `owner`: only that speaker's end stops it.

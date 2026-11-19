@@ -23,7 +23,7 @@ pub static STOP: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 // Polite wrappers around a command ("est-ce que tu peux mute Kévin s'il te plaît").
-pub static LEAD: LazyLock<Regex> = LazyLock::new(|| re(r"^(?:(?:est-ce que |est ce que )?(?:tu peux|tu pourrais|peux-tu|peux tu|pourrais-tu|pourrais tu)|vas-y|vas y|can you|could you|would you|please)[\s,]+"));
+pub static LEAD: LazyLock<Regex> = LazyLock::new(|| re(r"^(?:(?:est-ce que |est ce que )?(?:tu peux|tu pourrais|peux-tu|peux tu|pourrais-tu|pourrais tu)|vas-y|vas y|can you|could you|would you|please|s'il te pla[iî]t|stp|svp)[\s,]+"));
 pub static TRAIL: LazyLock<Regex> = LazyLock::new(|| re(r"[\s,]+(?:stp|svp|s'il te pla[iî]t|s'il vous pla[iî]t|please)$"));
 
 pub fn clean(query: &str) -> String {
@@ -41,30 +41,123 @@ pub fn clean(query: &str) -> String {
     }
 }
 
+// Infinitives ("est-ce que tu peux baisser le son") become the imperative the module regexes know; "me jouer" -> "joue".
+fn inf(w: &str) -> Option<&'static str> {
+    Some(match w {
+        "baisser" => "baisse", "diminuer" => "diminue", "réduire" => "réduis", "augmenter" => "augmente", "monter" => "monte",
+        "remonter" => "remonte", "jouer" => "joue", "mettre" => "mets", "lancer" => "lance", "ouvrir" => "ouvre", "fermer" => "ferme",
+        "quitter" => "quitte", "couper" => "coupe", "arrêter" => "arrête", "passer" => "passe", "sauter" => "saute", "reprendre" => "reprends",
+        "relancer" => "relance", "remettre" => "remets", "diviser" => "divise", "déconnecter" => "déconnecte", "déplacer" => "déplace",
+        "redéplacer" => "redéplace", "bouger" => "bouge",
+        _ => return None,
+    })
+}
+
+// "lancer YouTube Music dans Brave", "fermer les onglets Steam": more than an app name, the LLM decides.
+fn pc_ambiguous(a: &[Value]) -> bool {
+    static AMB: LazyLock<Regex> = LazyLock::new(|| re(r"^(?:les |des )|\b(?:dans|avec|sur|et)\b"));
+    a.iter().any(|s| matches!(s["type"].as_str(), Some("pc_launch" | "pc_close")) && hit(&AMB, s["text"].as_str().unwrap_or("")))
+}
+
+fn imperative(q: &str) -> String {
+    static FIRST: LazyLock<Regex> = LazyLock::new(|| re(r"^(?:(?:me|moi) )?(\p{L}+) "));
+    static ALONE: LazyLock<Regex> = LazyLock::new(|| re(r"^(\p{L}+)$"));
+    static STYLE: LazyLock<Regex> = LazyLock::new(|| re(r"^(joue|mets|lance) (?:du|de la|de) (?:musique|music) (?!de |du |d'|des )(?=.)"));
+    let mut v = q.to_string();
+    if let Some(c) = caps(&FIRST, q) {
+        if let Some(i) = inf(group(&c, 1)) {
+            v = format!("{i} {}", &q[c.get(0).unwrap().end()..]);
+        }
+    } else if let Some(c) = caps(&ALONE, q) {
+        if let Some(i) = inf(group(&c, 1)) {
+            v = i.to_string();
+        }
+    }
+    replace1(&STYLE, &v, "$1 de la ")
+}
+
+type Extra = (Regex, fn(&fancy_regex::Captures) -> Vec<Value>);
+
+fn vol(t: String) -> Vec<Value> {
+    vec![json!({ "type": "music_volume", "text": t })]
+}
+
+// R4 (2026-11-19): relative volume, "mets X", skip, "va dans <salon>". Tried only after every module regex missed, on the
+// imperative form. Volume texts: 'up' | 'down' | 'N' (set) | '-N%' | '+N%' (relative to now) | '/N' (divide).
+static EXTRA: LazyLock<Vec<Extra>> = LazyLock::new(|| {
+    let loud = "(?:(?:le |ton |la )?(?:son|volume|musique)(?: sonore)?(?: de la musique)?)";
+    let md = "(?: (?:un peu|encore|plus|beaucoup|légèrement)){0,2}";
+    let chan = "(?:(?:le |la |l')?(?:salon|channel|salle|vocal)(?: vocal| de)? )?";
+    let x = |p: &str| re(&p.replace("@L", loud).replace("@M", md).replace("@C", chan));
+    vec![
+        (x(r"^divise(?: @L)? par (deux|trois|quatre|cinq|\d+)(?: @L)?$"), |m| {
+            vol(format!("/{}", match group(m, 1) { "deux" => "2", "trois" => "3", "quatre" => "4", "cinq" => "5", d => d }))
+        }),
+        (x(r"^(baisse|diminue|réduis)(?: @L)? de moitié$"), |_| vol("/2".into())),
+        (x(r"^(?:mets|met|règle|regle) @L (?:à|a) (\d+) ?(?:%|pour ?cent) de (?:ce qu'il (?:est|était)|maintenant|l'actuel)$"), |m| {
+            vol(format!("-{}%", 100 - group(m, 1).parse::<i64>().unwrap_or(0)))
+        }),
+        (x(r"^(baisse|diminue|réduis|descends|augmente|monte|remonte)(?: @L)? de (\d+) ?(?:%|pour ?cent|percent)(?: @L)?$"), |m| {
+            let sign = if matches!(group(m, 1), "augmente" | "monte" | "remonte") { '+' } else { '-' };
+            vol(format!("{sign}{}%", group(m, 2)))
+        }),
+        (x(r"^(?:(?:mets|met|règle|regle|baisse|diminue|augmente|monte|descends) @L (?:à|a|sur)|(?:à|a)) (\d+) ?(?:%|pour ?cent|percent)$"), |m| vol(group(m, 1).to_string())),
+        (x(r"^(?:(?:monte|augmente|remonte)@M(?: @L)?|(?:mets|met) @L plus fort|(?:un peu |encore )?plus fort)@M$"), |_| vol("up".into())),
+        (x(r"^(?:(?:baisse|diminue|réduis|descends)@M(?: @L)?|(?:mets|met) @L moins fort|(?:un peu |encore )?(?:moins fort|plus bas))@M$"), |_| vol("down".into())),
+        (x(r"^(?:skip|passe|saute|next|change)(?: de)?(?: cette| cet| la| le)?(?: (?:musique|chanson|piste|titre|morceau|son))?(?:-l[àa]|-ci| l[àa]| ci)?$|^(?:passe|va) (?:à|au) (?:la |le )?(?:suivante?|prochaine?|prochain|titre suivant)$|^(?:suivant|au suivant)$"), |_| vec![json!({ "type": "music_skip", "text": "" })]),
+        (x(r"^mets? (?:la musique )?sur pause$|^pause$"), |_| vec![json!({ "type": "music_pause", "text": "" })]),
+        (x(r"^(?:reprends|relance|continue)(?: la)? (?:lecture|musique|le morceau)$"), |_| vec![json!({ "type": "music_resume", "text": "" })]),
+        (x(r"^(?:arrête|arrete|stop)(?: la| le)? lecture$"), |_| vec![json!({ "type": "music_stop", "text": "" })]),
+        (x(r"^(?:me |moi )?(?:re)?(?:déplace|deplace|bouge)(?:-moi)? (?:dans|en|sur) @C(.+)$"), |m| vec![json!({ "type": "move", "who": ["moi"], "channel": group(m, 1) })]),
+        (x(r"^(?:va|vas|move|go) (?:dans|en|sur) @C(.+)$"), |m| vec![json!({ "type": "come", "channel": group(m, 1) })]),
+        (x(r"^(?:déconnecte|deconnecte)(?:-toi| toi)$"), |_| vec![json!({ "type": "leave" })]),
+        // "mets X": a title (not the PC, volume, a person or a place)
+        (x(r"^(?:mets|met|play|put on)(?:-moi| me)? (?:la (?:musique|chanson) de |le (?:titre|morceau|son) |la chanson )?(?!(?:à |a |la |le |les |en |sur |ton |ta |tes |mon |ma |mes |moi\b|nous\b|ça\b|ca\b|pause|quelque|un truc|une? (?:radio|truc)|the |my |me\b))(?!.*\b(?:dans|sur|en|à|vers)\b)(.+)$"), |m| {
+            vec![json!({ "type": "music_play", "text": group(m, 1), "kind": "youtube" })]
+        }),
+    ]
+});
+
 /// Simple commands without the LLM (saves ~1 s). Anything more complex returns None and goes to the LLM.
 pub fn quick(query: &str) -> Option<Vec<Value>> {
     static MANY: LazyLock<Regex> = LazyLock::new(|| re(r" et | puis |sauf| and | then |except|,"));
     static UNDO: LazyLock<Regex> = LazyLock::new(|| re(r"^(?:annule(?: ça)?|undo(?: that)?)$"));
+    static BOBBY: LazyLock<Regex> = LazyLock::new(|| re_i(r"^\s*bobby[\s,]+"));
+    static QUESTION: LazyLock<Regex> = LazyLock::new(|| re(r"^(?:quelle?s?|combien|comment|pourquoi|est-ce|qu'est|c'est quoi|qui|où|quand|what|how|why|who|where|when|is|are|do|does)\b"));
     for m in modules() {
         if let Some(e) = m.early.and_then(|f| f(query)) {
             return Some(e);
         }
     }
-    let q = clean(query);
+    let q = clean(&replace1(&BOBBY, query, ""));
     // several requests, people or exclusions: leave it to the LLM
     if hit(&MANY, &q) {
         return None;
     }
-    for m in modules() {
-        for (r, make) in &m.quick {
-            if let Some(c) = caps(r, &q) {
-                let v = make(&c);
-                return if v.is_empty() { None } else { Some(v) };
+    let v = imperative(&q);
+    let forms: Vec<&str> = if v == q { vec![&q] } else { vec![&q, &v] };
+    for w in forms {
+        for m in modules() {
+            for (r, make) in &m.quick {
+                if let Some(c) = caps(r, w) {
+                    let a = make(&c);
+                    if !a.is_empty() && !pc_ambiguous(&a) {
+                        return Some(a);
+                    }
+                }
             }
         }
     }
     if hit(&UNDO, &q) {
         return Some(vec![json!({ "type": "undo" })]);
+    }
+    if hit(&QUESTION, &v) {
+        return None;
+    }
+    for (r, make) in EXTRA.iter() {
+        if let Some(c) = caps(r, &v) {
+            return Some(make(&c));
+        }
     }
     None
 }

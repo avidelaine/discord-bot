@@ -23,3 +23,5 @@ pub mod testing;
 mod tests_batch2;
 #[cfg(test)]
 mod tests_batch34;
+#[cfg(test)]
+mod tests_r4;

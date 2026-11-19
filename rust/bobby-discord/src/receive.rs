@@ -372,9 +372,12 @@ impl Shared {
                 exchange(&url, pcm, ring).await
             }
         };
-        let res = match tokio::time::timeout(Duration::from_secs(30), run).await {
+        let res = match tokio::time::timeout(Duration::from_secs(10), run).await {
             Ok(r) => r,
-            Err(_) => Err("voice service timed out (30 s)".to_string()),
+            Err(_) => {
+                println!("[stt] timed out after 10 s");
+                Err("voice service timed out (10 s)".to_string())
+            },
         };
         caps::ring(bot, false, user);
         match res {

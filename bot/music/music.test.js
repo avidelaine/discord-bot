@@ -2,7 +2,7 @@
 const assert = require('assert');
 const { PassThrough } = require('stream');
 const { Mixer, FRAME, FADE_OUT, XFADE } = require('./mixer');
-const { Player } = require('./player');
+const { Player, endedEarly } = require('./player');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const dc = (value, frames) => {
@@ -118,6 +118,10 @@ async function endless() {
 }
 
 (async () => {
+  assert.strictEqual(endedEarly(192000 * 100, 200, false), 100);
+  assert.strictEqual(endedEarly(192000 * 198, 200, false), null);
+  assert.strictEqual(endedEarly(192000 * 10, 200, true), null);
+  assert.strictEqual(endedEarly(192000 * 10, undefined, false), null);
   await synthetic();
   await fades();
   await network();

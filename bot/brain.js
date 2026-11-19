@@ -139,7 +139,9 @@ function context(member, guild) {
   };
 }
 
-const hotwords = (ctx) => ['Bobby', ...ctx.members.flatMap((m) => [m.name, ...(m.nicknames || [])]), ...ctx.voiceChannels.map((c) => c.name)].join(' ').slice(0, 400);
+// Command words right after "Bobby" so the 400-char cut never drops them ("qui te discorde", "Hearthstyle").
+const COMMAND_WORDS = ['Discord', 'hardstyle', 'volume'];
+const hotwords = (ctx) => ['Bobby', ...COMMAND_WORDS, ...ctx.members.flatMap((m) => [m.name, ...(m.nicknames || [])]), ...ctx.voiceChannels.map((c) => c.name)].join(' ').slice(0, 400);
 
 // The conversation of everyone who talks to Bobby (one voice channel at a time), so "ça", "le dernier", "refais" or
 // "non pas ça" make sense whoever said what before: last 10 exchanges within 30 minutes, with what Bobby did and
@@ -298,7 +300,7 @@ const noteText = (query) => MODULES.map((m) => m.early?.(query)).find((x) => x?.
 // ---------- LLM-free shortcuts ----------
 
 // Polite wrappers around a command ("est-ce que tu peux mute Kévin s'il te plaît").
-const LEAD = /^(?:(?:est-ce que |est ce que )?(?:tu peux|tu pourrais|peux-tu|peux tu|pourrais-tu|pourrais tu)|vas-y|vas y|can you|could you|would you|please)[\s,]+/;
+const LEAD = /^(?:(?:est-ce que |est ce que )?(?:tu peux|tu pourrais|peux-tu|peux tu|pourrais-tu|pourrais tu)|vas-y|vas y|can you|could you|would you|please|s'il te pla[iî]t|stp|svp)[\s,]+/;
 const TRAIL = /[\s,]+(?:stp|svp|s'il te pla[iî]t|s'il vous pla[iî]t|please)$/;
 
 function clean(query) {
@@ -307,19 +309,62 @@ function clean(query) {
   return q;
 }
 
+// Infinitives ("est-ce que tu peux baisser le son") become the imperative the module regexes know; "me jouer" -> "joue".
+const INF = { baisser: 'baisse', diminuer: 'diminue', réduire: 'réduis', augmenter: 'augmente', monter: 'monte', remonter: 'remonte', jouer: 'joue', mettre: 'mets', lancer: 'lance', ouvrir: 'ouvre', fermer: 'ferme', quitter: 'quitte', couper: 'coupe', arrêter: 'arrête', passer: 'passe', sauter: 'saute', reprendre: 'reprends', relancer: 'relance', remettre: 'remets', diviser: 'divise', déconnecter: 'déconnecte', déplacer: 'déplace', redéplacer: 'redéplace', bouger: 'bouge' };
+// "lancer YouTube Music dans Brave", "fermer les onglets Steam": more than an app name, the LLM decides.
+const PC_AMBIGUOUS = (a) => a.some((s) => (s.type === 'pc_launch' || s.type === 'pc_close') && /^(?:les |des )|\b(?:dans|avec|sur|et)\b/.test(s.text || ''));
+function imperative(q) {
+  let v = q.replace(/^(?:(?:me|moi) )?(\p{L}+) /u, (m, w) => (INF[w] ? `${INF[w]} ` : m)).replace(/^(\p{L}+)$/u, (m, w) => INF[w] || m);
+  // "de la musique Lofi Chill" -> "de la Lofi Chill" (a style, not the word "musique")
+  return v.replace(/^(joue|mets|lance) (?:du|de la|de) (?:musique|music) (?!de |du |d'|des )(?=.)/, '$1 de la ');
+}
+
+// R4 (2026-11-19): relative volume, "mets X", skip, "va dans <salon>". Tried only after every module regex missed, on the
+// imperative form. Volume texts: 'up' | 'down' | 'N' (set) | '-N%' | '+N%' (relative to now) | '/N' (divide), see music_volume.
+const NUMW = { deux: 2, trois: 3, quatre: 4, cinq: 5 };
+const LOUD = "(?:(?:le |ton |la )?(?:son|volume|musique)(?: sonore)?(?: de la musique)?)";
+const MOD = '(?: (?:un peu|encore|plus|beaucoup|légèrement)){0,2}';
+const REL = new RegExp(`^(baisse|diminue|réduis|descends|augmente|monte|remonte)(?: ${LOUD})? de (\\d+) ?(?:%|pour ?cent|percent)(?: ${LOUD})?$`);
+const CHAN = "(?:(?:le |la |l')?(?:salon|channel|salle|vocal)(?: vocal| de)? )?";
+const vol = (t) => [{ type: 'music_volume', text: t }];
+const EXTRA = [
+  [new RegExp(`^divise(?: ${LOUD})? par (deux|trois|quatre|cinq|\\d+)(?: ${LOUD})?$`), (m) => vol(`/${NUMW[m[1]] || m[1]}`)],
+  [new RegExp(`^(baisse|diminue|réduis)(?: ${LOUD})? de moitié$`), () => vol('/2')],
+  [new RegExp(`^(?:mets|met|règle|regle) ${LOUD} (?:à|a) (\\d+) ?(?:%|pour ?cent) de (?:ce qu'il (?:est|était)|maintenant|l'actuel)$`), (m) => vol(`-${100 - m[1]}%`)],
+  [REL, (m) => vol(`${/^(?:augmente|monte|remonte)$/.test(m[1]) ? '+' : '-'}${m[2]}%`)],
+  [new RegExp(`^(?:(?:mets|met|règle|regle|baisse|diminue|augmente|monte|descends) ${LOUD} (?:à|a|sur)|(?:à|a)) (\\d+) ?(?:%|pour ?cent|percent)$`), (m) => vol(m[1])],
+  [new RegExp(`^(?:(?:monte|augmente|remonte)${MOD}(?: ${LOUD})?|(?:mets|met) ${LOUD} plus fort|(?:un peu |encore )?plus fort)${MOD}$`), () => vol('up')],
+  [new RegExp(`^(?:(?:baisse|diminue|réduis|descends)${MOD}(?: ${LOUD})?|(?:mets|met) ${LOUD} moins fort|(?:un peu |encore )?(?:moins fort|plus bas))${MOD}$`), () => vol('down')],
+  [/^(?:skip|passe|saute|next|change)(?: de)?(?: cette| cet| la| le)?(?: (?:musique|chanson|piste|titre|morceau|son))?(?:-l[àa]|-ci| l[àa]| ci)?$|^(?:passe|va) (?:à|au) (?:la |le )?(?:suivante?|prochaine?|prochain|titre suivant)$|^(?:suivant|au suivant)$/, () => [{ type: 'music_skip', text: '' }]],
+  [/^mets? (?:la musique )?sur pause$|^pause$/, () => [{ type: 'music_pause', text: '' }]],
+  [/^(?:reprends|relance|continue)(?: la)? (?:lecture|musique|le morceau)$/, () => [{ type: 'music_resume', text: '' }]],
+  [/^(?:arrête|arrete|stop)(?: la| le)? lecture$/, () => [{ type: 'music_stop', text: '' }]],
+  [new RegExp(`^(?:me |moi )?(?:re)?(?:déplace|deplace|bouge)(?:-moi)? (?:dans|en|sur) ${CHAN}(.+)$`), (m) => [{ type: 'move', who: ['moi'], channel: m[1] }]],
+  [new RegExp(`^(?:va|vas|move|go) (?:dans|en|sur) ${CHAN}(.+)$`), (m) => [{ type: 'come', channel: m[1] }]],
+  [/^(?:déconnecte|deconnecte)(?:-toi| toi)$/, () => [{ type: 'leave' }]],
+  // "mets X": a title (not the PC, volume, a person or a place)
+  [/^(?:mets|met|play|put on)(?:-moi| me)? (?:la (?:musique|chanson) de |le (?:titre|morceau|son) |la chanson )?(?!(?:à |a |la |le |les |en |sur |ton |ta |tes |mon |ma |mes |moi\b|nous\b|ça\b|ca\b|pause|quelque|un truc|une? (?:radio|truc)|the |my |me\b))(?!.*\b(?:dans|sur|en|à|vers)\b)(.+)$/, (m) => [{ type: 'music_play', text: m[1], kind: 'youtube' }]],
+];
+const QUESTION = /^(?:quelle?s?|combien|comment|pourquoi|est-ce|qu'est|c'est quoi|qui|où|quand|what|how|why|who|where|when|is|are|do|does)\b/;
+
 // Simple commands without the LLM (saves ~1 s). Anything more complex returns null and goes to the LLM.
 function quick(query) {
   for (const m of MODULES) { const hit = m.early?.(query); if (hit) return hit; }
-  const q = clean(query);
+  const q = clean(query.replace(/^\s*bobby[\s,]+/i, ''));
   // several requests, people or exclusions: leave it to the LLM
   if (/ et | puis |sauf| and | then |except|,/.test(q)) return null;
-  for (const m of MODULES) {
-    for (const [re, make] of m.quick) {
-      const hit = q.match(re);
-      if (hit) return make(hit);
+  const v = imperative(q);
+  for (const w of v === q ? [q] : [q, v]) {
+    for (const m of MODULES) {
+      for (const [re, make] of m.quick) {
+        const hit = w.match(re);
+        if (hit) { const a = make(hit); if (a && !PC_AMBIGUOUS(a)) return a; }
+      }
     }
   }
   if (/^(?:annule(?: ça)?|undo(?: that)?)$/.test(q)) return [{ type: 'undo' }];
+  if (QUESTION.test(v)) return null;
+  for (const [re, make] of EXTRA) { const hit = v.match(re); if (hit) return make(hit); }
   return null;
 }
 

@@ -135,6 +135,7 @@ struct Resolved {
     station: Option<String>,
     alts: Vec<Station>, // radio: the other stations, tried when this stream dies before any sound
     live: bool,
+    duration: Option<f64>, // seconds, from yt-dlp; None for radio
     endless: Option<Endless>,
     seed: Option<String>,
 }
@@ -314,6 +315,9 @@ impl Player {
             let mut st = self.st.lock().await;
             let Some(c) = st.current.as_ref().filter(|c| c.tag == tag) else { return };
             let mut item = c.item.clone();
+            if let Some(played) = ended_early(read, item.duration, item.live) {
+                eprintln!("[music] track ended early: {} at {played:.0}s of {:.0}s", item.title, item.duration.unwrap_or(0.0));
+            }
             // a radio stream that died before any sound: try the next station of the list
             if read == 0 && !item.alts.is_empty() {
                 let next = item.alts.remove(0);
@@ -403,7 +407,7 @@ impl Player {
         }
         let e = entry?;
         let t = youtube(&watch(&e.id)).await.ok()?;
-        Some(Resolved { kind: "youtube", id: t.id, title: t.title, url: t.url, station: None, alts: vec![], live: false, endless: Some(mode), seed: Some(seed) })
+        Some(Resolved { kind: "youtube", id: t.id, title: t.title, url: t.url, station: None, alts: vec![], live: false, duration: t.duration, endless: Some(mode), seed: Some(seed) })
     }
 
     // ponytail: pausing a live radio just stops reading it; it may resume a bit behind live.
@@ -514,18 +518,33 @@ async fn resolve(src: Src) -> Result<Resolved, String> {
                 return Err(format!("no radio found for \"{style}\""));
             }
             let first = stations.remove(0);
-            return Ok(Resolved { kind: "radio", id: String::new(), title: first.station.clone(), url: first.url, station: Some(first.station), alts: stations, live: true, endless: None, seed: None });
+            return Ok(Resolved { kind: "radio", id: String::new(), title: first.station.clone(), url: first.url, station: Some(first.station), alts: stations, live: true, duration: None, endless: None, seed: None });
         }
         MusicItem::Youtube { query, endless, seed } => (query, endless, seed),
     };
     let t = youtube(&query).await?;
     let seed = seed.filter(|s| !s.is_empty()).unwrap_or(query);
-    Ok(Resolved { kind: "youtube", id: t.id, title: t.title, url: t.url, station: None, alts: vec![], live: false, endless, seed: Some(seed) })
+    Ok(Resolved { kind: "youtube", id: t.id, title: t.title, url: t.url, station: None, alts: vec![], live: false, duration: t.duration, endless, seed: Some(seed) })
+}
+
+/// Seconds played when a non-live track ended more than 5 s before its known duration (`read` is in i16
+/// samples: 48 kHz stereo).
+fn ended_early(read: usize, duration: Option<f64>, live: bool) -> Option<f64> {
+    let played = read as f64 / 96000.0;
+    duration.filter(|d| !live && played + 5.0 < *d).map(|_| played)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ended_early_detects_cut_tracks() {
+        assert_eq!(ended_early(96000 * 100, Some(200.0), false), Some(100.0));
+        assert_eq!(ended_early(96000 * 198, Some(200.0), false), None);
+        assert_eq!(ended_early(96000 * 10, Some(200.0), true), None);
+        assert_eq!(ended_early(96000 * 10, None, false), None);
+    }
     use crate::mixer::MixEvent;
     use tokio::sync::mpsc::unbounded_channel;
 
@@ -535,7 +554,7 @@ mod tests {
     }
 
     fn fake(title: &str) -> Resolved {
-        Resolved { kind: "youtube", id: "x".into(), title: title.into(), url: "http://127.0.0.1:1/none".into(), station: None, alts: vec![], live: false, endless: None, seed: None }
+        Resolved { kind: "youtube", id: "x".into(), title: title.into(), url: "http://127.0.0.1:1/none".into(), station: None, alts: vec![], live: false, duration: None, endless: None, seed: None }
     }
 
     #[test]

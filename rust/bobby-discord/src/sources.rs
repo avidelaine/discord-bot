@@ -35,6 +35,7 @@ pub struct Track {
     pub id: String,
     pub title: String,
     pub url: String,
+    pub duration: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -222,15 +223,21 @@ fn kill_tree(pid: u32) {
 }
 
 /// Same arguments as sources.js. Returns when the stream ends or the receiver is dropped (ffmpeg is killed).
-fn run_ffmpeg(url: &str, live: bool, tx: &PcmTx) {
+fn run_ffmpeg(url: &str, _live: bool, tx: &PcmTx) {
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-nostdin", "-loglevel", "error"]);
-    if live {
-        cmd.args(["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]);
-    }
+    // all http(s) inputs: YouTube closes idle connections while the pipe is full, a plain EOF would skip the track
+    cmd.args(["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5"]);
     cmd.args(["-user_agent", UA, "-i", url, "-vn", "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"]);
-    let Ok(mut child): Result<Child, _> = quiet(&mut cmd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else { return };
+    let Ok(mut child): Result<Child, _> = quiet(&mut cmd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() else { return };
     let mut stdout = child.stdout.take().expect("piped");
+    if let Some(stderr) = child.stderr.take() {
+        std::thread::spawn(move || {
+            for line in std::io::BufRead::lines(std::io::BufReader::new(stderr)).map_while(Result::ok) {
+                eprintln!("[ffmpeg] {line}");
+            }
+        });
+    }
     let mut buf = [0u8; 8192];
     let mut carry = 0; // bytes of a sample cut by a short read
     while let Ok(n) = stdout.read(&mut buf[carry..]) {
@@ -378,7 +385,7 @@ pub async fn youtube(query: &str) -> Result<Track, String> {
     let out = ytdlp(args).await?;
     let j: serde_json::Value = serde_json::from_str(out.lines().next().unwrap_or("")).unwrap_or_default();
     match j["url"].as_str().filter(|u| !u.is_empty()) {
-        Some(url) => Ok(Track { id: j["id"].as_str().unwrap_or("").to_string(), title: j["title"].as_str().unwrap_or("").to_string(), url: url.to_string() }),
+        Some(url) => Ok(Track { id: j["id"].as_str().unwrap_or("").to_string(), title: j["title"].as_str().unwrap_or("").to_string(), url: url.to_string(), duration: j["duration"].as_f64() }),
         None => Err(format!("nothing found on YouTube for \"{query}\"")),
     }
 }

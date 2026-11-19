@@ -48,6 +48,8 @@ struct Fading {
 struct Overlay {
     rx: PcmRx,
     done: oneshot::Sender<()>,
+    /// Bobby's spoken reply: a beep never cuts it.
+    reply: bool,
 }
 
 pub struct Mixer {
@@ -107,9 +109,28 @@ impl Mixer {
 
     /// A new overlay replaces the running one. The receiver resolves when it ends, is replaced or stopped.
     pub fn overlay(&mut self, src: PcmRx) -> oneshot::Receiver<()> {
+        self.put_overlay(src, false)
+    }
+
+    /// Like `overlay`, for Bobby's spoken reply: a later `overlay_beep` will not replace it.
+    pub fn overlay_reply(&mut self, src: PcmRx) -> oneshot::Receiver<()> {
+        self.put_overlay(src, true)
+    }
+
+    /// A beep: dropped (the receiver resolves at once) while a reply plays, otherwise a normal overlay.
+    pub fn overlay_beep(&mut self, src: PcmRx) -> oneshot::Receiver<()> {
+        if self.over.as_ref().is_some_and(|o| o.reply) {
+            let (done, rx) = oneshot::channel();
+            let _ = done.send(());
+            return rx;
+        }
+        self.put_overlay(src, false)
+    }
+
+    fn put_overlay(&mut self, src: PcmRx, reply: bool) -> oneshot::Receiver<()> {
         self.stop_overlay();
         let (done, rx) = oneshot::channel();
-        self.over = Some(Overlay { rx: src, done });
+        self.over = Some(Overlay { rx: src, done, reply });
         self.ensure();
         rx
     }
@@ -283,6 +304,20 @@ mod tests {
         assert!(near(f[f.len() - 20], 8000.0, 50.0), "music restored");
         assert!(m.next_frame().is_none(), "ends when idle");
         assert!(!m.has_overlay() && done.try_recv().is_ok(), "overlay receiver resolved");
+    }
+
+    #[test]
+    fn beep_does_not_cut_a_reply_but_replaces_other_overlays() {
+        let (mut m, _ev) = mixer();
+        let mut reply = m.overlay_reply(dc(1000, 50));
+        let mut beep = m.overlay_beep(dc(500, 5));
+        assert!(beep.try_recv().is_ok(), "beep dropped");
+        assert!(m.has_overlay() && reply.try_recv().is_err(), "reply still playing");
+        let f = pull(&mut m, 3);
+        assert!(f.iter().any(|&v| v == 1000), "reply audio, not the beep");
+        let mut ring = m.overlay(dc(2, 50));
+        let _beep = m.overlay_beep(dc(500, 5));
+        assert!(ring.try_recv().is_ok(), "a beep still replaces the ring");
     }
 
     #[test]

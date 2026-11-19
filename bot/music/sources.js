@@ -6,6 +6,9 @@ const UA = 'Bobby/1.0';
 const YTDLP = path.join(__dirname, '..', '..', '_bin', 'yt-dlp.exe');
 const RADIO_API = 'https://de1.api.radio-browser.info/json/stations';
 
+// ffmpeg lines that only say we closed its output (the muxer's "Invalid argument" can race ahead of 'close')
+const isNoise = (l) => /muxer: Invalid argument|muxing a packet|-22 \(Invalid argument\)|Last message repeated/.test(l);
+
 // url string or Readable (e.g. a WAV from the TTS) -> raw s16le 48 kHz stereo stream. Destroying it kills ffmpeg.
 // All http(s) inputs reconnect: YouTube closes idle connections while the pipe is full, and a plain EOF skipped the track.
 // headers: yt-dlp's http_headers for this track (the User-Agent and Referer its URL was signed for).
@@ -18,13 +21,20 @@ function decode(src, { headers } = {}) {
   const ff = spawn('ffmpeg', ['-nostdin', '-loglevel', 'error', ...input, '-vn', '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1'], {
     stdio: [url ? 'ignore' : 'pipe', 'pipe', 'pipe'],
   });
-  ff.stderr.on('data', (d) => String(d).split(/\r?\n/).filter(Boolean).forEach((l) => console.error(`[ffmpeg] ${l}`)));
+  // once we closed its output (skip, stop, end), ffmpeg's "Error muxing a packet" is our doing, not news
+  let errLine = '', closed = false;
+  ff.stderr.setEncoding('utf8').on('data', (s) => {
+    if (closed) return;
+    const lines = (errLine + s).split(/\r?\n/);
+    errLine = lines.pop();
+    for (const l of lines) if (l.trim() && !isNoise(l)) console.error(`[ffmpeg] ${l.trim()}`);
+  });
   if (!url) {
     ff.stdin.on('error', () => {});
     src.on('error', () => ff.kill()).pipe(ff.stdin);
   }
   ff.on('error', (e) => ff.stdout.destroy(e));
-  ff.stdout.on('close', () => ff.kill());
+  ff.stdout.on('close', () => { closed = true; ff.kill(); });
   return ff.stdout;
 }
 
@@ -73,4 +83,4 @@ const listing = (target, n = 25) => new Promise((resolve, reject) => {
   const timer = setTimeout(() => { reject(new Error('yt-dlp failed: no answer after 20 s')); kill(child); }, 20000); // see youtube()
 });
 
-module.exports = { decode, radio, youtube, listing };
+module.exports = { decode, isNoise, radio, youtube, listing };

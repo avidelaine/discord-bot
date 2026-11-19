@@ -18,6 +18,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+/// Same command words as bot/brain.js COMMAND_WORDS and voice/server.py LOCAL_HOTWORDS.
+const LOCAL_HOTWORDS: &str = "Bobby Discord le son volume musique hardstyle";
+
 pub struct Bridge {
     cfg: Config,
     sup: Arc<Supervisor>,
@@ -173,7 +176,7 @@ impl Bridge {
         let Some(stt) = self.stt.get() else {
             return self.log("[local] speech engine still loading, sentence dropped");
         };
-        let tr = match tauri::async_runtime::block_on(tokio::time::timeout(Duration::from_secs(60), stt.transcribe(&audio, ""))) {
+        let tr = match tauri::async_runtime::block_on(tokio::time::timeout(Duration::from_secs(60), stt.transcribe(&audio, LOCAL_HOTWORDS))) {
             Ok(Ok(tr)) => tr,
             Ok(Err(e)) => return self.log(&format!("[local] transcription failed: {e}")),
             Err(_) => return self.log("[local] transcription timed out after 60 s, sentence dropped"),

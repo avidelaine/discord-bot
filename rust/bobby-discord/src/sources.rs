@@ -5,6 +5,8 @@
 
 use std::io::{Read, Seek, SeekFrom};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
@@ -231,10 +233,15 @@ fn run_ffmpeg(url: &str, _live: bool, tx: &PcmTx) {
     cmd.args(["-user_agent", UA, "-i", url, "-vn", "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"]);
     let Ok(mut child): Result<Child, _> = quiet(&mut cmd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() else { return };
     let mut stdout = child.stdout.take().expect("piped");
+    let closed = Arc::new(AtomicBool::new(false));
     if let Some(stderr) = child.stderr.take() {
+        let closed = closed.clone();
         std::thread::spawn(move || {
             for line in std::io::BufRead::lines(std::io::BufReader::new(stderr)).map_while(Result::ok) {
-                eprintln!("[ffmpeg] {line}");
+                // once we closed its output (skip, stop, end), the muxer errors are our doing, not news
+                if !closed.load(Ordering::Relaxed) && !is_ffmpeg_noise(&line) {
+                    eprintln!("[ffmpeg] {line}");
+                }
             }
         });
     }
@@ -253,8 +260,14 @@ fn run_ffmpeg(url: &str, _live: bool, tx: &PcmTx) {
         buf.copy_within(whole..total, 0);
         carry = total - whole;
     }
+    closed.store(true, Ordering::Relaxed);
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// ffmpeg lines that only say we closed its output (same patterns as `isNoise` in sources.js).
+fn is_ffmpeg_noise(line: &str) -> bool {
+    ["muxer: Invalid argument", "muxing a packet", "-22 (Invalid argument)", "Last message repeated"].iter().any(|p| line.contains(p))
 }
 
 /// Radio or YouTube URL -> PCM. A thread decodes into the pipe; dropping the `PcmRx` stops it.
@@ -416,6 +429,14 @@ pub async fn listing(target: &str, n: usize) -> Result<Vec<Entry>, String> {
 mod tests {
     use super::*;
     use crate::pcm::FRAME;
+
+    #[test]
+    fn ffmpeg_noise_is_filtered() {
+        assert!(is_ffmpeg_noise("[mp3 @ 0x1] Error muxing a packet"));
+        assert!(is_ffmpeg_noise("Error submitting a packet to the muxer: Invalid argument"));
+        assert!(is_ffmpeg_noise("Last message repeated 3 times"));
+        assert!(!is_ffmpeg_noise("[https @ 0x1] Will reconnect at 123 in 0 second(s), error=Server returned 403."));
+    }
 
     /// 16-bit PCM WAV with the 44-byte header written by hand.
     fn wav(rate: u32, ch: u16, samples: &[i16]) -> Vec<u8> {

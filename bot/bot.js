@@ -257,7 +257,8 @@ function listen(connection, guild, io) {
       const expected = brain.expecting(userId); // judged when the sentence starts: a long order must not outlive the window
       const force = expected || io.speaking()?.id === userId ? '1' : '0';
       forced = force === '1';
-      const hotwords = encodeURIComponent(brain.hotwords(brain.context(member, guild)));
+      const playing = [music.auto?.seed, music.current?.title?.split(/ [-–] /)[0]]; // seed and artist of "Artist - Title"
+      const hotwords = encodeURIComponent(brain.hotwords(brain.context(member, guild), playing));
       // The sentence streams to the voice service while it is spoken: the wake word is heard mid-sentence.
       ws = new WebSocket(`${VOICE_URL.replace(/^http/, 'ws')}/listen?force=${force}&hotwords=${hotwords}`);
       ws.binaryType = 'arraybuffer';

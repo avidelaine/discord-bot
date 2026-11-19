@@ -85,7 +85,7 @@ pub fn from_guild(guild: &serenity::all::Guild, speaker: u64, bobby_channel: Opt
 /// Words that help STT spell names. Nicknames are brain data and not available here, so the brain may add
 /// its own; this covers display names and voice channel names.
 pub fn hotwords(ctx: &Context) -> String {
-    let words = ["Bobby", "Discord", "hardstyle", "volume"]
+    let words = ["Bobby", "Discord", "le son", "volume", "musique", "hardstyle"]
         .into_iter()
         .chain(ctx.members.iter().map(|m| m.name.as_str()))
         .chain(ctx.voice_channels.iter().map(|c| c.name.as_str()))
@@ -139,7 +139,7 @@ mod tests {
     fn hotwords_lists_names_and_is_capped() {
         let (v, t) = chans();
         let ctx = build(1, &fixture(), v, t, None);
-        assert_eq!(hotwords(&ctx), "Bobby Discord hardstyle volume Alexou General");
+        assert_eq!(hotwords(&ctx), "Bobby Discord le son volume musique hardstyle Alexou General");
         let mut long = ctx.clone();
         long.members[0].name = "x".repeat(900);
         assert_eq!(hotwords(&long).chars().count(), 400);

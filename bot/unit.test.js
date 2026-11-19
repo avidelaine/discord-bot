@@ -282,7 +282,7 @@ console.log('PC shortcuts and rights: ok');
   }
   assert.deepStrictEqual(quick('va dans le salon Gaming'), [{ type: 'come', channel: 'gaming' }]);
   assert.deepStrictEqual(quick('bouge dans PRIME'), [{ type: 'move', who: ['moi'], channel: 'prime' }]);
-  assert(require('./brain').hotwords(ctx).startsWith('Bobby Discord hardstyle volume Alex'), 'command words right after Bobby');
+  assert(require('./brain').hotwords(ctx).startsWith('Bobby Discord le son volume musique hardstyle Alex'), 'command words right after Bobby');
   assert.deepStrictEqual(qk('joue juste bohemian rhapsody'), ['bohemian rhapsody', 'youtube', 'unique']);
   assert.strictEqual(quick('joue Bohemian Rhapsody')[0].kind, 'youtube');
   for (const phrase of ['mets pause sur le PC', 'monte le son du PC', 'musique suivante sur Spotify', 'lance Valorant']) assert(!quick(phrase)?.some((s) => s.type.startsWith('music_')), `not music: "${phrase}"`);
@@ -835,6 +835,15 @@ async function batch3Written() {
   const msgs = fmt.messages([{ embeds: Array.from({ length: 12 }, () => ({ title: 't', fields: [] })) }, 'texte']);
   assert.deepStrictEqual(msgs.map((m) => (m.embeds ? m.embeds.length : m.content)), [10, 2, 'texte']);
   console.log('batch 3, discord formatting: ok');
+}
+
+// Whisper hotwords: command words first (they survive the 400-char cut), then what is playing, then names.
+{
+  const { hotwords } = require('./brain');
+  const h = hotwords({ members: [{ name: 'Sorciax', nicknames: ['Godmode'] }], voiceChannels: [{ name: 'PRIME' }] }, ['Tame Impala', undefined]);
+  assert(h.startsWith('Bobby Discord le son'), h);
+  assert(h.includes('Tame Impala Sorciax Godmode PRIME') && !h.includes('undefined'), h);
+  console.log('ok  hotwords: command words, the music playing, then names');
 }
 
 (async () => { // relative music_volume texts: -N%, +N%, /N compute from the current volume

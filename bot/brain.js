@@ -140,8 +140,9 @@ function context(member, guild) {
 }
 
 // Command words right after "Bobby" so the 400-char cut never drops them ("qui te discorde", "Hearthstyle").
-const COMMAND_WORDS = ['Discord', 'hardstyle', 'volume'];
-const hotwords = (ctx) => ['Bobby', ...COMMAND_WORDS, ...ctx.members.flatMap((m) => [m.name, ...(m.nicknames || [])]), ...ctx.voiceChannels.map((c) => c.name)].join(' ').slice(0, 400);
+const COMMAND_WORDS = ['Discord', 'le son', 'volume', 'musique', 'hardstyle'];
+// music: what is playing (artist names like "Tame Impala" are heard as "Taming Palace" otherwise).
+const hotwords = (ctx, music = []) => ['Bobby', ...COMMAND_WORDS, ...music.filter(Boolean), ...ctx.members.flatMap((m) => [m.name, ...(m.nicknames || [])]), ...ctx.voiceChannels.map((c) => c.name)].join(' ').slice(0, 400);
 
 // The conversation of everyone who talks to Bobby (one voice channel at a time), so "ça", "le dernier", "refais" or
 // "non pas ça" make sense whoever said what before: last 10 exchanges within 30 minutes, with what Bobby did and

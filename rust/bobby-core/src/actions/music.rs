@@ -364,14 +364,17 @@ pub async fn run<L: bobby_proto::infer::Understand + Sync>(s: &mut Step, env: &s
                     return Ok(vec![]);
                 }
                 let cur = cur["volume"].as_f64().unwrap_or(0.0);
-                let n = match (&rel, div) {
+                let (raw, dir) = match (&rel, div) {
                     (Some(r), _) => {
                         let k = r[2].parse::<f64>().unwrap_or(0.0) / 100.0;
-                        (cur * if &r[1] == "-" { 1.0 - k } else { 1.0 + k }).round()
+                        let dir = if k == 0.0 { 0.0 } else if &r[1] == "-" { -1.0 } else { 1.0 };
+                        ((cur * (1.0 + dir * k)).round(), dir)
                     }
-                    (_, d) => (cur / d.unwrap_or(1.0)).round(),
+                    (_, d) => ((cur / d.unwrap_or(1.0)).round(), if d.unwrap_or(1.0) > 1.0 { -1.0 } else { 0.0 }),
                 };
-                clamped = Some(n > 100.0);
+                // a change too small to move the rounded volume ("-10 %" at 4) still moves it by one step
+                let n = if raw == cur && dir != 0.0 { cur + dir } else { raw };
+                clamped = Some(raw > 100.0);
                 Cap::MusicVolume { op: VolumeOp::Set { level: n.clamp(0.0, 100.0) as u8 } }
             } else {
             match t {
@@ -600,6 +603,13 @@ mod tests {
         assert_eq!(say_of(json!({"type":"music_volume","text":"/2"}), &io, "en").await, "Volume at 8.");
         assert_eq!(say_of(json!({"type":"music_volume","text":"+2000%"}), &io, "en").await, "100 % is the maximum, so I'm turning it all the way up.");
         assert_eq!(say_of(json!({"type":"music_volume","text":"/0"}), &io, "fr").await, "Ça n'a pas marché : unknown volume \"/0\".");
+        // a change too small to move the rounded volume still moves it by one
+        say_of(json!({"type":"music_volume","text":"4"}), &io, "en").await;
+        assert_eq!(say_of(json!({"type":"music_volume","text":"-10%"}), &io, "en").await, "Volume at 3.");
+        say_of(json!({"type":"music_volume","text":"0"}), &io, "en").await;
+        assert_eq!(say_of(json!({"type":"music_volume","text":"+20%"}), &io, "en").await, "Volume at 1.");
+        assert_eq!(say_of(json!({"type":"music_volume","text":"/2"}), &io, "en").await, "Volume at 0.");
+        assert_eq!(say_of(json!({"type":"music_volume","text":"-10%"}), &io, "en").await, "Volume at 0.");
 
         // "200 %" sets the maximum and says so
         assert_eq!(say_of(json!({"type":"music_volume","text":"200 %"}), &io, "en").await, "100 % is the maximum, so I'm turning it all the way up.");

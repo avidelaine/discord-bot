@@ -362,6 +362,22 @@ impl Shared {
         let url = listen_url(&bot.cfg.voice_url, force, &hotwords);
         let b = bot.clone();
         let ring = move |on| caps::ring(&b, on, user);
+        // The 10 s budget starts when the sentence's PCM channel closes (end of speech), not while the user talks.
+        let (fwd_tx, pcm) = {
+            let mut src = pcm;
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<i16>>();
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+            tokio::spawn(async move {
+                while let Some(c) = src.recv().await {
+                    if tx.send(c).is_err() {
+                        break;
+                    }
+                }
+                drop(tx);
+                let _ = done_tx.send(());
+            });
+            (done_rx, rx)
+        };
         let run = async {
             if bobby_infer::is_local(&bot.cfg.voice_url) {
                 match LOCAL_LISTENER.get() {
@@ -372,9 +388,13 @@ impl Shared {
                 exchange(&url, pcm, ring).await
             }
         };
-        let res = match tokio::time::timeout(Duration::from_secs(10), run).await {
-            Ok(r) => r,
-            Err(_) => {
+        let deadline = async {
+            let _ = fwd_tx.await;
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        };
+        let res = match tokio::select! { r = run => Some(r), _ = deadline => None } {
+            Some(r) => r,
+            None => {
                 println!("[stt] timed out after 10 s");
                 Err("voice service timed out (10 s)".to_string())
             },

@@ -271,6 +271,17 @@ console.log('PC shortcuts and rights: ok');
     assert.strictEqual(quick(phrase), null, `R4 no shortcut: "${phrase}"`);
   }
   assert.strictEqual(quick('mets Marie en pause')?.some((s) => s.type === 'music_play'), false);
+  // review fixes: "mets plus fort", "mets X" never a title for volume, mute, people or places
+  for (const [phrase, text] of [['mets plus fort', 'up'], ['mets un peu plus fort', 'up'], ['mets encore plus fort', 'up'], ['mets moins fort', 'down'], ['mets plus bas', 'down'], ['mets le son plus fort', 'up'], ["mets le son à 150 % de maintenant", '+50%'], ["mets le son à 50 % de maintenant", '-50%']]) {
+    const a = quick(phrase);
+    assert(a && a.length === 1 && a[0].type === 'music_volume' && a[0].text === text, `R4 volume: "${phrase}" -> ${JSON.stringify(a)}`);
+  }
+  for (const phrase of ['mets Kévin muet', 'mets tout le monde muet', 'mets Kévin avec moi', 'mets Daft Punk à fond', 'mets Kévin sourdine', 'mets plus de basses', 'mets un peu de jazz',
+    'tu peux jouer à Valorant avec nous ?', 'tu peux jouer au foot ?', 'va en courses', 'va sur Google', 'bouge sur la droite', 'va dans la cuisine', 'où est la musique', 'où mets-tu le son']) {
+    assert(!quick(phrase)?.some((s) => ['music_play', 'come', 'move'].includes(s.type)) && !quick(phrase)?.some((s) => s.type === 'music_volume'), `R4 left to the LLM: "${phrase}" -> ${JSON.stringify(quick(phrase))}`);
+  }
+  assert.deepStrictEqual(quick('va dans le salon Gaming'), [{ type: 'come', channel: 'gaming' }]);
+  assert.deepStrictEqual(quick('bouge dans PRIME'), [{ type: 'move', who: ['moi'], channel: 'prime' }]);
   assert(require('./brain').hotwords(ctx).startsWith('Bobby Discord hardstyle volume Alex'), 'command words right after Bobby');
   assert.deepStrictEqual(qk('joue juste bohemian rhapsody'), ['bohemian rhapsody', 'youtube', 'unique']);
   assert.strictEqual(quick('joue Bohemian Rhapsody')[0].kind, 'youtube');
@@ -836,5 +847,11 @@ async function batch3Written() {
   assert.deepStrictEqual(await go(40, '/2'), ['Volume at 20.', 20]);
   assert.deepStrictEqual(await go(60, '+100%'), ["100 % is the maximum, so I'm turning it all the way up.", 100]);
   assert(/unknown volume/.test((await go(40, '/0'))[0]));
+  // a change too small to move the rounded volume still moves it by one
+  assert.deepStrictEqual(await go(4, '-10%'), ['Volume at 3.', 3]);
+  assert.deepStrictEqual(await go(0, '+20%'), ['Volume at 1.', 1]);
+  assert.deepStrictEqual(await go(1, '/2'), ['Volume at 0.', 0]);
+  assert.deepStrictEqual(await go(0, '-10%'), ['Volume at 0.', 0]);
+  assert.deepStrictEqual(await go(40, '+0%'), ['Volume at 40.', 40]);
   console.log('relative music volume: ok');
 })().catch((e) => { console.error(e); process.exit(1); });

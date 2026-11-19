@@ -239,7 +239,7 @@ function listen(connection, guild, io) {
     opus.on('error', (e) => { console.error(`[audio] ${e.message}`); pcm.end(); });
     let tEnd = performance.now();
     opus.once('end', () => { tEnd = performance.now() - SILENCE_MS; busy.delete(userId); });
-    let ws = null, gate = null, timedOut = false, timer = null;
+    let ws = null, gate = null, timedOut = false, timer = null, forced = false;
     const abort = new AbortController();
     // Max delay on the voice service after the end of speech (a Whisper hang once held the GPU lock for 305 s).
     opus.once('end', () => {
@@ -256,6 +256,7 @@ function listen(connection, guild, io) {
       // waiting for a "yes" or a command, or Bobby is answering this person (who may say "stop"): skip the wake word gate
       const expected = brain.expecting(userId); // judged when the sentence starts: a long order must not outlive the window
       const force = expected || io.speaking()?.id === userId ? '1' : '0';
+      forced = force === '1';
       const hotwords = encodeURIComponent(brain.hotwords(brain.context(member, guild)));
       // The sentence streams to the voice service while it is spoken: the wake word is heard mid-sentence.
       ws = new WebSocket(`${VOICE_URL.replace(/^http/, 'ws')}/listen?force=${force}&hotwords=${hotwords}`);
@@ -281,10 +282,13 @@ function listen(connection, guild, io) {
         ws.addEventListener('error', () => reject(Object.assign(new Error('voice service not reachable'), { cause: { code: 'ECONNREFUSED' } })));
         ws.addEventListener('close', () => (gate ? resolve(null) : reject(Object.assign(new Error('voice service closed the stream'), { cause: { code: 'ECONNREFUSED' } }))));
       });
+      const fallback = gate?.wake === false && brain.expecting(userId);
+      if (!fallback) clearTimeout(timer); // the timeout covers the transcription only, not the brain (LLM, yt-dlp, TTS)
       // "Bobby ?" then the order at once (the beep is instant): the order began before the brain waited for it.
       // No "Bobby" in it, but the brain expects it now: transcribe it anyway.
-      if (gate?.wake === false && brain.expecting(userId)) {
+      if (fallback) {
         const r = await fetch(`${VOICE_URL}/transcribe`, { method: 'POST', headers: { 'x-force': '1', 'x-hotwords': hotwords }, body: Buffer.concat(raw), signal: abort.signal }).then((x) => x.json());
+        clearTimeout(timer);
         if (r.text) {
           console.log(`\n[heard] ${member.displayName}: "${r.text}" (${r.lang}, whisper ${r.ms} ms, expected after "Bobby")`);
           await brain.hear({ text: r.text, lang: r.lang, score: null, member, guild, tEnd, sttMs: r.ms, io, expected: true });
@@ -304,7 +308,7 @@ function listen(connection, guild, io) {
       if (!timedOut) console.error(`[voice] ${e.cause?.code === 'ECONNREFUSED' ? `voice service not reachable at ${VOICE_URL} (is it running?)` : e.message}`);
     } finally {
       clearTimeout(timer);
-      if (timedOut && (!gate || gate.wake !== false)) io.say("Je n'ai pas entendu.", 'fr', 'bobby', userId).catch(() => {});
+      if (timedOut && (gate?.wake === true || forced)) io.say("Je n'ai pas entendu.", 'fr', 'bobby', userId).catch(() => {});
       io.ringStop();
       try { ws?.close(); } catch { /* already closed */ }
       busy.delete(userId);

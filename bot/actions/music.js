@@ -138,8 +138,11 @@ module.exports = {
         if (t === 'down') return p.volumeDown();
         const rel = /^([+-])(\d+)\s*(?:%|pour ?cent|percent)$/.exec(s.text.toLowerCase().trim()), div = /^\/(\d+)$/.exec(t);
         if (rel || (div && +div[1] >= 1)) {
-          const cur = p.volume().volume, n = rel ? Math.round(cur * (1 + (rel[1] === '-' ? -1 : 1) * rel[2] / 100)) : Math.round(cur / +div[1]);
-          return { ...p.setVolume(Math.max(0, n)), clamped: n > 100 };
+          const cur = p.volume().volume, dir = rel ? (rel[1] === '-' ? -1 : 1) * (+rel[2] > 0) : (+div[1] > 1 ? -1 : 0);
+          const raw = rel ? Math.round(cur * (1 + dir * rel[2] / 100)) : Math.round(cur / +div[1]);
+          // a change too small to move the rounded volume ("-10 %" at 4) still moves it by one step
+          const n = raw === cur && dir ? cur + dir : raw;
+          return { ...p.setVolume(Math.max(0, Math.min(100, n))), clamped: raw > 100 };
         }
         return /^\d+$/.test(t) ? { ...p.setVolume(+t), clamped: +t > 100 } : { error: `unknown volume "${s.text}"` };
       }),

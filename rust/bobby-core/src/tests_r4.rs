@@ -53,3 +53,24 @@ fn r4_left_to_the_llm() {
     let a = quick("mets Marie en pause").unwrap_or_default();
     assert!(!a.iter().any(|s| s["type"] == "music_play"), "{a:?}");
 }
+
+#[test]
+fn r4_review_fixes() {
+    for (phrase, text) in [
+        ("mets plus fort", "up"), ("mets un peu plus fort", "up"), ("mets encore plus fort", "up"), ("mets moins fort", "down"), ("mets plus bas", "down"),
+        ("mets le son plus fort", "up"), ("mets le son à 150 % de maintenant", "+50%"), ("mets le son à 50 % de maintenant", "-50%"),
+    ] {
+        let a = quick(phrase).unwrap_or_default();
+        assert!(a.len() == 1 && a[0]["type"] == "music_volume" && a[0]["text"] == text, "R4 volume: \"{phrase}\" -> {a:?}");
+    }
+    for phrase in [
+        "mets Kévin muet", "mets tout le monde muet", "mets Kévin avec moi", "mets Daft Punk à fond", "mets Kévin sourdine", "mets plus de basses",
+        "mets un peu de jazz", "tu peux jouer à Valorant avec nous ?", "tu peux jouer au foot ?", "va en courses", "va sur Google",
+        "bouge sur la droite", "va dans la cuisine", "où est la musique", "où mets-tu le son",
+    ] {
+        let a = quick(phrase).unwrap_or_default();
+        assert!(!a.iter().any(|s| ["music_play", "come", "move", "music_volume"].contains(&s["type"].as_str().unwrap_or(""))), "R4 left to the LLM: \"{phrase}\" -> {a:?}");
+    }
+    assert_eq!(quick("va dans le salon Gaming"), Some(vec![json!({ "type": "come", "channel": "gaming" })]));
+    assert_eq!(quick("bouge dans PRIME"), Some(vec![json!({ "type": "move", "who": ["moi"], "channel": "prime" })]));
+}

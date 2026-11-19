@@ -325,27 +325,27 @@ const NUMW = { deux: 2, trois: 3, quatre: 4, cinq: 5 };
 const LOUD = "(?:(?:le |ton |la )?(?:son|volume|musique)(?: sonore)?(?: de la musique)?)";
 const MOD = '(?: (?:un peu|encore|plus|beaucoup|légèrement)){0,2}';
 const REL = new RegExp(`^(baisse|diminue|réduis|descends|augmente|monte|remonte)(?: ${LOUD})? de (\\d+) ?(?:%|pour ?cent|percent)(?: ${LOUD})?$`);
-const CHAN = "(?:(?:le |la |l')?(?:salon|channel|salle|vocal)(?: vocal| de)? )?";
+const CHAN = "(?:(?:le |la |l')?(?:salon|channel|salle|vocal)(?: vocal| de)? )?(?!(?:le |la |les |un |une |ton |ta |tes |mon |ma |mes |l'))";
 const vol = (t) => [{ type: 'music_volume', text: t }];
 const EXTRA = [
   [new RegExp(`^divise(?: ${LOUD})? par (deux|trois|quatre|cinq|\\d+)(?: ${LOUD})?$`), (m) => vol(`/${NUMW[m[1]] || m[1]}`)],
   [new RegExp(`^(baisse|diminue|réduis)(?: ${LOUD})? de moitié$`), () => vol('/2')],
-  [new RegExp(`^(?:mets|met|règle|regle) ${LOUD} (?:à|a) (\\d+) ?(?:%|pour ?cent) de (?:ce qu'il (?:est|était)|maintenant|l'actuel)$`), (m) => vol(`-${100 - m[1]}%`)],
+  [new RegExp(`^(?:mets|met|règle|regle) ${LOUD} (?:à|a) (\\d+) ?(?:%|pour ?cent) de (?:ce qu'il (?:est|était)|maintenant|l'actuel)$`), (m) => vol(m[1] > 100 ? `+${m[1] - 100}%` : `-${100 - m[1]}%`)],
   [REL, (m) => vol(`${/^(?:augmente|monte|remonte)$/.test(m[1]) ? '+' : '-'}${m[2]}%`)],
   [new RegExp(`^(?:(?:mets|met|règle|regle|baisse|diminue|augmente|monte|descends) ${LOUD} (?:à|a|sur)|(?:à|a)) (\\d+) ?(?:%|pour ?cent|percent)$`), (m) => vol(m[1])],
-  [new RegExp(`^(?:(?:monte|augmente|remonte)${MOD}(?: ${LOUD})?|(?:mets|met) ${LOUD} plus fort|(?:un peu |encore )?plus fort)${MOD}$`), () => vol('up')],
-  [new RegExp(`^(?:(?:baisse|diminue|réduis|descends)${MOD}(?: ${LOUD})?|(?:mets|met) ${LOUD} moins fort|(?:un peu |encore )?(?:moins fort|plus bas))${MOD}$`), () => vol('down')],
+  [new RegExp(`^(?:(?:monte|augmente|remonte)${MOD}(?: ${LOUD})?|(?:mets|met) (?:${LOUD} )?(?:un peu |encore )?plus fort|(?:un peu |encore )?plus fort)${MOD}$`), () => vol('up')],
+  [new RegExp(`^(?:(?:baisse|diminue|réduis|descends)${MOD}(?: ${LOUD})?|(?:mets|met) (?:${LOUD} )?(?:un peu |encore )?(?:moins fort|plus bas)|(?:un peu |encore )?(?:moins fort|plus bas))${MOD}$`), () => vol('down')],
   [/^(?:skip|passe|saute|next|change)(?: de)?(?: cette| cet| la| le)?(?: (?:musique|chanson|piste|titre|morceau|son))?(?:-l[àa]|-ci| l[àa]| ci)?$|^(?:passe|va) (?:à|au) (?:la |le )?(?:suivante?|prochaine?|prochain|titre suivant)$|^(?:suivant|au suivant)$/, () => [{ type: 'music_skip', text: '' }]],
   [/^mets? (?:la musique )?sur pause$|^pause$/, () => [{ type: 'music_pause', text: '' }]],
   [/^(?:reprends|relance|continue)(?: la)? (?:lecture|musique|le morceau)$/, () => [{ type: 'music_resume', text: '' }]],
   [/^(?:arrête|arrete|stop)(?: la| le)? lecture$/, () => [{ type: 'music_stop', text: '' }]],
-  [new RegExp(`^(?:me |moi )?(?:re)?(?:déplace|deplace|bouge)(?:-moi)? (?:dans|en|sur) ${CHAN}(.+)$`), (m) => [{ type: 'move', who: ['moi'], channel: m[1] }]],
-  [new RegExp(`^(?:va|vas|move|go) (?:dans|en|sur) ${CHAN}(.+)$`), (m) => [{ type: 'come', channel: m[1] }]],
+  [new RegExp(`^(?:me |moi )?(?:re)?(?:déplace|deplace|bouge)(?:-moi)? dans ${CHAN}(.+)$`), (m) => [{ type: 'move', who: ['moi'], channel: m[1] }]],
+  [new RegExp(`^(?:va|vas|move|go) dans ${CHAN}(.+)$`), (m) => [{ type: 'come', channel: m[1] }]],
   [/^(?:déconnecte|deconnecte)(?:-toi| toi)$/, () => [{ type: 'leave' }]],
   // "mets X": a title (not the PC, volume, a person or a place)
-  [/^(?:mets|met|play|put on)(?:-moi| me)? (?:la (?:musique|chanson) de |le (?:titre|morceau|son) |la chanson )?(?!(?:à |a |la |le |les |en |sur |ton |ta |tes |mon |ma |mes |moi\b|nous\b|ça\b|ca\b|pause|quelque|un truc|une? (?:radio|truc)|the |my |me\b))(?!.*\b(?:dans|sur|en|à|vers)\b)(.+)$/, (m) => [{ type: 'music_play', text: m[1], kind: 'youtube' }]],
+  [/^(?:mets|met|play|put on)(?:-moi| me)? (?:la (?:musique|chanson) de |le (?:titre|morceau|son) |la chanson )?(?!(?:à |a |la |le |les |en |sur |ton |ta |tes |mon |ma |mes |moi\b|nous\b|ça\b|ca\b|pause|quelque|plus |moins |un peu |encore |tout |un truc|une? (?:radio|truc)|the |my |me\b))(?!.*(?:^|\s)(?:dans|sur|en|à|vers)(?:\s|$))(?!.*(?: muet| sourdine| avec ))(.+)$/, (m) => [{ type: 'music_play', text: m[1], kind: 'youtube' }]],
 ];
-const QUESTION = /^(?:quelle?s?|combien|comment|pourquoi|est-ce|qu'est|c'est quoi|qui|où|quand|what|how|why|who|where|when|is|are|do|does)\b/;
+const QUESTION = /^(?:(?:quelle?s?|combien|comment|pourquoi|est-ce|qu'est|c'est quoi|qui|quand|what|how|why|who|where|when|is|are|do|does)\b|où(?:\s|$))/;
 
 // Simple commands without the LLM (saves ~1 s). Anything more complex returns null and goes to the LLM.
 function quick(query) {
@@ -358,7 +358,11 @@ function quick(query) {
     for (const m of MODULES) {
       for (const [re, make] of m.quick) {
         const hit = w.match(re);
-        if (hit) { const a = make(hit); if (a && !PC_AMBIGUOUS(a)) return a; }
+        if (hit) {
+          const a = make(hit);
+          // "tu peux jouer à Valorant avec nous ?" -> "joue à valorant avec nous" is not a title (imperative form only)
+          if (a && !PC_AMBIGUOUS(a) && !(w !== q && a.some((s) => s.type === 'music_play' && /^(?:à|au|aux|avec) /.test(s.text || '')))) return a;
+        }
       }
     }
   }

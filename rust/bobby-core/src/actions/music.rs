@@ -330,6 +330,8 @@ pub fn module() -> Module {
     }
 }
 
+pub const BUSY: &str = "Pas maintenant, je suis en train de faire autre chose.";
+
 /// R3b: port of the module's `run` functions (one per action type).
 pub async fn run<L: bobby_proto::infer::Understand + Sync>(s: &mut Step, env: &super::Env<'_, L>, _lang: &str) -> crate::util::Res<Vec<super::UndoOp>> {
     use bobby_proto::msg::{Cap, Endless, MusicItem, VolumeOp};
@@ -345,6 +347,10 @@ pub async fn run<L: bobby_proto::infer::Understand + Sync>(s: &mut Step, env: &s
         },
     };
     if s.kind == "deep_sleep" {
+        // this step's own `hear` counts for one; anything more is work Bobby would drop by going to sleep
+        if env.io.in_flight() > 1 {
+            return Err(crate::util::BrainError::Say(crate::util::Say::new(BUSY, "Not now, I'm busy with something else.")));
+        }
         // the music stops first (a failure must not keep Bobby awake), then the app unloads its models
         let _ = env.io.run(Cap::MusicStop).await;
         env.io.send(bobby_proto::msg::BrainMsg::DeepSleep);

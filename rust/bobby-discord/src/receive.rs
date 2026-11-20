@@ -381,7 +381,7 @@ impl Shared {
         let run = async {
             if bobby_infer::is_local(&bot.cfg.voice_url) {
                 match LOCAL_LISTENER.get() {
-                    Some(l) => l.listen(pcm, force, &hotwords, ring).await,
+                    Some(l) => l.listen(pcm, force, &hotwords, Some(user.to_string()), ring).await,
                     None => Err("connect: local engine not loaded".to_string()),
                 }
             } else {

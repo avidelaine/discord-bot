@@ -33,22 +33,23 @@ pub enum Event {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     StopServices,
-    SayWaking,
+    /// The recorded "oui", at once (the host falls back to the beep if the clip is missing).
+    PlayWake,
     StartServices,
     SayReady,
     SayFailed,
 }
 
-pub const WAKING: &str = "Je me réveille.";
-pub const READY: &str = "Je suis là, qu'est-ce qu'il y a ?";
+pub const READY: &str = "Je suis là.";
 pub const FAILED: &str = "Je n'arrive pas à me réveiller complètement.";
 
-/// ponytail: the sentence spoken together with the waking "Bobby" is dropped (Whisper is gone when it is heard); the user repeats it.
+/// ponytail: the sentence said together with the waking "Bobby" is dropped (Whisper is gone when it is heard); the user repeats it.
+/// Keeping it would mean buffering the PCM across the Whisper reload (and replaying it): not worth it for now.
 pub fn on(state: State, event: Event) -> (State, Vec<Action>) {
     use {Action::*, Event::*, State::*};
     match (state, event) {
         (Awake, SleepAsked) => (Asleep, vec![StopServices]),
-        (Asleep, WakeWord) => (Waking, vec![SayWaking, StartServices]),
+        (Asleep, WakeWord) => (Waking, vec![PlayWake, StartServices]),
         (Waking, Ready) => (Awake, vec![SayReady]),
         (Waking, Failed) => (Awake, vec![SayFailed]),
         (s, _) => (s, vec![]),
@@ -75,7 +76,7 @@ mod tests {
     #[test]
     fn awake_asleep_waking_awake() {
         assert_eq!(on(Awake, SleepAsked), (Asleep, vec![StopServices]));
-        assert_eq!(on(Asleep, WakeWord), (Waking, vec![SayWaking, StartServices]));
+        assert_eq!(on(Asleep, WakeWord), (Waking, vec![PlayWake, StartServices]));
         assert_eq!(on(Waking, Ready), (Awake, vec![SayReady]));
     }
 

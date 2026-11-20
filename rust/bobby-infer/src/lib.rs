@@ -244,16 +244,17 @@ impl<T: Transcribe + Send + Sync> Transcribe for Slot<T> {
     }
 }
 
-static ON_WAKE: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> = std::sync::OnceLock::new();
+static ON_WAKE: std::sync::OnceLock<Box<dyn Fn(Option<String>) + Send + Sync>> = std::sync::OnceLock::new();
 
 /// Called when "Bobby" is heard (Discord receive, PC mic), even when no Whisper is loaded to transcribe the rest.
-pub fn on_wake(f: impl Fn() + Send + Sync + 'static) {
+/// The argument is the speaker's Discord id; `None` for the PC microphone (the super admin's own PC).
+pub fn on_wake(f: impl Fn(Option<String>) + Send + Sync + 'static) {
     let _ = ON_WAKE.set(Box::new(f));
 }
 
-pub fn wake_heard() {
+pub fn wake_heard(who: Option<String>) {
     if let Some(f) = ON_WAKE.get() {
-        f();
+        f(who);
     }
 }
 

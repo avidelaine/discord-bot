@@ -215,11 +215,15 @@ fn ring_core(mixer: &MixerRef, st: &Mutex<Speech>, on: bool, owner: Option<UserI
 
 /// Short clip (ack, beep, nope): stops the ring, plays as overlay; a reply that follows waits for its end.
 fn clip_core(mixer: &MixerRef, st: &Mutex<Speech>, pcm: Vec<i16>, beep: bool) {
+    clip_rx_core(mixer, st, PcmRx::from_vec(pcm), beep);
+}
+
+fn clip_rx_core(mixer: &MixerRef, st: &Mutex<Speech>, rx: PcmRx, beep: bool) {
     ring_stop_core(mixer, st, None);
     let done = {
         let mut m = mixer.lock().unwrap();
         m.voice_gain = voice_gain(); // read at each clip: a volume change applies to the next one
-        if beep { m.overlay_beep(PcmRx::from_vec(pcm)) } else { m.overlay(PcmRx::from_vec(pcm)) }
+        if beep { m.overlay_beep(rx) } else { m.overlay(rx) }
     };
     let (tx, rx) = watch::channel(false);
     st.lock().unwrap().clip = Some(rx);
@@ -387,6 +391,14 @@ pub fn spawn_acks(bot: Arc<Bot>) {
 pub fn signal(bot: &Arc<Bot>, kind: SignalKind) {
     let speaker = bot.listen.lock().unwrap().speaking_to;
     signal_core(&bot.mixer, &bot.speech, kind, speaker);
+}
+
+/// The wake acknowledgement on the Discord mixer: the recorded WAV, or the beep when there is none.
+pub fn wake_clip(bot: &Arc<Bot>, wav: Option<Vec<u8>>) {
+    match wav {
+        Some(w) => clip_rx_core(&bot.mixer, &bot.speech, decode_wav(w), true),
+        None => clip_core(&bot.mixer, &bot.speech, loud(beep_pcm()), true),
+    }
 }
 
 /// Plays a short clip (48 kHz stereo i16) as overlay.

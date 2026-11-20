@@ -5,6 +5,7 @@ use crate::bridge::Bridge;
 use crate::supervisor::Supervisor;
 use bobby_core::brain::{Brain, Heard};
 use bobby_core::io::Io;
+use bobby_core::types::Role;
 use bobby_core::store::Store;
 use bobby_discord::Bot;
 use bobby_infer::HttpLlm;
@@ -151,6 +152,12 @@ impl<L: Understand + Send + Sync + 'static> Router<L> {
 // ponytail: 180 s, a cold LLM (model load into VRAM) took over 60 s; one constant, no config knob
 const HEALTH_WAIT_S: u32 = 180;
 
+/// Whether the person who said "Bobby" may wake him: whoever may give orders (not `Role::Other`).
+/// `None` is the PC microphone, the super admin's own PC: always allowed.
+pub fn wake_allowed(role: Option<Role>) -> bool {
+    role.map_or(true, |r| bobby_core::roles::allowed(r, Role::Prime))
+}
+
 /// The deep-sleep stop, serialised with the wake-up by `gate`: does nothing (false) unless Bobby is still asleep
 /// once it holds the gate, so a wake word that came first is not undone.
 fn stop_services(gate: &Mutex<()>, state: impl Fn() -> sleep::State, stop: impl FnOnce()) -> bool {
@@ -173,16 +180,37 @@ pub struct Host {
     last: Shared<tauri::async_runtime::JoinHandle<()>>,
     /// The running brain's router, for Bobby's own lines (deep sleep and wake-up).
     router: Mutex<Option<Arc<Router<HttpLlm>>>>,
+    /// Plays the wake acknowledgement where Bobby is heard (Discord mixer or PC speakers); set while the brain runs.
+    wake_clip: Mutex<Option<Arc<dyn Fn(Option<Vec<u8>>) + Send + Sync>>>,
 }
 
 impl Host {
     pub fn new(cfg: &Config, bridge: Arc<Bridge>, sup: Arc<Supervisor>) -> Arc<Self> {
         capture_stdio(sup.clone());
-        let host = Arc::new(Host { cfg: cfg.clone(), bridge, sup, stop: Mutex::new(None), last: Default::default(), router: Default::default() });
+        let host = Arc::new(Host { cfg: cfg.clone(), bridge, sup, stop: Mutex::new(None), last: Default::default(), router: Default::default(), wake_clip: Default::default() });
         let h = host.clone();
         sleep::set_hook(move |e| h.sleep_event(e));
-        bobby_infer::on_wake(|| sleep::fire(Event::WakeWord));
+        let h = host.clone();
+        bobby_infer::on_wake(move |who| h.wake(who));
+        let h = host.clone();
+        host.sup.on_busy(Box::new(move || h.busy()));
         host
+    }
+
+    /// The brain is in the middle of something (a request, a confirmation window): no deep sleep now.
+    fn busy(&self) -> bool {
+        lock(&self.router).as_ref().is_some_and(|r| r.brain.busy())
+    }
+
+    /// "Bobby" was heard while asleep: wakes him if that speaker may give orders (`who` None = the PC microphone).
+    fn wake(self: &Arc<Self>, who: Option<String>) {
+        if let (Some(id), Some(r)) = (who.as_deref(), lock(&self.router).clone()) {
+            let roles = lock(&r.ctx).members.iter().find(|m| m.id == id).map(|m| m.roles.clone()).unwrap_or_default();
+            if !wake_allowed(Some(bobby_core::roles::role_of(id, &roles, &r.brain.store))) {
+                return self.log(&format!("[sleep] {id} may not give orders: not woken"));
+            }
+        }
+        sleep::fire(Event::WakeWord);
     }
 
     fn sleep_event(self: &Arc<Self>, e: Event) {
@@ -220,7 +248,13 @@ impl Host {
                     }
                 });
             }
-            Action::SayWaking => self.say(sleep::WAKING),
+            Action::PlayWake => {
+                // at once, off the caller: the recorded "oui" (the beep if the file is missing)
+                let (clip, wav) = (lock(&self.wake_clip).clone(), std::fs::read(self.cfg.root.join("voice").join("oui.wav")).ok());
+                if let Some(f) = clip {
+                    std::thread::spawn(move || f(wav));
+                }
+            }
             Action::SayReady => self.say(sleep::READY),
             Action::SayFailed => self.say(sleep::FAILED),
             Action::StartServices => {
@@ -282,6 +316,7 @@ impl Host {
             let _ = tx.send(());
         }
         *lock(&self.router) = None;
+        *lock(&self.wake_clip) = None;
     }
 
     async fn run(self: Arc<Self>, stop: oneshot::Receiver<()>) {
@@ -320,6 +355,11 @@ impl Host {
             }),
         });
         *lock(&self.router) = Some(router.clone());
+        let (b2, br2, r2) = (bot.clone(), self.bridge.clone(), router.clone());
+        *lock(&self.wake_clip) = Some(Arc::new(move |wav| match lock(&b2).clone().filter(|b| (r2.in_voice)() && b.in_voice()) {
+            Some(b) => bobby_discord::speech::wake_clip(&b, wav),
+            None => tauri::async_runtime::block_on(br2.wake_ack(wav)),
+        }));
         let (stop_tx, stop_rx) = watch::channel(false);
         let tasks = [
             tokio::spawn(router.clone().route(brain_rx)),
@@ -486,6 +526,13 @@ mod tests {
             assert_eq!(dest(&BrainMsg::Expect { user: SUPER.into(), ms: 8000 }, v), voice(v));
             assert_eq!(dest(&run(Cap::VoiceVolume { op: VolumeOp::Delta { delta: 10 } }), v), voice(v));
         }
+    }
+
+    #[test]
+    fn who_may_wake_him() {
+        assert!(wake_allowed(None), "the PC microphone is the super admin's");
+        assert!(wake_allowed(Some(Role::Super)) && wake_allowed(Some(Role::Admin)) && wake_allowed(Some(Role::Prime)));
+        assert!(!wake_allowed(Some(Role::Other)), "someone who cannot give orders does not wake him");
     }
 
     #[test]

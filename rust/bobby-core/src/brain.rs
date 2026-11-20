@@ -229,6 +229,14 @@ impl<L: Understand + Sync> Brain<L> {
         }
     }
 
+    /// True while Bobby is in the middle of something: a `hear` is running or a confirmation window is open.
+    /// Deep sleep waits for it to be false.
+    // ponytail: long-lived flows that live outside `hear` (the messenger, on another branch) must also count here
+    // (take `io.enter()` for their whole run), or Bobby could fall asleep under them.
+    pub fn busy(&self) -> bool {
+        self.io.in_flight() > 0 || self.st().pending.values().any(|p| p.until_ms > now_ms())
+    }
+
     /// True while Bobby waits for this person's next sentence, which then needs no "Bobby".
     pub fn expecting(&self, user: &str) -> bool {
         self.st().pending.get(user).is_some_and(|p| p.until_ms > now_ms())
@@ -463,6 +471,7 @@ impl<L: Understand + Sync> Brain<L> {
     /// The transcript must still contain "Bobby" (the wake word model upstream is a cheap, lenient filter), so a false
     /// trigger ("beau bilan") costs one transcription and never an action.
     pub async fn hear(&self, h: Heard, c: &Context) {
+        let _flight = self.io.enter();
         let started = Instant::now();
         let now = now_ms();
         // A messenger waits for this person's answer: it needs no "Bobby" and goes to the flow, not to the brain.
@@ -1130,5 +1139,32 @@ mod tests {
         let r = rig(vec![], ok);
         r.hear("Bobby, dors", "kev").await;
         assert!(!r.msgs().contains(&BrainMsg::DeepSleep));
+    }
+
+    #[tokio::test]
+    async fn busy_while_a_request_runs_or_a_window_is_open() {
+        let r = rig(vec![], ok);
+        assert!(!r.brain.busy());
+        {
+            let _flight = r.brain.io.enter();
+            assert!(r.brain.busy());
+        }
+        assert!(!r.brain.busy(), "the guard releases the count");
+        r.hear("Bobby", ADMIN).await; // "Bobby ?" alone opens a window
+        assert!(r.brain.busy());
+        r.hear("mute Kévin", ADMIN).await; // answering closes it
+        assert!(!r.brain.busy());
+    }
+
+    #[tokio::test]
+    async fn deep_sleep_is_refused_while_another_request_is_in_flight() {
+        let r = rig(vec![], ok);
+        let _other = r.brain.io.enter(); // another request, not this `hear`
+        r.hear("Bobby, dors", ADMIN).await;
+        assert!(!r.msgs().contains(&BrainMsg::DeepSleep));
+        assert!(r.said().iter().any(|t| t == crate::actions::music::BUSY), "{:?}", r.said());
+        drop(_other);
+        r.hear("Bobby, dors", ADMIN).await;
+        assert!(r.msgs().contains(&BrainMsg::DeepSleep));
     }
 }

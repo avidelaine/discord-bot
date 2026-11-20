@@ -231,16 +231,17 @@ impl<T: Transcribe + Send + Sync + 'static> Listener<T> {
 
     /// One sentence. `pcm`: decoded audio chunks (48 kHz stereo s16, interleaved); the channel closing means the
     /// sentence ended. `ring(true)` when the wake word is heard mid-sentence, `ring(false)` at the gate.
-    pub async fn listen(&self, mut pcm: UnboundedReceiver<Vec<i16>>, force: bool, hotwords: &str, ring: impl Fn(bool)) -> Result<Outcome, String> {
+    /// `who`: the speaker's id, given to the wake hook (see `on_wake`).
+    pub async fn listen(&self, mut pcm: UnboundedReceiver<Vec<i16>>, force: bool, hotwords: &str, who: Option<String>, ring: impl Fn(bool)) -> Result<Outcome, String> {
         let mut scan: Option<Scan> = if self.factory.is_some() && !force { Some(WakeScan::new(self.model().await?)) } else { None };
-        let res = self.run(&mut pcm, &mut scan, hotwords, &ring).await;
+        let res = self.run(&mut pcm, &mut scan, hotwords, who, &ring).await;
         if let Some(s) = scan {
             self.pool.lock().unwrap().push(s.into_model());
         }
         res
     }
 
-    async fn run(&self, pcm: &mut UnboundedReceiver<Vec<i16>>, scan: &mut Option<Scan>, hotwords: &str, ring: &impl Fn(bool)) -> Result<Outcome, String> {
+    async fn run(&self, pcm: &mut UnboundedReceiver<Vec<i16>>, scan: &mut Option<Scan>, hotwords: &str, who: Option<String>, ring: &impl Fn(bool)) -> Result<Outcome, String> {
         let mut raw: Vec<i16> = vec![];
         let mut woke = false;
         while let Some(chunk) = pcm.recv().await {
@@ -282,7 +283,7 @@ impl<T: Transcribe + Send + Sync + 'static> Listener<T> {
         if let Some(wake) = passed {
             eprintln!("[wake] {} (score {:.2})", if wake { "Bobby heard" } else { "no Bobby" }, score.unwrap_or(0.0));
             if wake {
-                crate::wake_heard();
+                crate::wake_heard(who);
             }
         }
         if passed == Some(false) {
@@ -386,7 +387,7 @@ mod tests {
 
     async fn run(l: &Listener<Fake>, rx: UnboundedReceiver<Vec<i16>>, force: bool) -> (Outcome, Vec<bool>) {
         let rings = Mutex::new(vec![]);
-        let out = l.listen(rx, force, "Bobby Alex", |on| rings.lock().unwrap().push(on)).await.unwrap();
+        let out = l.listen(rx, force, "Bobby Alex", None, |on| rings.lock().unwrap().push(on)).await.unwrap();
         (out, rings.into_inner().unwrap())
     }
 
@@ -419,6 +420,14 @@ mod tests {
         settle().await;
         let f = collected(&root);
         assert!(f.iter().any(|n| n.ends_with("_discord_forced.wav")) && f.iter().any(|n| n.ends_with("_discord_forced.txt")), "{f:?}");
+    }
+
+    /// Deep sleep: a sentence that reaches the empty Whisper slot is an error the Discord side only logs (nothing is spoken).
+    #[tokio::test]
+    async fn sentence_on_an_unloaded_whisper_is_an_error_not_a_transcript() {
+        let l = Listener::with_scorer(Arc::new(crate::Slot::<Fake>::empty()), None, 0.10, None);
+        let e = l.listen(sentence(0.0, 1), true, "", None, |_| {}).await.unwrap_err();
+        assert!(e.contains("unloaded"), "{e}");
     }
 
     #[tokio::test]

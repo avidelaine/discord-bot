@@ -21,6 +21,15 @@ use std::time::{Duration, Instant};
 /// Same command words as bot/brain.js COMMAND_WORDS and voice/server.py LOCAL_HOTWORDS.
 const LOCAL_HOTWORDS: &str = "Bobby Discord le son volume musique hardstyle";
 
+/// The startup load of Whisper: skipped (false) when a deep sleep unloaded it already; the wake-up loads it then.
+fn startup_load(unloaded: &AtomicBool, load: impl FnOnce()) -> bool {
+    let go = !unloaded.load(Ordering::SeqCst);
+    if go {
+        load();
+    }
+    go
+}
+
 /// The Rust brain's ear on the PC: (text, lang, wake score, whisper ms) -> whether Bobby now waits for the next
 /// sentence without "Bobby". Unset: sentences go to the Node bot (`BOT_URL/local`).
 pub type Hook = Arc<dyn Fn(String, String, Option<f32>, u32) -> bool + Send + Sync>;
@@ -69,9 +78,7 @@ impl Bridge {
             let (gate, unloaded) = (gate.clone(), unloaded.clone());
             std::thread::spawn(move || {
                 let _g = gate.lock().unwrap_or_else(|e| e.into_inner());
-                if !unloaded.load(Ordering::SeqCst) {
-                    cell.load(Arc::new(load())); // asleep already: stay unloaded, the wake-up loads it
-                }
+                startup_load(&unloaded, || cell.load(Arc::new(load())));
             });
         } else {
             cell.load(Arc::new(load()));
@@ -171,6 +178,14 @@ impl Bridge {
         let _ = tokio::task::spawn_blocking(move || me.speaker.play(&wav)).await;
     }
 
+    /// The wake acknowledgement on the PC speakers: the recorded WAV, or the "yes" beep when there is none.
+    pub async fn wake_ack(self: &Arc<Self>, wav: Option<Vec<u8>>) {
+        let Some(wav) = wav else { return self.beep("yes").await };
+        let wav = out::scale_wav(&bobby_infer::loudness::normalize(&wav), bobby_proto::settings::load().audio.beep_volume);
+        let me = self.clone();
+        let _ = tokio::task::spawn_blocking(move || me.speaker.play(&wav)).await;
+    }
+
     pub fn hush(&self) {
         self.speaker.hush();
     }
@@ -259,7 +274,7 @@ impl Bridge {
                     return; // not for Bobby: never transcribed
                 }
                 score = Some(s);
-                bobby_infer::wake_heard();
+                bobby_infer::wake_heard(None);
             }
         }
         let Some(stt) = self.stt.get() else {
@@ -411,6 +426,15 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
+
+    #[test]
+    fn startup_load_is_skipped_once_a_deep_sleep_unloaded_whisper() {
+        let (unloaded, n) = (AtomicBool::new(false), std::cell::Cell::new(0));
+        assert!(startup_load(&unloaded, || n.set(n.get() + 1)));
+        unloaded.store(true, Ordering::SeqCst);
+        assert!(!startup_load(&unloaded, || n.set(n.get() + 1)));
+        assert_eq!(n.get(), 1);
+    }
 
     fn app() -> Router {
         let cfg = Config { root: std::env::temp_dir().join("bobby-bridge-test"), ..Default::default() };

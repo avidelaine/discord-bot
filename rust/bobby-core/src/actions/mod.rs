@@ -16,10 +16,11 @@ pub mod info;
 pub mod music;
 pub mod perms;
 pub mod pc;
+pub mod reminders;
 pub mod todo;
 
 static MODULES: LazyLock<Vec<Module>> = LazyLock::new(|| {
-    vec![aliases::module(), ask::module(), discord::module(), info::module(), music::module(), pc::module(), perms::module(), todo::module()]
+    vec![aliases::module(), ask::module(), discord::module(), info::module(), music::module(), pc::module(), perms::module(), reminders::module(), todo::module()]
 });
 
 /// `undo` is handled by the brain itself; its role is the one of what it undoes.
@@ -40,7 +41,7 @@ pub fn def(kind: &str) -> Option<&'static ActionDef> {
 /// `Object.keys(ACTIONS)`: every action type in module order, then "undo". `voice_volume` is shortcut-only: kept out of the
 /// LLM schema so the prompt stays byte-identical to Node.
 pub fn types() -> Vec<&'static str> {
-    MODULES.iter().flat_map(|m| m.actions.iter().map(|(k, _)| *k)).filter(|k| *k != "voice_volume").chain(["undo"]).collect()
+    MODULES.iter().flat_map(|m| m.actions.iter().map(|(k, _)| *k)).filter(|k| *k != "voice_volume" && !k.starts_with("remind_")).chain(["undo"]).collect()
 }
 
 // ---------- Running steps (batch R3b) ----------
@@ -124,6 +125,7 @@ pub async fn run<L: Understand + Sync>(s: &mut Step, env: &Env<'_, L>, lang: &st
         "music" => music::run(s, env, lang).await,
         "pc" => pc::run(s, env, lang).await,
         "perms" => perms::run(s, env, lang).await,
+        "reminders" => reminders::run(s, env, lang).await,
         "todo" => todo::run(s, env, lang).await,
         _ => Ok(vec![]),
     }

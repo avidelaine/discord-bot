@@ -1,0 +1,5 @@
+Rappels et minuteurs (Prime) : « rappelle-moi dans 10 minutes de sortir le linge », « rappelle-moi à 18h30 d'appeler maman », « mets un minuteur de 5 minutes », en anglais aussi ; « quels sont mes rappels », « annule mon rappel » / « annule le minuteur » / « annule tous mes rappels ».
+Quand c'est l'heure, Bobby le dit à la personne ; les rappels sont dans le document `reminders` du store, donc ils survivent à un redémarrage (au plus 10 min de retard : dit avec « (en retard) », plus vieux : abandonné et loggé).
+Pour essayer : `cargo run -p bobby-core --example reminders_demo` (cerveau réel, faux client, temps accéléré, rien de réel touché) ; la sortie est dans `demo.txt` ; tests : `cargo test -p bobby-core` (`tests_reminders`).
+Coût : minuscule, un tick par seconde qui lit un petit document, aucun modèle, aucune ligne de plus dans le prompt du LLM (raccourcis uniquement).
+Limites : 10 rappels par personne (constante `MAX_PER_USER`), 30 jours au plus, précision d'une seconde, le texte est répété tel quel (« mon » ne devient pas « ton »), pas d'annulation par « annule », pas de rappel récurrent.

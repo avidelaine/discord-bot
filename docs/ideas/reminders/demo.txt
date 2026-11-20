@@ -1,0 +1,40 @@
+[brain] 0 past exchange(s) reloaded from the journal
+Marie : Bobby, mets un minuteur de 2 minutes
+[query] "mets un minuteur de 2 minutes" (fr)
+[intent] shortcut: [{"type":"remind_set","kind":"timer","text":"","secs":120}]
+[plan] remind_set
+[timing] shortcut 0 ms · action 1 ms · total 144 ms
+  Bobby : (to 42) Minuteur de 2 minutes lancé.
+Marie : Bobby, rappelle-moi dans 10 minutes de sortir le linge
+[query] "rappelle-moi dans 10 minutes de sortir le linge" (fr)
+[intent] shortcut: [{"type":"remind_set","kind":"reminder","text":"sortir le linge","secs":600}]
+[plan] remind_set "sortir le linge"
+[timing] shortcut 0 ms · action 1 ms · total 4 ms
+  Bobby : (to 42) C'est noté, je te le rappelle dans 10 minutes.
+Marie : Bobby, quels sont mes rappels
+[query] "quels sont mes rappels" (fr)
+[intent] shortcut: [{"type":"remind_list"}]
+[plan] remind_list
+[timing] shortcut 0 ms · action 0 ms · total 2 ms
+  Bobby : (to 42) Tu as 2 rappels : minuteur à 20 h 40, sortir le linge à 20 h 48.
+Marie : Bobby, annule le minuteur
+[query] "annule le minuteur" (fr)
+[intent] shortcut: [{"type":"remind_cancel","kind":"timer"}]
+[plan] remind_cancel
+[timing] shortcut 0 ms · action 1 ms · total 3 ms
+  Bobby : (to 42) J'ai annulé ton minuteur.
+Marie : Bobby, quels sont mes rappels
+[query] "quels sont mes rappels" (fr)
+[intent] shortcut: [{"type":"remind_list"}]
+[plan] remind_list
+[timing] shortcut 0 ms · action 0 ms · total 1 ms
+  Bobby : (to 42) Tu as 1 rappel : sortir le linge à 20 h 48.
+-- 10 minutes later --
+  Bobby : (to 42) Marie, rappel : sortir le linge.
+(1 reminder fired)
+Marie : Bobby, quels sont mes rappels
+[query] "quels sont mes rappels" (fr)
+[intent] shortcut: [{"type":"remind_list"}]
+[plan] remind_list
+[timing] shortcut 0 ms · action 0 ms · total 1 ms
+  Bobby : (to 42) Tu n'as aucun rappel.

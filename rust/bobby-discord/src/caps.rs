@@ -215,6 +215,11 @@ async fn discord(bot: &Arc<Bot>, cap: Cap) -> Res {
             };
             Ok(json!({ "name": name }))
         }
+        Cap::Dm { user, text } => {
+            let dm = uid(&user)?.create_dm_channel(h).await.map_err(dc)?;
+            dm.send_message(h, CreateMessage::new().content(edit_text(&text)).allowed_mentions(CreateAllowedMentions::new())).await.map_err(dc)?;
+            Ok(json!({}))
+        }
         _ => Err("not a Discord cap".into()),
     }
 }

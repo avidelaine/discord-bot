@@ -1,6 +1,7 @@
 // Runs Bobby's parts: spawn, restart 3 s after a crash, stop whole process trees. Port of app/supervisor.js.
 // Publishes `status` (snapshot, on any change) and `log` ({part, line, at}) on the bus; every line also goes to _logs/bobby.log.
 use crate::config::{Config, Part};
+use crate::sleep;
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::PathBuf;
@@ -29,6 +30,8 @@ struct PartState {
     pid: Option<u32>,
     restarts: u32,
     started_at: Option<i64>,
+    /// Deep sleep: the restart loop waits while set (`stop()` clears it, so Bobby starts awake).
+    held: bool,
 }
 
 #[derive(Default)]
@@ -36,6 +39,7 @@ struct State {
     running: bool,
     since: Option<i64>,
     external: bool,
+    sleep: sleep::State,
     /// Bumped on every start and stop: a part task from an older run must not restart anything.
     run: u64,
     parts: Vec<PartState>,
@@ -51,6 +55,8 @@ pub struct Supervisor {
     env: Vec<(String, String)>,
     /// Called with true on start, false on stop: the in-process Rust Bobby follows Bobby's state (see `host`).
     on_run: std::sync::OnceLock<Box<dyn Fn(bool) + Send + Sync>>,
+    /// True while Bobby is in the middle of something (set by the host from the brain): a sleep is then refused.
+    busy: std::sync::OnceLock<Box<dyn Fn() -> bool + Send + Sync>>,
 }
 
 /// Extra env for every part, from the `[run]` switches. Flip the switch back + restart = rollback.
@@ -78,11 +84,16 @@ impl Supervisor {
             bus,
             env: part_env(cfg),
             on_run: std::sync::OnceLock::new(),
+            busy: std::sync::OnceLock::new(),
         })
     }
 
     pub fn on_run(&self, f: Box<dyn Fn(bool) + Send + Sync>) {
         let _ = self.on_run.set(f);
+    }
+
+    pub fn on_busy(&self, f: Box<dyn Fn() -> bool + Send + Sync>) {
+        let _ = self.busy.set(f);
     }
 
     fn run_hook(&self, on: bool) {
@@ -99,6 +110,7 @@ impl Supervisor {
         json!({
             "running": s.running,
             "since": s.since,
+            "sleep": s.sleep.label(),
             "external": !s.running && s.external,
             "parts": self.parts.iter().zip(&s.parts).map(|(d, p)| json!({
                 "name": d.name, "pid": p.pid, "up": p.pid.is_some(), "restarts": p.restarts, "startedAt": p.started_at,
@@ -158,6 +170,20 @@ impl Supervisor {
                 self.stop();
                 self.start()
             }
+            "sleep" => {
+                if !self.state.lock().unwrap().running {
+                    return Err("Bobby is not running: nothing to put to sleep.".into());
+                }
+                if self.busy.get().is_some_and(|f| f()) {
+                    return Err("Bobby is busy with something else: try again in a moment.".into());
+                }
+                sleep::fire(sleep::Event::SleepAsked);
+                Ok(self.status())
+            }
+            "wake" => {
+                sleep::fire(sleep::Event::WakeWord);
+                Ok(self.status())
+            }
             _ => Err(format!("unknown action {what}")),
         }
     }
@@ -180,6 +206,7 @@ impl Supervisor {
             s.external = false;
             s.since = Some(now_ms());
             s.run += 1;
+            s.sleep = sleep::State::Awake;
             for p in &mut s.parts {
                 p.restarts = 0;
             }
@@ -208,6 +235,7 @@ impl Supervisor {
                 .creation_flags(CREATE_NO_WINDOW);
             let code = match cmd.spawn() {
                 Ok(mut child) => {
+                    let held;
                     {
                         let mut s = self.state.lock().unwrap();
                         if s.run != run {
@@ -218,6 +246,11 @@ impl Supervisor {
                         }
                         s.parts[i].pid = child.id();
                         s.parts[i].started_at = Some(now_ms());
+                        // a hold arrived while spawning: it saw no pid to kill (killed below, outside the lock)
+                        held = s.parts[i].held;
+                    }
+                    if held {
+                        kill_tree(child.id().unwrap_or(0));
                     }
                     self.changed();
                     let out = tokio::spawn(self.clone().pipe(i, child.stdout.take()));
@@ -241,12 +274,18 @@ impl Supervisor {
             self.log(&def.name, &format!("stopped (exit code {code}), restarting in 3 s"));
             self.changed();
             tokio::time::sleep(RESTART_DELAY).await;
-            {
-                let mut s = self.state.lock().unwrap();
-                if s.run != run || !s.running {
-                    return;
+            loop {
+                {
+                    let mut s = self.state.lock().unwrap();
+                    if s.run != run || !s.running {
+                        return;
+                    }
+                    if !s.parts[i].held {
+                        s.parts[i].restarts += 1;
+                        break;
+                    }
                 }
-                s.parts[i].restarts += 1;
+                tokio::time::sleep(Duration::from_millis(500)).await; // held (deep sleep)
             }
         }
     }
@@ -269,6 +308,38 @@ impl Supervisor {
         }
     }
 
+    /// Deep sleep: `on` stops the part and keeps it down; `!on` lets the restart loop bring it back.
+    pub fn hold(&self, name: &str, on: bool) {
+        let pid = {
+            let mut s = self.state.lock().unwrap();
+            let Some(i) = self.parts.iter().position(|p| p.name == name) else { return };
+            s.parts[i].held = on;
+            if on { s.parts[i].pid } else { None }
+        };
+        if let Some(pid) = pid {
+            kill_tree(pid);
+        }
+        self.changed();
+    }
+
+    /// Where deep sleep stands now.
+    pub fn sleep_state(&self) -> sleep::State {
+        self.state.lock().unwrap().sleep
+    }
+
+    /// Applies a sleep event to the state and returns what the host must do.
+    pub fn sleep_step(&self, e: sleep::Event) -> Vec<sleep::Action> {
+        let (acts, changed) = {
+            let mut s = self.state.lock().unwrap();
+            let (next, acts) = sleep::on(s.sleep, e);
+            (acts, std::mem::replace(&mut s.sleep, next) != next)
+        };
+        if changed {
+            self.changed();
+        }
+        acts
+    }
+
     pub fn stop(&self) -> Value {
         let pids: Vec<u32> = {
             let mut s = self.state.lock().unwrap();
@@ -289,6 +360,8 @@ impl Supervisor {
             s.running = false;
             s.since = None;
             s.run += 1;
+            s.sleep = sleep::State::Awake;
+            s.parts.iter_mut().for_each(|p| p.held = false);
             s.parts.iter_mut().filter_map(|p| { p.started_at = None; p.pid.take() }).collect()
         };
         self.run_hook(false);
@@ -402,6 +475,81 @@ mod tests {
         // stale pid file (dead process) is ignored
         assert!(sup.start().is_ok());
         sup.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sleep_refused_while_stopped_and_start_resets_it() {
+        let (bus, _rx) = broadcast::channel(16);
+        let sup = Supervisor::new(&dummy(&std::env::temp_dir()), bus);
+        assert!(sup.act("sleep").unwrap_err().contains("not running"));
+        // a stale Asleep (e.g. left by an earlier run) is reset by start()
+        sup.state.lock().unwrap().sleep = sleep::State::Asleep;
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let _g = rt.enter();
+        let dir = std::env::temp_dir().join(format!("bobby-sup-sleep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (bus, _rx2) = broadcast::channel(16);
+        let sup = Supervisor::new(&dummy(&dir), bus);
+        sup.state.lock().unwrap().sleep = sleep::State::Asleep;
+        sup.start().unwrap();
+        assert_eq!(sup.sleep_state(), sleep::State::Awake);
+        sup.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sleep_refused_while_busy() {
+        let (bus, _rx) = broadcast::channel(16);
+        let sup = Supervisor::new(&dummy(&std::env::temp_dir()), bus);
+        sup.state.lock().unwrap().running = true; // no real parts needed
+        let busy = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let b = busy.clone();
+        sup.on_busy(Box::new(move || b.load(std::sync::atomic::Ordering::SeqCst)));
+        assert!(sup.act("sleep").unwrap_err().contains("busy"));
+        assert_eq!(sup.sleep_state(), sleep::State::Awake);
+        busy.store(false, std::sync::atomic::Ordering::SeqCst);
+        // no host hook installed in this test process: the call goes through
+        assert!(sup.act("sleep").is_ok());
+    }
+
+    #[test]
+    fn sleep_step_applies_events_and_returns_actions() {
+        let (bus, _rx) = broadcast::channel(16);
+        let sup = Supervisor::new(&dummy(&std::env::temp_dir()), bus);
+        assert_eq!(sup.sleep_step(sleep::Event::SleepAsked), vec![sleep::Action::StopServices]);
+        assert_eq!(sup.sleep_state(), sleep::State::Asleep);
+        assert!(sup.sleep_step(sleep::Event::SleepAsked).is_empty());
+        assert_eq!(sup.sleep_step(sleep::Event::WakeWord), vec![sleep::Action::PlayWake, sleep::Action::StartServices]);
+        assert_eq!(sup.sleep_state(), sleep::State::Waking);
+        assert_eq!(sup.sleep_step(sleep::Event::Failed), vec![sleep::Action::SayFailed]);
+        assert_eq!(sup.sleep_state(), sleep::State::Awake);
+        // the success path: asleep, woken, the LLM answers
+        sup.sleep_step(sleep::Event::SleepAsked);
+        sup.sleep_step(sleep::Event::WakeWord);
+        assert_eq!(sup.sleep_step(sleep::Event::Ready), vec![sleep::Action::SayReady]);
+        assert_eq!(sup.sleep_state(), sleep::State::Awake);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn held_part_is_not_restarted_and_stop_clears_hold() {
+        let dir = std::env::temp_dir().join(format!("bobby-sup-hold-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (bus, _rx) = broadcast::channel(1024);
+        let sup = Supervisor::new(&dummy(&dir), bus);
+        sup.start().unwrap();
+        sup.hold("short", true); // "short" exits at once; held, it must not come back
+        tokio::time::sleep(Duration::from_millis(4500)).await;
+        let st = sup.status();
+        assert_eq!(st["parts"][0]["restarts"], 0, "held part not restarted: {st}");
+        assert!(st["parts"][0]["pid"].is_null());
+        sup.hold("short", false);
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(sup.status()["parts"][0]["restarts"].as_u64().unwrap() >= 1, "released part restarts");
+        sup.hold("long", true);
+        assert!(sup.state.lock().unwrap().parts[1].held);
+        sup.stop();
+        assert!(sup.state.lock().unwrap().parts.iter().all(|p| !p.held), "stop() clears the holds");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

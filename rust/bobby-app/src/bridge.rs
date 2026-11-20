@@ -8,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use bobby_audio::{collect::collect, gate::Gate, mic, out, out::Speaker, wake::Wake};
-use bobby_infer::{HttpStt, HttpTts, Stt, Tts};
+use bobby_infer::{HttpStt, HttpTts, Stt, SttSlot, Tts};
 use bobby_proto::infer::{Speak, Transcribe};
 use bobby_proto::msg::{MediaCmd, VolumeOp};
 use bobby_proto::settings::Config;
@@ -21,6 +21,15 @@ use std::time::{Duration, Instant};
 /// Same command words as bot/brain.js COMMAND_WORDS and voice/server.py LOCAL_HOTWORDS.
 const LOCAL_HOTWORDS: &str = "Bobby Discord le son volume musique hardstyle";
 
+/// The startup load of Whisper: skipped (false) when a deep sleep unloaded it already; the wake-up loads it then.
+fn startup_load(unloaded: &AtomicBool, load: impl FnOnce()) -> bool {
+    let go = !unloaded.load(Ordering::SeqCst);
+    if go {
+        load();
+    }
+    go
+}
+
 /// The Rust brain's ear on the PC: (text, lang, wake score, whisper ms) -> whether Bobby now waits for the next
 /// sentence without "Bobby". Unset: sentences go to the Node bot (`BOT_URL/local`).
 pub type Hook = Arc<dyn Fn(String, String, Option<f32>, u32) -> bool + Send + Sync>;
@@ -30,7 +39,13 @@ pub struct Bridge {
     sup: Arc<Supervisor>,
     speaker: Speaker,
     tts: Arc<OnceLock<Tts>>,
-    stt: Arc<OnceLock<Arc<Stt>>>,
+    stt: Arc<SttSlot>,
+    /// Builds Whisper again after a deep sleep.
+    load_stt: Arc<dyn Fn() -> Stt + Send + Sync>,
+    /// Set by a deep sleep: only then does `reload_stt` load (the startup load may still be running).
+    unloaded: Arc<AtomicBool>,
+    /// Orders the startup load, deep-sleep unload/reload and the LLM hold (the host takes it for a whole step).
+    gate: Arc<Mutex<()>>,
     hook: Mutex<Option<Hook>>,
     http: reqwest::Client,
     enabled: AtomicBool,
@@ -47,7 +62,7 @@ impl Bridge {
         // Engines load once ("local" = in-process Whisper/Piper, slow: off the main thread); on failure the app still starts on the HTTP engine.
         const FALLBACK: &str = "http://127.0.0.1:3000";
         let models = cfg.models_dir();
-        let (stt, tts) = (Arc::new(OnceLock::new()), Arc::new(OnceLock::new()));
+        let (stt, tts) = (Arc::new(SttSlot::empty()), Arc::new(OnceLock::new()));
         let (addr, cell, s2) = (cfg.models.stt.clone(), stt.clone(), sup.clone());
         let m2 = models.clone();
         let load = move || {
@@ -56,10 +71,17 @@ impl Bridge {
                 Stt::Http(HttpStt::new(FALLBACK))
             })
         };
+        let load: Arc<dyn Fn() -> Stt + Send + Sync> = Arc::new(load);
+        let load_stt = load.clone();
+        let (gate, unloaded) = (Arc::new(Mutex::new(())), Arc::new(AtomicBool::new(false)));
         if bobby_infer::is_local(&cfg.models.stt) {
-            std::thread::spawn(move || { let _ = cell.set(Arc::new(load())); });
+            let (gate, unloaded) = (gate.clone(), unloaded.clone());
+            std::thread::spawn(move || {
+                let _g = gate.lock().unwrap_or_else(|e| e.into_inner());
+                startup_load(&unloaded, || cell.load(Arc::new(load())));
+            });
         } else {
-            let _ = cell.set(Arc::new(load()));
+            cell.load(Arc::new(load()));
         }
         let (addr, cell, s2) = (cfg.models.tts.clone(), tts.clone(), sup.clone());
         let load = move || {
@@ -79,6 +101,9 @@ impl Bridge {
             speaker: Speaker::new(),
             tts,
             stt,
+            load_stt,
+            unloaded,
+            gate,
             hook: Mutex::new(None),
             http: reqwest::Client::new(),
             enabled: AtomicBool::new(false),
@@ -94,8 +119,28 @@ impl Bridge {
     }
 
     /// Whisper, once loaded: shared with the Rust Discord client so it sits in VRAM once.
-    pub fn stt_slot(&self) -> Arc<OnceLock<Arc<Stt>>> {
+    pub fn stt_slot(&self) -> Arc<SttSlot> {
         self.stt.clone()
+    }
+
+    /// The service gate: hold it while unloading or reloading Whisper and holding or releasing the LLM.
+    pub fn gate(&self) -> &Mutex<()> {
+        &self.gate
+    }
+
+    /// Deep sleep: frees Whisper's VRAM (the in-process engine only; a remote one is not ours to unload).
+    pub fn unload_stt(&self) {
+        if bobby_infer::is_local(&self.cfg.models.stt) {
+            self.unloaded.store(true, Ordering::SeqCst);
+            self.stt.unload();
+        }
+    }
+
+    /// Loads Whisper again if a deep sleep unloaded it (slow: call off the async threads).
+    pub fn reload_stt(&self) {
+        if self.unloaded.swap(false, Ordering::SeqCst) {
+            self.stt.load(Arc::new((self.load_stt)()));
+        }
     }
 
     pub fn set_hook(&self, hook: Option<Hook>) {
@@ -129,6 +174,14 @@ impl Bridge {
     pub async fn beep(self: &Arc<Self>, kind: &str) {
         // 100 % = the normalized voice level: build the beep at full amplitude, normalize it, then scale by beep_volume.
         let wav = out::scale_wav(&bobby_infer::loudness::normalize(&out::beep(kind, 100)), bobby_proto::settings::load().audio.beep_volume);
+        let me = self.clone();
+        let _ = tokio::task::spawn_blocking(move || me.speaker.play(&wav)).await;
+    }
+
+    /// The wake acknowledgement on the PC speakers: the recorded WAV, or the "yes" beep when there is none.
+    pub async fn wake_ack(self: &Arc<Self>, wav: Option<Vec<u8>>) {
+        let Some(wav) = wav else { return self.beep("yes").await };
+        let wav = out::scale_wav(&bobby_infer::loudness::normalize(&wav), bobby_proto::settings::load().audio.beep_volume);
         let me = self.clone();
         let _ = tokio::task::spawn_blocking(move || me.speaker.play(&wav)).await;
     }
@@ -221,6 +274,7 @@ impl Bridge {
                     return; // not for Bobby: never transcribed
                 }
                 score = Some(s);
+                bobby_infer::wake_heard(None);
             }
         }
         let Some(stt) = self.stt.get() else {
@@ -372,6 +426,15 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
+
+    #[test]
+    fn startup_load_is_skipped_once_a_deep_sleep_unloaded_whisper() {
+        let (unloaded, n) = (AtomicBool::new(false), std::cell::Cell::new(0));
+        assert!(startup_load(&unloaded, || n.set(n.get() + 1)));
+        unloaded.store(true, Ordering::SeqCst);
+        assert!(!startup_load(&unloaded, || n.set(n.get() + 1)));
+        assert_eq!(n.get(), 1);
+    }
 
     fn app() -> Router {
         let cfg = Config { root: std::env::temp_dir().join("bobby-bridge-test"), ..Default::default() };

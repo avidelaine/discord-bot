@@ -139,6 +139,8 @@ pub enum BrainMsg {
     Expect { user: String, ms: u32 },
     /// Answer to `ClientMsg::Command { id }`. `ephemeral`: only the person who typed it sees it.
     Reply { id: u64, text: Option<String>, embeds: Vec<Embed>, ephemeral: bool },
+    /// "Deep sleep": the app unloads Whisper and stops the LLM until the next wake word.
+    DeepSleep,
 }
 
 // ---------- Capabilities ----------

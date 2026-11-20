@@ -211,6 +211,53 @@ impl Transcribe for Stt {
     }
 }
 
+/// A Whisper that can be unloaded (Deep Sleep) and loaded again, shared by the PC mic and the Discord listener.
+/// An empty slot is "down", like an unreachable service.
+pub struct Slot<T>(std::sync::RwLock<Option<std::sync::Arc<T>>>);
+pub type SttSlot = Slot<Stt>;
+
+impl<T> Slot<T> {
+    pub fn empty() -> Self {
+        Slot(Default::default())
+    }
+    pub fn loaded(t: T) -> Self {
+        Slot(std::sync::RwLock::new(Some(std::sync::Arc::new(t))))
+    }
+    pub fn load(&self, t: std::sync::Arc<T>) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = Some(t);
+    }
+    /// Drops the engine (its memory is freed once the last transcription in flight ends).
+    pub fn unload(&self) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+    pub fn get(&self) -> Option<std::sync::Arc<T>> {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+impl<T: Transcribe + Send + Sync> Transcribe for Slot<T> {
+    async fn transcribe(&self, pcm16k: &[f32], hotwords: &str) -> Result<Transcript, InferError> {
+        match self.get() {
+            Some(t) => t.transcribe(pcm16k, hotwords).await,
+            None => Err(InferError::new(InferErrorKind::Down, "speech engine unloaded (deep sleep)".to_string())),
+        }
+    }
+}
+
+static ON_WAKE: std::sync::OnceLock<Box<dyn Fn(Option<String>) + Send + Sync>> = std::sync::OnceLock::new();
+
+/// Called when "Bobby" is heard (Discord receive, PC mic), even when no Whisper is loaded to transcribe the rest.
+/// The argument is the speaker's Discord id; `None` for the PC microphone (the super admin's own PC).
+pub fn on_wake(f: impl Fn(Option<String>) + Send + Sync + 'static) {
+    let _ = ON_WAKE.set(Box::new(f));
+}
+
+pub fn wake_heard(who: Option<String>) {
+    if let Some(f) = ON_WAKE.get() {
+        f(who);
+    }
+}
+
 /// Text-to-speech by address.
 pub enum Tts {
     Http(HttpTts),
@@ -321,5 +368,28 @@ mod tests {
         let t = HttpStt::new("http://127.0.0.1:3000").transcribe(&decode_wav(&wav.0), "").await.unwrap();
         println!("{t:?}");
         assert!(!t.text.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod slot_tests {
+    use super::*;
+
+    struct Dummy;
+    impl Transcribe for Dummy {
+        async fn transcribe(&self, _: &[f32], _: &str) -> Result<Transcript, InferError> {
+            Ok(Transcript { text: "ok".into(), lang: "fr".into(), ms: 0 })
+        }
+    }
+
+    #[tokio::test]
+    async fn slot_loads_and_unloads() {
+        let slot = Slot::<Dummy>::empty();
+        assert_eq!(slot.transcribe(&[0.0], "").await.unwrap_err().kind, InferErrorKind::Down);
+        slot.load(std::sync::Arc::new(Dummy));
+        assert!(slot.transcribe(&[0.0], "").await.is_ok());
+        slot.unload();
+        assert!(slot.get().is_none());
+        assert_eq!(slot.transcribe(&[0.0], "").await.unwrap_err().kind, InferErrorKind::Down);
     }
 }

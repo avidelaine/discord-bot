@@ -50,7 +50,7 @@ async fn action(State(s): State<AppState>, UrlPath(what): UrlPath<String>, heade
     if !origin_ok(headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())) {
         return no_store(StatusCode::FORBIDDEN, json!({ "error": "forbidden origin" }));
     }
-    if !matches!(what.as_str(), "start" | "stop" | "restart") {
+    if !matches!(what.as_str(), "start" | "stop" | "restart" | "sleep" | "wake") {
         return no_store(StatusCode::NOT_FOUND, json!({ "error": "not found" }));
     }
     let sup = s.sup.clone();

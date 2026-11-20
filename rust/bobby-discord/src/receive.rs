@@ -155,7 +155,7 @@ pub use bobby_infer::listen::{Gate, Outcome};
 pub use bobby_proto::infer::Transcript;
 
 /// The in-process listener (`VOICE_URL=local`), loaded once by `client::run`.
-pub static LOCAL_LISTENER: std::sync::OnceLock<Arc<bobby_infer::listen::Listener<bobby_infer::Stt>>> = std::sync::OnceLock::new();
+pub static LOCAL_LISTENER: std::sync::OnceLock<Arc<bobby_infer::listen::Listener<bobby_infer::SttSlot>>> = std::sync::OnceLock::new();
 
 /// `http://host:port` -> `ws://host:port/listen?force=..&hotwords=..`.
 pub fn listen_url(voice_url: &str, force: bool, hotwords: &str) -> String {
@@ -381,7 +381,7 @@ impl Shared {
         let run = async {
             if bobby_infer::is_local(&bot.cfg.voice_url) {
                 match LOCAL_LISTENER.get() {
-                    Some(l) => l.listen(pcm, force, &hotwords, ring).await,
+                    Some(l) => l.listen(pcm, force, &hotwords, Some(user.to_string()), ring).await,
                     None => Err("connect: local engine not loaded".to_string()),
                 }
             } else {

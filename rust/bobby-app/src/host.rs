@@ -5,10 +5,12 @@ use crate::bridge::Bridge;
 use crate::supervisor::Supervisor;
 use bobby_core::brain::{Brain, Heard};
 use bobby_core::io::Io;
+use bobby_core::types::Role;
 use bobby_core::store::Store;
 use bobby_discord::Bot;
 use bobby_infer::HttpLlm;
 use bobby_proto::infer::Understand;
+use crate::sleep::{self, Action, Event};
 use bobby_proto::msg::{BrainMsg, Cap, CapKind, ClientMsg, Context, SignalKind, Voice};
 use bobby_proto::settings::Config;
 use serde_json::Value;
@@ -61,6 +63,8 @@ pub struct Router<L> {
     /// The latest server snapshot (Discord sends it before each sentence and command).
     pub ctx: Mutex<Context>,
     pub in_voice: Box<dyn Fn() -> bool + Send + Sync>,
+    /// The deep-sleep state: sentences are not sent to the brain until Bobby is awake.
+    pub sleep_state: Box<dyn Fn() -> sleep::State + Send + Sync>,
     /// PC caps (run on a blocking thread).
     pub pc_run: Box<dyn Fn(Cap) -> Result<Value, String> + Send + Sync>,
     /// Bobby's voice, signals, hush and windows on the PC.
@@ -79,6 +83,10 @@ impl<L: Understand + Send + Sync + 'static> Router<L> {
     /// Brain -> clients.
     pub async fn route(self: Arc<Self>, mut rx: mpsc::UnboundedReceiver<BrainMsg>) {
         while let Some(m) = rx.recv().await {
+            if m == BrainMsg::DeepSleep {
+                sleep::fire(Event::SleepAsked);
+                continue;
+            }
             match dest(&m, (self.in_voice)()) {
                 Dest::Discord => {
                     let tx = lock(&self.discord).clone();
@@ -113,6 +121,10 @@ impl<L: Understand + Send + Sync + 'static> Router<L> {
 
     /// One transcribed sentence, from Discord or the PC.
     pub async fn hear(&self, user: String, text: String, lang: String, score: Option<f32>, stt_ms: u32, expected: bool) {
+        let answers = self.brain.messenger.has_voice_waiter(&user);
+        if !sleep::accept_sentence((self.sleep_state)(), answers) {
+            return println!("[sleep] not awake yet: dropped a sentence from {user}");
+        }
         let c = self.ctx_of(&user);
         let me = c.members.iter().find(|m| m.id == user);
         let (user_roles, user_name) = me.map_or_else(Default::default, |m| (m.roles.clone(), m.name.clone()));
@@ -143,6 +155,26 @@ impl<L: Understand + Send + Sync + 'static> Router<L> {
     }
 }
 
+// ponytail: 180 s, a cold LLM (model load into VRAM) took over 60 s; one constant, no config knob
+const HEALTH_WAIT_S: u32 = 180;
+
+/// Whether the person who said "Bobby" may wake him: whoever may give orders (not `Role::Other`).
+/// `None` is the PC microphone, the super admin's own PC: always allowed.
+pub fn wake_allowed(role: Option<Role>) -> bool {
+    role.map_or(true, |r| bobby_core::roles::allowed(r, Role::Prime))
+}
+
+/// The deep-sleep stop, serialised with the wake-up by `gate`: does nothing (false) unless Bobby is still asleep
+/// once it holds the gate, so a wake word that came first is not undone.
+fn stop_services(gate: &Mutex<()>, state: impl Fn() -> sleep::State, stop: impl FnOnce()) -> bool {
+    let _g = lock(gate);
+    let asleep = state() == sleep::State::Asleep;
+    if asleep {
+        stop();
+    }
+    asleep
+}
+
 type Shared<T> = Arc<Mutex<Option<T>>>;
 
 pub struct Host {
@@ -152,12 +184,112 @@ pub struct Host {
     stop: Mutex<Option<oneshot::Sender<()>>>,
     /// The previous run, awaited by the next one so two gateways never overlap on a restart.
     last: Shared<tauri::async_runtime::JoinHandle<()>>,
+    /// The running brain's router, for Bobby's own lines (deep sleep and wake-up).
+    router: Mutex<Option<Arc<Router<HttpLlm>>>>,
+    /// Plays the wake acknowledgement where Bobby is heard (Discord mixer or PC speakers); set while the brain runs.
+    wake_clip: Mutex<Option<Arc<dyn Fn(Option<Vec<u8>>) + Send + Sync>>>,
 }
 
 impl Host {
     pub fn new(cfg: &Config, bridge: Arc<Bridge>, sup: Arc<Supervisor>) -> Arc<Self> {
         capture_stdio(sup.clone());
-        Arc::new(Host { cfg: cfg.clone(), bridge, sup, stop: Mutex::new(None), last: Default::default() })
+        let host = Arc::new(Host { cfg: cfg.clone(), bridge, sup, stop: Mutex::new(None), last: Default::default(), router: Default::default(), wake_clip: Default::default() });
+        let h = host.clone();
+        sleep::set_hook(move |e| h.sleep_event(e));
+        let h = host.clone();
+        bobby_infer::on_wake(move |who| h.wake(who));
+        let h = host.clone();
+        host.sup.on_busy(Box::new(move || h.busy()));
+        host
+    }
+
+    /// The brain is in the middle of something (a request, a confirmation window): no deep sleep now.
+    fn busy(&self) -> bool {
+        lock(&self.router).as_ref().is_some_and(|r| r.brain.busy())
+    }
+
+    /// "Bobby" was heard while asleep: wakes him if that speaker may give orders (`who` None = the PC microphone).
+    fn wake(self: &Arc<Self>, who: Option<String>) {
+        if let (Some(id), Some(r)) = (who.as_deref(), lock(&self.router).clone()) {
+            let roles = lock(&r.ctx).members.iter().find(|m| m.id == id).map(|m| m.roles.clone()).unwrap_or_default();
+            if !wake_allowed(Some(bobby_core::roles::role_of(id, &roles, &r.brain.store))) {
+                return self.log(&format!("[sleep] {id} may not give orders: not woken"));
+            }
+        }
+        sleep::fire(Event::WakeWord);
+    }
+
+    fn sleep_event(self: &Arc<Self>, e: Event) {
+        for a in self.sup.sleep_step(e) {
+            self.exec(a);
+        }
+    }
+
+    /// Bobby's own line, through the normal Say path (Piper stays loaded in deep sleep).
+    fn say(&self, text: &str) {
+        let Some(r) = lock(&self.router).clone() else { return };
+        let m = BrainMsg::Say { text: text.into(), lang: "fr".into(), voice: Voice::Bobby, to_user: None };
+        match dest(&m, (r.in_voice)()) {
+            Dest::Discord => {
+                if let Some(tx) = lock(&r.discord).as_ref() {
+                    let _ = tx.send(m);
+                }
+            }
+            Dest::Pc => (r.pc_out)(m),
+        }
+    }
+
+    fn exec(self: &Arc<Self>, a: Action) {
+        let h = self.clone();
+        match a {
+            Action::StopServices => {
+                // off the async threads: unloading Whisper and taskkill both block
+                std::thread::spawn(move || {
+                    let gate = h.bridge.gate();
+                    if stop_services(gate, || h.sup.sleep_state(), || {
+                        h.bridge.unload_stt();
+                        h.sup.hold("llm", true);
+                    }) {
+                        h.log("[sleep] deep sleep: Whisper unloaded, LLM stopped");
+                    }
+                });
+            }
+            Action::PlayWake => {
+                // at once, off the caller: the recorded "oui" (the beep if the file is missing)
+                let (clip, wav) = (lock(&self.wake_clip).clone(), std::fs::read(self.cfg.root.join("voice").join("oui.wav")).ok());
+                if let Some(f) = clip {
+                    std::thread::spawn(move || f(wav));
+                }
+            }
+            Action::SayReady => self.say(sleep::READY),
+            Action::SayFailed => self.say(sleep::FAILED),
+            Action::StartServices => {
+                tauri::async_runtime::spawn(async move {
+                    let h2 = h.clone();
+                    let _ = tauri::async_runtime::spawn_blocking(move || {
+                        let _g = lock(h2.bridge.gate()); // after a stop that is still running, never before it
+                        h2.bridge.reload_stt();
+                        h2.sup.hold("llm", false);
+                    })
+                    .await;
+                    let ok = h.llm_healthy().await;
+                    h.sleep_event(if ok { Event::Ready } else { Event::Failed });
+                });
+            }
+        }
+    }
+
+    /// The LLM's `/health`, polled for `HEALTH_WAIT_S` seconds.
+    async fn llm_healthy(&self) -> bool {
+        let base = self.cfg.models.llm.trim_end_matches('/').trim_end_matches("/v1");
+        let (url, http) = (format!("{base}/health"), reqwest::Client::new());
+        for _ in 0..HEALTH_WAIT_S {
+            if http.get(&url).timeout(Duration::from_secs(2)).send().await.is_ok_and(|r| r.status().is_success()) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        false
     }
 
     fn log(&self, line: &str) {
@@ -165,6 +297,11 @@ impl Host {
     }
 
     pub fn start(self: &Arc<Self>) {
+        let b = self.bridge.clone();
+        std::thread::spawn(move || {
+            let _g = lock(b.gate());
+            b.reload_stt()
+        }); // a stop during deep sleep left Whisper unloaded
         let mut stop = lock(&self.stop);
         if stop.is_some() {
             return;
@@ -184,6 +321,8 @@ impl Host {
         if let Some(tx) = lock(&self.stop).take() {
             let _ = tx.send(());
         }
+        *lock(&self.router) = None;
+        *lock(&self.wake_clip) = None;
     }
 
     async fn run(self: Arc<Self>, stop: oneshot::Receiver<()>) {
@@ -209,6 +348,7 @@ impl Host {
             discord: Mutex::new(None),
             ctx: Default::default(),
             in_voice: Box::new(move || lock(&b).as_ref().is_some_and(|b| b.in_voice())),
+            sleep_state: { let sup = self.sup.clone(); Box::new(move || sup.sleep_state()) },
             pc_run: Box::new(pc_cap),
             pc_out: Box::new(move |m| match m {
                 BrainMsg::Hush => {
@@ -221,6 +361,12 @@ impl Host {
                 }
             }),
         });
+        *lock(&self.router) = Some(router.clone());
+        let (b2, br2, r2) = (bot.clone(), self.bridge.clone(), router.clone());
+        *lock(&self.wake_clip) = Some(Arc::new(move |wav| match lock(&b2).clone().filter(|b| (r2.in_voice)() && b.in_voice()) {
+            Some(b) => bobby_discord::speech::wake_clip(&b, wav),
+            None => tauri::async_runtime::block_on(br2.wake_ack(wav)),
+        }));
         let (stop_tx, stop_rx) = watch::channel(false);
         let tasks = [
             tokio::spawn(router.clone().route(brain_rx)),
@@ -389,6 +535,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn who_may_wake_him() {
+        assert!(wake_allowed(None), "the PC microphone is the super admin's");
+        assert!(wake_allowed(Some(Role::Super)) && wake_allowed(Some(Role::Admin)) && wake_allowed(Some(Role::Prime)));
+        assert!(!wake_allowed(Some(Role::Other)), "someone who cannot give orders does not wake him");
+    }
+
+    #[test]
+    fn stop_waits_for_the_gate_and_yields_to_a_wake_up() {
+        let gate = Arc::new(Mutex::new(()));
+        let ran = std::cell::Cell::new(0);
+        // already awake or waking: nothing is stopped
+        for s in [sleep::State::Awake, sleep::State::Waking] {
+            assert!(!stop_services(&gate, || s, || ran.set(ran.get() + 1)));
+        }
+        assert_eq!(ran.get(), 0);
+        assert!(stop_services(&gate, || sleep::State::Asleep, || ran.set(1)));
+        assert_eq!(ran.get(), 1);
+        // a holder of the gate blocks the stop until it lets go
+        let guard = lock(&gate);
+        let g2 = gate.clone();
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let d2 = done.clone();
+        let t = std::thread::spawn(move || {
+            stop_services(&g2, || sleep::State::Asleep, || {});
+            d2.store(true, Ordering::SeqCst);
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!done.load(Ordering::SeqCst));
+        drop(guard);
+        t.join().unwrap();
+        assert!(done.load(Ordering::SeqCst));
+    }
+
     fn member(id: &str, name: &str) -> Member {
         Member { id: id.into(), name: name.into(), username: name.to_lowercase(), global_name: None, channel: Some("1".into()), roles: vec![], bot: false }
     }
@@ -415,6 +595,7 @@ mod tests {
                 bobby_channel: None,
             }),
             in_voice: Box::new(|| false), // local mode: Bobby speaks on the PC
+            sleep_state: Box::new(|| sleep::State::Awake),
             pc_run: Box::new(move |cap| {
                 lock(&c1).push(cap);
                 Ok(json!({ "found": "Valorant" }))
@@ -449,7 +630,7 @@ mod tests {
         let (io, brain_rx) = Io::new();
         let io = Arc::new(io);
         let brain = Arc::new(Brain::new(Store::temp(), HttpLlm::new("http://127.0.0.1:9"), io.clone(), bobby_core::store::temp_dir("host-down").join("j.jsonl")));
-        let router = Arc::new(Router { brain, discord: Mutex::new(None), ctx: Default::default(), in_voice: Box::new(|| false), pc_run: Box::new(pc_cap), pc_out: Box::new(|_| {}) });
+        let router = Arc::new(Router { brain, discord: Mutex::new(None), ctx: Default::default(), in_voice: Box::new(|| false), sleep_state: Box::new(|| sleep::State::Awake), pc_run: Box::new(pc_cap), pc_out: Box::new(|_| {}) });
         tokio::spawn(router.route(brain_rx));
         let r = tokio::time::timeout(Duration::from_secs(2), io.run(Cap::Leave)).await.expect("answered before the 30 s timeout");
         assert!(r.is_err());

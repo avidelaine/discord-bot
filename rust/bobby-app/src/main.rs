@@ -9,6 +9,7 @@ mod host;
 mod journal;
 mod metrics;
 mod server;
+mod sleep;
 mod supervisor;
 
 use std::sync::{Arc, Mutex};
@@ -109,9 +110,10 @@ fn main() {
                 MenuItem::with_id(app, "restart", "Redémarrer", true, None::<&str>)?,
                 CheckMenuItem::with_id(app, "autostart", "Lancer au démarrage de Windows", true, autostart, None::<&str>)?,
                 MenuItem::with_id(app, "quit", "Quitter", true, None::<&str>)?,
+                MenuItem::with_id(app, "sleep", "Deep Sleep / Réveiller", true, None::<&str>)?,
             );
             let sep = || PredefinedMenuItem::separator(app);
-            let menu = Menu::with_items(app, &[&items.0, &sep()?, &items.1, &items.2, &items.3, &sep()?, &items.4, &sep()?, &items.5])?;
+            let menu = Menu::with_items(app, &[&items.0, &sep()?, &items.1, &items.2, &items.3, &items.6, &sep()?, &items.4, &sep()?, &items.5])?;
             let auto_item = items.4.clone();
             let (icon, tip) = tray_look(&sup.status());
             let tray = TrayIconBuilder::with_id("bobby")
@@ -123,6 +125,12 @@ fn main() {
                     let sup = app.state::<Arc<Supervisor>>().inner().clone();
                     match ev.id.as_ref() {
                         "open" => open_window(app),
+                        "sleep" => {
+                            let what = if sup.status()["sleep"] == "awake" { "sleep" } else { "wake" };
+                            tauri::async_runtime::spawn_blocking(move || {
+                                let _ = sup.act(what);
+                            });
+                        }
                         what @ ("start" | "stop" | "restart") => {
                             let what = what.to_string();
                             // off the UI thread (stop waits for taskkill), inside the runtime (start spawns tasks)

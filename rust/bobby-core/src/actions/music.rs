@@ -189,6 +189,7 @@ pub fn module() -> Module {
             q(re(r"^(?:stop|arrête|arrete)$"), |_| vec![json!({ "type": "music_stop", "text": "", "quiet": true })]), // stops the music if any, else silence; never leaves
             q(re(r"^(?:(?:stop|arrête|arrete|coupe)(?: la| le| the)? (?:musique|music|radio))$"), |_| act("music_stop", "", None)),
             q(re(r"^(?:rejoue|replay|recommence)(?: (?:ça|ce son|cette musique|le morceau|this|it|the song|this song))?$|^(?:joue|play) (?:ça|it|this|that)(?: again| encore)$"), |_| act("music_replay", "", None)),
+            q(re(r"^(?:deep sleep|dors|va dormir|veille profonde|go to sleep)$"), |_| act("deep_sleep", "", None)),
             q(VOICE_UP.clone(), |_| act("voice_volume", "up", None)),
             q(VOICE_DOWN.clone(), |_| act("voice_volume", "down", None)),
             q(VOICE_SET.clone(), |m| act("voice_volume", group(m, 1), None)),
@@ -287,6 +288,10 @@ pub fn module() -> Module {
                 },
             ),
             (
+                "deep_sleep",
+                ActionDef { say: Some(|_, _, l| Some(if l == "en" { "Good night.".into() } else { "Bonne nuit.".into() })), ..Default::default() },
+            ),
+            (
                 "voice_volume",
                 ActionDef {
                     role: Role::Prime,
@@ -325,6 +330,8 @@ pub fn module() -> Module {
     }
 }
 
+pub const BUSY: &str = "Pas maintenant, je suis en train de faire autre chose.";
+
 /// R3b: port of the module's `run` functions (one per action type).
 pub async fn run<L: bobby_proto::infer::Understand + Sync>(s: &mut Step, env: &super::Env<'_, L>, _lang: &str) -> crate::util::Res<Vec<super::UndoOp>> {
     use bobby_proto::msg::{Cap, Endless, MusicItem, VolumeOp};
@@ -339,6 +346,16 @@ pub async fn run<L: bobby_proto::infer::Understand + Sync>(s: &mut Step, env: &s
             _ => MusicItem::Youtube { query: s.text.clone(), endless: Some(Endless::Similar), seed: None },
         },
     };
+    if s.kind == "deep_sleep" {
+        // this step's own `hear` counts for one; anything more is work Bobby would drop by going to sleep
+        if env.io.in_flight() > 1 {
+            return Err(crate::util::BrainError::Say(crate::util::Say::new(BUSY, "Not now, I'm busy with something else.")));
+        }
+        // the music stops first (a failure must not keep Bobby awake), then the app unloads its models
+        let _ = env.io.run(Cap::MusicStop).await;
+        env.io.send(bobby_proto::msg::BrainMsg::DeepSleep);
+        return Ok(vec![]);
+    }
     let mut clamped = None;
     let cap = match s.kind.as_str() {
         "music_play" => Cap::MusicPlay { item: item(), add: false },
@@ -441,8 +458,8 @@ mod tests {
     #[test]
     fn quick_regexes_compile() {
         let m = module();
-        assert_eq!(m.quick.len(), 20);
-        assert_eq!(m.actions.len(), 11);
+        assert_eq!(m.quick.len(), 21);
+        assert_eq!(m.actions.len(), 12);
         assert_eq!(clean("musique hardstyle en boucle"), "hardstyle");
     }
 

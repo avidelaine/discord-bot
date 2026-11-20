@@ -557,7 +557,7 @@ mod tests {
         let t = r.trace();
         assert_eq!(t[0], "run:Dm { user: \"paul\", text: \"Message de WakandeX : le repas est prêt\\nRéponds-moi ici si tu veux que je lui transmette ta réponse.\" }");
         assert_eq!(t[1], "say:261531632589078528:Paul n'est pas en vocal, je lui ai écrit en privé.");
-        r.brain.on_client(&ClientMsg::Dm { user: "paul".into(), text: "merci, j'arrive".into() });
+        r.brain.on_client(&ClientMsg::Dm { user: "paul".into(), text: "merci, j'arrive".into(), reply_to: None });
         r.until("répond :").await;
         assert_eq!(r.trace().last().unwrap(), "say:261531632589078528:Paul répond : merci, j'arrive");
     }

@@ -320,7 +320,8 @@ impl EventHandler for Handler {
     async fn message(&self, _: serenity::all::Context, msg: serenity::all::Message) {
         if let (None, false, Some(bot)) = (msg.guild_id, msg.author.bot, self.0.get()) {
             if !msg.content.trim().is_empty() {
-                bot.send(ClientMsg::Dm { user: msg.author.id.to_string(), text: msg.content.clone() });
+                let reply_to = msg.message_reference.as_ref().and_then(|r| r.message_id).map(|id| id.to_string());
+                bot.send(ClientMsg::Dm { user: msg.author.id.to_string(), text: msg.content.clone(), reply_to });
             }
         }
     }

@@ -322,6 +322,11 @@ impl Supervisor {
         self.changed();
     }
 
+    /// Bobby is started (not stopped).
+    pub fn running(&self) -> bool {
+        self.state.lock().unwrap().running
+    }
+
     /// Where deep sleep stands now.
     pub fn sleep_state(&self) -> sleep::State {
         self.state.lock().unwrap().sleep

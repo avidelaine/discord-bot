@@ -89,6 +89,8 @@ impl<L: Understand + Send + Sync + 'static> Router<L> {
             }
             match dest(&m, (self.in_voice)()) {
                 Dest::Discord => {
+                    if matches!(&m, BrainMsg::Run { cap, .. } if cap.kind() == CapKind::Music) {
+                    }
                     let tx = lock(&self.discord).clone();
                     let sent = match tx {
                         Some(tx) => tx.send(m).map_err(|e| e.0),
@@ -121,6 +123,7 @@ impl<L: Understand + Send + Sync + 'static> Router<L> {
 
     /// One transcribed sentence, from Discord or the PC.
     pub async fn hear(&self, user: String, text: String, lang: String, score: Option<f32>, stt_ms: u32, expected: bool) {
+        sleep::touch();
         let answers = self.brain.messenger.has_voice_waiter(&user);
         if !sleep::accept_sentence((self.sleep_state)(), answers) {
             return println!("[sleep] not awake yet: dropped a sentence from {user}");
@@ -148,7 +151,11 @@ impl<L: Understand + Send + Sync + 'static> Router<L> {
                     let (me, c) = (self.clone(), self.ctx_of(&user));
                     tokio::spawn(async move { me.brain.command(id, &name, &c).await });
                 }
-                ClientMsg::Result { .. } | ClientMsg::Speaking { .. } | ClientMsg::Dm { .. } => self.brain.on_client(&m),
+                ClientMsg::Speaking { ref user } => {
+                    sleep::set_speaking(user.is_some());
+                    self.brain.on_client(&m);
+                }
+                ClientMsg::Result { .. } | ClientMsg::Dm { .. } => self.brain.on_client(&m),
                 ClientMsg::Hello { .. } | ClientMsg::Wake { .. } | ClientMsg::Utterance { .. } => {}
             }
         }
@@ -188,14 +195,24 @@ pub struct Host {
     router: Mutex<Option<Arc<Router<HttpLlm>>>>,
     /// Plays the wake acknowledgement where Bobby is heard (Discord mixer or PC speakers); set while the brain runs.
     wake_clip: Mutex<Option<Arc<dyn Fn(Option<Vec<u8>>) + Send + Sync>>>,
+    /// The running Discord client, for "is music playing" (shared with `run`).
+    bot: Shared<Arc<Bot>>,
 }
 
 impl Host {
     pub fn new(cfg: &Config, bridge: Arc<Bridge>, sup: Arc<Supervisor>) -> Arc<Self> {
         capture_stdio(sup.clone());
-        let host = Arc::new(Host { cfg: cfg.clone(), bridge, sup, stop: Mutex::new(None), last: Default::default(), router: Default::default(), wake_clip: Default::default() });
+        let host = Arc::new(Host { cfg: cfg.clone(), bridge, sup, stop: Mutex::new(None), last: Default::default(), router: Default::default(), wake_clip: Default::default(), bot: Default::default() });
         let h = host.clone();
         sleep::set_hook(move |e| h.sleep_event(e));
+        let h = host.clone();
+        let h = host.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                h.idle_tick().await;
+            }
+        });
         let h = host.clone();
         bobby_infer::on_wake(move |who| h.wake(who));
         let h = host.clone();
@@ -203,9 +220,36 @@ impl Host {
         host
     }
 
-    /// The brain is in the middle of something (a request, a confirmation window): no deep sleep now.
+    /// The brain is in the middle of something (a request, a confirmation window, a messenger flow): no deep sleep now.
     fn busy(&self) -> bool {
         lock(&self.router).as_ref().is_some_and(|r| r.brain.busy())
+    }
+
+    /// Music is really playing (a loaded track, not paused) in the Discord client.
+    async fn music_playing(&self) -> bool {
+        let bot = lock(&self.bot).clone();
+        match bot {
+            Some(b) => b.playing().await,
+            None => false,
+        }
+    }
+
+    /// Once a minute: deep sleep by itself after `[sleep] auto_after_min` idle minutes (settings read live).
+    /// Only in all-Rust mode (supervisor running and the brain up); a busy brain or playing music is activity.
+    async fn idle_tick(self: &Arc<Self>) {
+        if !sleep::may_tick(self.sup.running(), lock(&self.router).is_some()) {
+            return;
+        }
+        let min = bobby_proto::settings::load().sleep.auto_after_min;
+        let active = self.busy() || self.music_playing().await;
+        if !sleep::idle_tick(min, active) {
+            return;
+        }
+        let acts = self.sup.sleep_step(Event::Idle);
+        if !acts.is_empty() {
+            self.log(&format!("[sleep] auto deep sleep after {min} min idle"));
+            acts.into_iter().for_each(|a| self.exec(a));
+        }
     }
 
     /// "Bobby" was heard while asleep: wakes him if that speaker may give orders (`who` None = the PC microphone).
@@ -220,6 +264,7 @@ impl Host {
     }
 
     fn sleep_event(self: &Arc<Self>, e: Event) {
+        sleep::touch(); // waking up restarts the idle count
         for a in self.sup.sleep_step(e) {
             self.exec(a);
         }
@@ -338,7 +383,7 @@ impl Host {
         tokio::spawn(bobby_core::actions::ask::check());
         tokio::task::spawn_blocking(|| bobby_core::actions::pc::set_apps(bobby_pc::apps::index().iter().map(|a| a.name.clone()).collect()));
 
-        let bot: Shared<Arc<Bot>> = Default::default();
+        let bot: Shared<Arc<Bot>> = self.bot.clone();
         let (b, bridge) = (bot.clone(), self.bridge.clone());
         let gen = Arc::new(AtomicU64::new(0)); // bumped by Hush: what was queued before is not said
         let (pc_tx, pc_rx) = mpsc::unbounded_channel();
@@ -460,7 +505,9 @@ impl Host {
                 BrainMsg::Say { text, lang, voice, to_user } => {
                     router.brain.on_client(&ClientMsg::Speaking { user: to_user });
                     println!("[{voice:?} on the PC] {text}");
+                    sleep::set_speaking(true);
                     let r = self.bridge.say(&text, &lang, if voice == Voice::Claude { "claude" } else { "bobby" }).await;
+                    sleep::set_speaking(false);
                     router.brain.on_client(&ClientMsg::Speaking { user: None });
                     r
                 }
@@ -468,6 +515,7 @@ impl Host {
                     // ponytail: clock-based pick, the Discord client's no-repeat rule is not worth it here
                     let acks = bobby_discord::speech::ACKS;
                     let i = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos() as usize) % acks.len();
+                    sleep::touch();
                     self.bridge.say(acks[i], "fr", "bobby").await
                 }
                 BrainMsg::Signal { kind: SignalKind::Beep } => Ok(self.bridge.beep("yes").await),

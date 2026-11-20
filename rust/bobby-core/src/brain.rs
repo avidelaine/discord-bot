@@ -5,6 +5,7 @@ use crate::actions::{self, ask, Env, Post, UndoOp};
 use crate::guard::{decide, guard, note_guard, note_text, understand};
 use crate::io::Io;
 use crate::journal::{self, num_f32, Journal, Memory};
+use crate::messenger::{self, Messenger, Started};
 use crate::prompt::{prompt, system, unsure};
 use crate::resolve::{needed, needs_confirm, names, plan_text, resolve};
 use crate::roles;
@@ -183,6 +184,7 @@ pub struct Brain<L> {
     pub llm: L,
     pub io: Arc<Io>,
     pub journal: Journal,
+    pub messenger: Messenger,
     state: Mutex<State>,
 }
 
@@ -205,7 +207,7 @@ impl<L: Understand + Sync> Brain<L> {
         println!("[brain] {n} past exchange(s) reloaded from the journal");
         // `claude.check()` is the host's job at startup (bot.js ClientReady): `tokio::spawn(actions::ask::check())`.
         // Not here, so tests and the replay never start the real Claude CLI.
-        Brain { store, llm, io, journal, state: Mutex::new(State { memory, ..Default::default() }) }
+        Brain { store, llm, io, journal, messenger: Messenger::default(), state: Mutex::new(State { memory, ..Default::default() }) }
     }
 
     fn st(&self) -> MutexGuard<'_, State> {
@@ -219,6 +221,9 @@ impl<L: Understand + Sync> Brain<L> {
                 self.io.deliver(*id, *ok, data.clone(), error.clone());
             }
             ClientMsg::Speaking { user } => self.st().speaking.clone_from(user),
+            ClientMsg::Dm { user, text } => {
+                self.messenger.deliver_dm(user, text);
+            }
             _ => {}
         }
     }
@@ -459,6 +464,17 @@ impl<L: Understand + Sync> Brain<L> {
     pub async fn hear(&self, h: Heard, c: &Context) {
         let started = Instant::now();
         let now = now_ms();
+        // A messenger waits for this person's answer: it needs no "Bobby" and goes to the flow, not to the brain.
+        if self.messenger.deliver_voice(&h.user, &h.text) {
+            let mut rec = Map::new();
+            rec.insert("at".into(), json!(journal::iso_now_ms(now_ms())));
+            rec.insert("who".into(), json!(h.user_name));
+            rec.insert("id".into(), json!(h.user));
+            rec.insert("heard".into(), json!(h.text));
+            rec.insert("outcome".into(), json!("messenger_reply"));
+            self.journal.append(&rec);
+            return println!("[messenger] {} answered", h.user_name);
+        }
         let lang = if h.lang.is_empty() { "fr".to_string() } else { h.lang.clone() };
         let h = Heard { lang, ..h };
         let (mut p, talking) = {
@@ -635,6 +651,23 @@ impl<L: Understand + Sync> Brain<L> {
         }
         let ctx = self.ctx_for(c, role, history.clone());
         self.st().memory.start(key, &h.user_name, &query, now_ms());
+        // "va dire à Marie que…": Bobby carries the message (admin only), the flow speaks for itself.
+        if let Some((who, msg)) = messenger::parse(&query) {
+            set(r, "intent", json!({ "via": "shortcut", "actions": [{ "type": "messenger", "who": who }] }));
+            if !roles::allowed(role, Role::Admin) {
+                set(r, "outcome", json!("forbidden"));
+                self.fail(r, l.forbidden);
+                return Ok(());
+            }
+            match self.messenger.start(&self.io, &self.store, c, user, &who, &msg) {
+                Started::Refused(line) => {
+                    set(r, "outcome", json!("resolve_error"));
+                    self.say(r, &line, None);
+                }
+                Started::Launched => set(r, "outcome", json!("messenger")),
+            }
+            return Ok(());
+        }
         // "dis-moi par écrit…": the request without its writing words; the answer is posted, Bobby only says where.
         let mut w: Option<Written> = None;
         if let Some(asked) = writing(&query, &ctx, &mine_of(&history, user)) {

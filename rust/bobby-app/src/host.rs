@@ -133,7 +133,7 @@ impl<L: Understand + Send + Sync + 'static> Router<L> {
                     let (me, c) = (self.clone(), self.ctx_of(&user));
                     tokio::spawn(async move { me.brain.command(id, &name, &c).await });
                 }
-                ClientMsg::Result { .. } | ClientMsg::Speaking { .. } => self.brain.on_client(&m),
+                ClientMsg::Result { .. } | ClientMsg::Speaking { .. } | ClientMsg::Dm { .. } => self.brain.on_client(&m),
                 ClientMsg::Hello { .. } | ClientMsg::Wake { .. } | ClientMsg::Utterance { .. } => {}
             }
         }

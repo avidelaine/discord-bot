@@ -127,7 +127,6 @@ pub fn set_speaking(on: bool) {
 pub fn idle_tick(minutes: u32, active: bool) -> bool {
     with_clock(|n, c| c.tick(n, minutes, active))
 }
-}
 
 static HOOK: OnceLock<Box<dyn Fn(Event) + Send + Sync>> = OnceLock::new();
 

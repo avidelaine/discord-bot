@@ -1,25 +1,30 @@
 //! "Va dire à Marie que le repas est prêt": Bobby carries a message to someone and brings the answer back.
 //! Shortcut only (no LLM). The target in voice gets the message spoken in their channel; the others get a DM.
-//! The flow runs in its own task, so `Brain::hear` returns at once; the target's sentences reach it through
-//! two small waiter maps filled by `Brain::hear` (voice) and `Brain::on_client` (DMs).
+//! A loose name match ("Mari" for Marie) is never delivered before the sender says "oui".
+//! The flow runs in its own task, so `Brain::hear` returns at once; the answers reach it through two small
+//! waiter maps filled by `Brain::hear` (voice) and `Brain::on_client` (DMs, only as a reply to Bobby's message).
+//! The flow reads where people are from the latest `Context` the brain cached, never from the order's snapshot.
 use crate::io::Io;
 use crate::resolve::pick;
 use crate::store::Store;
 use crate::types::Person;
-use crate::util::{caps, hit, re_i, replace1};
+use crate::util::{caps, hit, norm, re_i, replace1};
 use crate::wake::find_wake;
 use bobby_proto::msg::{Cap, Context, Voice};
 use fancy_regex::Regex;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use tokio::sync::oneshot;
+use tokio::task::AbortHandle;
 
 /// How long Bobby listens, in ms. One struct so tests can shrink them.
 #[derive(Debug, Clone, Copy)]
 pub struct Timings {
+    /// For the sender's "oui" after a loose name match.
+    pub confirm_ms: u64,
     /// To answer "Tu veux répondre ?" (added to the time the question takes to say).
     pub ask_ms: u64,
     /// To say the reply itself.
@@ -32,11 +37,22 @@ pub struct Timings {
 
 impl Default for Timings {
     fn default() -> Self {
-        Timings { ask_ms: 8_000, reply_ms: 20_000, dm_ms: 600_000, ms_per_char: 70 }
+        Timings { confirm_ms: 10_000, ask_ms: 8_000, reply_ms: 20_000, dm_ms: 600_000, ms_per_char: 70 }
     }
 }
 
 type Waiters = Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>;
+
+/// A messenger waiting for the reply to its DM (keyed by messenger id in `DmWaiters`).
+struct DmWait {
+    target: String,
+    /// The id of Bobby's DM, known once Discord answered. Only a reply to it counts.
+    msg_id: Option<String>,
+    tx: oneshot::Sender<String>,
+}
+
+type DmWaiters = Arc<Mutex<HashMap<u64, DmWait>>>;
+type Snapshot = Arc<Mutex<Option<Context>>>;
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -46,8 +62,12 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[derive(Default)]
 pub struct Messenger {
     voice: Waiters,
-    dm: Waiters,
+    dm: DmWaiters,
     busy: Arc<AtomicBool>,
+    next: AtomicU64,
+    tasks: Mutex<Vec<AbortHandle>>,
+    /// The latest server snapshot, shared with the flows.
+    ctx: Snapshot,
     pub timings: Timings,
 }
 
@@ -70,9 +90,27 @@ impl Messenger {
         lock(&self.voice).remove(user).is_some_and(|tx| tx.send(text.to_string()).is_ok())
     }
 
-    /// The target's direct message, if the flow waits for it. True = consumed.
-    pub fn deliver_dm(&self, user: &str, text: &str) -> bool {
-        lock(&self.dm).remove(user).is_some_and(|tx| tx.send(text.to_string()).is_ok())
+    /// A direct message from `user`. It is the answer only if it replies to the DM Bobby sent them. True = consumed.
+    pub fn deliver_dm(&self, user: &str, text: &str, reply_to: Option<&str>) -> bool {
+        let Some(reply_to) = reply_to else { return false };
+        let mut dm = lock(&self.dm);
+        let Some(id) = dm.iter().find(|(_, w)| w.target == user && w.msg_id.as_deref() == Some(reply_to)).map(|(id, _)| *id) else { return false };
+        dm.remove(&id).is_some_and(|w| w.tx.send(text.to_string()).is_ok())
+    }
+
+    /// The latest server snapshot (people's voice channels), as the host's Discord client sent it.
+    pub fn set_context(&self, c: &Context) {
+        *lock(&self.ctx) = Some(c.clone());
+    }
+
+    /// Stop or restart: no waiter survives, no messenger is out, the flows end without a word.
+    pub fn clear(&self) {
+        for h in lock(&self.tasks).drain(..) {
+            h.abort();
+        }
+        lock(&self.voice).clear();
+        lock(&self.dm).clear();
+        self.busy.store(false, Ordering::SeqCst);
     }
 
     /// Finds the person, then launches the flow. Needs a tokio runtime.
@@ -81,21 +119,32 @@ impl Messenger {
             Ok(p) => p,
             Err(line) => return Started::Refused(line),
         };
+        if lock(&self.dm).values().any(|w| w.target == target.id) {
+            return Started::Refused(format!("J'attends déjà une réponse de {}.", target.name));
+        }
         if self.busy.swap(true, Ordering::SeqCst) {
             return Started::Refused("Je suis déjà en train de porter un message.".into());
         }
+        lock(&self.ctx).get_or_insert_with(|| c.clone()); // seeded once; `set_context` keeps it fresh
         let me = c.members.iter().find(|m| m.id == sender);
         let flow = Flow {
             io: io.clone(),
             voice: self.voice.clone(),
             dm: self.dm.clone(),
+            ctx: self.ctx.clone(),
+            id: self.next.fetch_add(1, Ordering::Relaxed),
             t: self.timings,
             busy: Mutex::new(Some(Busy(self.busy.clone()))),
-            sender: Peer { id: sender.into(), name: me.map_or_else(|| sender.to_string(), |m| m.name.clone()), chan: me.and_then(|m| m.channel.clone()) },
-            target: Peer { id: target.id, name: target.name, chan: target.channel },
+            sender: Peer { id: sender.into(), name: me.map_or_else(|| sender.to_string(), |m| m.name.clone()) },
+            confirm: !is_exact(who, &target),
+            target: Peer { id: target.id, name: target.name },
             msg: msg.into(),
+            bobby: c.bobby_channel.clone(),
         };
-        tokio::spawn(flow.run());
+        let h = tokio::spawn(flow.run());
+        let mut tasks = lock(&self.tasks);
+        tasks.retain(|t| !t.is_finished());
+        tasks.push(h.abort_handle());
         Started::Launched
     }
 }
@@ -167,9 +216,22 @@ fn people(c: &Context, store: &Store, sender: &str) -> Vec<Person> {
         .collect()
 }
 
+/// True when `who` is, ignoring case and accents, the person's display name, username, global name or a nickname.
+pub fn is_exact(who: &str, p: &Person) -> bool {
+    let w = norm(who);
+    !w.is_empty() && std::iter::once(&p.name).chain(p.aliases.iter()).any(|n| norm(n) == w)
+}
+
 /// The member `who` means (same matching as the rest of the brain: `pick`), or the line to say.
+/// Two exact matches are an ambiguity, never a guess.
 pub fn find(c: &Context, store: &Store, sender: &str, who: &str) -> Result<Person, String> {
     let all = people(c, store, sender);
+    let exact: Vec<&Person> = all.iter().filter(|p| is_exact(who, p)).collect();
+    match exact.as_slice() {
+        [p] => return Ok((*p).clone()),
+        [a, b, ..] => return Err(format!("Lequel : {} ou {} ?", a.name, b.name)),
+        [] => {}
+    }
     pick(who, &all, "person").cloned().map_err(|e| match e.fr.split_once("tu veux dire ") {
         Some((_, pair)) => format!("Lequel : {pair}"), // ponytail: reads the pair out of `pick`'s sentence instead of a typed error
         None => format!("Je ne trouve pas {who}."),
@@ -210,32 +272,46 @@ pub fn classify(text: &str) -> Answer {
 struct Peer {
     id: String,
     name: String,
-    /// Voice channel ID, if in voice.
-    chan: Option<String>,
 }
 
 /// How the exchange ended.
 enum End {
     Silent,
     Refused,
+    /// The target left the voice channel before answering.
+    Left,
     Reply(String),
 }
 
 struct Flow {
     io: Arc<Io>,
     voice: Waiters,
-    dm: Waiters,
+    dm: DmWaiters,
+    /// The latest server snapshot: where people are now, not when the order was given.
+    ctx: Snapshot,
+    id: u64,
     t: Timings,
     /// Held for a voice flow only; a DM wait lets go of it (see `by_dm`).
     busy: Mutex<Option<Busy>>,
     sender: Peer,
     target: Peer,
     msg: String,
+    /// The name matched loosely: the sender must say "oui" first.
+    confirm: bool,
+    /// The channel Bobby was in when the order came (None = not connected).
+    bobby: Option<String>,
 }
 
 impl Flow {
     fn tell(&self, to: &Peer, text: &str) {
         self.io.say(text, "fr", Voice::Bobby, Some(&to.id));
+    }
+
+    /// The voice channel a member is in right now.
+    fn chan_of(&self, id: &str) -> Option<String> {
+        let g = lock(&self.ctx);
+        let c = g.as_ref().and_then(|c| c.members.iter().find(|m| m.id == id)).and_then(|m| m.channel.clone());
+        c
     }
 
     /// Registers before anything is said, so a fast answer is never lost.
@@ -270,79 +346,139 @@ impl Flow {
     }
 
     async fn run(self) {
-        match self.target.chan.clone() {
-            Some(chan) => self.by_voice(&chan).await,
+        if self.confirm && !self.confirmed().await {
+            return;
+        }
+        // Where the target is now decides: voice or DM.
+        match self.chan_of(&self.target.id) {
+            Some(_) => self.by_voice().await,
             None => self.by_dm().await,
         }
     }
 
-    async fn by_voice(&self, chan: &str) {
+    /// A loose match is read back to the sender, who must say "oui" (no wake word) within `confirm_ms`.
+    async fn confirmed(&self) -> bool {
+        let s = &self.sender;
+        self.say(s, &format!("Je porte à {} : « {} » ? Dis oui pour confirmer.", self.target.name, self.msg)).await;
+        let rx = Self::arm(&self.voice, &s.id);
+        self.io.expect(&s.id, self.t.confirm_ms as u32);
+        let yes = matches!(Self::listen(&self.voice, &s.id, rx, self.t.confirm_ms).await.map(|a| classify(&a)), Some(Answer::Yes));
+        if !yes {
+            self.tell(s, "D'accord, je ne lui dis rien.");
+        }
+        yes
+    }
+
+    async fn by_voice(&self) {
         let (io, t, to) = (&self.io, self.t, &self.target);
         self.say(&self.sender, "J'y vais.").await;
-        let moved = self.sender.chan.as_deref() != Some(chan);
+        // Everything below reads people's channels now, not the values from the start.
+        let Some(chan) = self.chan_of(&to.id) else {
+            return self.tell(&self.sender, &format!("{} est parti(e) avant que je lui parle.", to.name));
+        };
+        let sender_chan = self.chan_of(&self.sender.id);
+        let home = sender_chan.clone().or_else(|| self.bobby.clone()); // where Bobby was (None = not connected)
+        let moved = home.as_deref() != Some(chan.as_str());
         let mut paused = false;
         if moved {
-            paused = io.run(Cap::MusicPause).await.is_ok(); // errors ignored: maybe nothing plays
-            if io.run(Cap::Join { channel: chan.into() }).await.is_err() {
-                self.go_back(false, paused).await;
+            paused = home.is_some() && io.run(Cap::MusicPause).await.is_ok(); // errors ignored: maybe nothing plays
+            if io.run(Cap::Join { channel: chan.clone() }).await.is_err() {
+                if paused {
+                    let _ = io.run(Cap::MusicResume).await; // Bobby never left
+                }
                 return self.tell(&self.sender, &format!("Je n'ai pas pu rejoindre {}.", to.name));
             }
         }
+        let gone = || self.chan_of(&to.id).as_deref() != Some(chan.as_str());
+        let silent = || if gone() { End::Left } else { End::Silent };
         let line = format!("{} te fait passer un message : {}. Tu veux répondre ?", self.sender.name, self.msg);
         // Armed only once the line is said: what the target says while Bobby still talks is not the answer.
         self.say(to, &line).await;
-        let rx = Self::arm(&self.voice, &to.id);
-        io.expect(&to.id, t.ask_ms as u32);
-        let end = match Self::listen(&self.voice, &to.id, rx, t.ask_ms).await.map(|a| classify(&a)) {
-            None => End::Silent,
-            Some(Answer::No) => End::Refused,
-            Some(Answer::Reply(r)) => End::Reply(r),
-            Some(Answer::Yes) => {
-                self.say(to, "Je t'écoute.").await;
-                let rx = Self::arm(&self.voice, &to.id);
-                io.expect(&to.id, t.reply_ms as u32);
-                Self::listen(&self.voice, &to.id, rx, t.reply_ms).await.map_or(End::Silent, End::Reply)
+        let end = if gone() {
+            End::Left
+        } else {
+            let rx = Self::arm(&self.voice, &to.id);
+            io.expect(&to.id, t.ask_ms as u32);
+            match Self::listen(&self.voice, &to.id, rx, t.ask_ms).await.map(|a| classify(&a)) {
+                None => silent(),
+                Some(Answer::No) => End::Refused,
+                Some(Answer::Reply(r)) => End::Reply(r),
+                Some(Answer::Yes) => {
+                    self.say(to, "Je t'écoute.").await;
+                    if gone() {
+                        End::Left
+                    } else {
+                        let rx = Self::arm(&self.voice, &to.id);
+                        io.expect(&to.id, t.reply_ms as u32);
+                        Self::listen(&self.voice, &to.id, rx, t.reply_ms).await.map_or_else(silent, End::Reply)
+                    }
+                }
             }
         };
         if matches!(end, End::Reply(_)) {
             self.say(to, "C'est noté, je lui transmets.").await;
         }
-        self.go_back(moved, paused).await;
+        self.go_back(moved, paused, home, sender_chan.is_some()).await;
         let said = match end {
             End::Reply(r) => format!("{} répond : {r}", to.name),
             End::Refused => format!("{} ne veut pas répondre.", to.name),
             End::Silent => format!("{} n'a pas répondu.", to.name),
+            End::Left => format!("{} est parti(e) avant de répondre.", to.name),
         };
         self.tell(&self.sender, &said);
     }
 
-    /// Bobby returns to the sender (or leaves), then the music goes on if Bobby stopped it.
-    async fn go_back(&self, moved: bool, paused: bool) {
-        if moved {
-            let _ = match &self.sender.chan {
-                Some(ch) => self.io.run(Cap::Join { channel: ch.clone() }).await,
-                None => self.io.run(Cap::Leave).await,
-            };
+    /// Bobby returns to the sender's channel as it is now (never to an empty one), or to where it was if the
+    /// sender was not in voice, or leaves if it was nowhere. The music resumes only if Bobby paused it and is
+    /// back in the channel it paused in.
+    async fn go_back(&self, moved: bool, paused: bool, home: Option<String>, sender_in_voice: bool) {
+        if !moved {
+            return;
         }
-        if paused {
+        let back = if sender_in_voice { self.chan_of(&self.sender.id) } else { home.clone() };
+        let joined = match &back {
+            Some(ch) => self.io.run(Cap::Join { channel: ch.clone() }).await.is_ok(),
+            None => {
+                let _ = self.io.run(Cap::Leave).await;
+                false
+            }
+        };
+        if paused && joined && back == home {
             let _ = self.io.run(Cap::MusicResume).await;
         }
     }
 
     async fn by_dm(&self) {
         let (io, to) = (&self.io, &self.target);
-        // ponytail: one DM waiter per target; a second DM to the same person replaces the first (which ends as unanswered)
-        let rx = Self::arm(&self.dm, &to.id);
-        let text = format!("Message de {} : {}\nRéponds-moi ici si tu veux que je lui transmette ta réponse.", self.sender.name, self.msg);
-        if io.run(Cap::Dm { user: to.id.clone(), text }).await.is_err() {
-            lock(&self.dm).remove(&to.id);
-            return self.tell(&self.sender, "Je n'ai pas pu lui écrire.");
+        let (tx, rx) = oneshot::channel();
+        lock(&self.dm).insert(self.id, DmWait { target: to.id.clone(), msg_id: None, tx });
+        let text = format!("Message de {} : {}\nPour lui répondre, utilise « Répondre » sur ce message.", self.sender.name, self.msg);
+        let sent = io.run(Cap::Dm { user: to.id.clone(), text }).await;
+        let msg_id = sent.as_ref().ok().and_then(|v| v.get("message_id")?.as_str().map(String::from));
+        match (&sent, msg_id) {
+            (Err(_), _) => {
+                lock(&self.dm).remove(&self.id);
+                return self.tell(&self.sender, "Je n'ai pas pu lui écrire.");
+            }
+            (Ok(_), None) => {
+                lock(&self.dm).remove(&self.id); // no message id: no reply could be matched
+                return self.tell(&self.sender, &format!("{} n'est pas en vocal, je lui ai écrit en privé.", to.name));
+            }
+            (Ok(_), Some(id)) => {
+                if let Some(w) = lock(&self.dm).get_mut(&self.id) {
+                    w.msg_id = Some(id);
+                }
+            }
         }
         self.tell(&self.sender, &format!("{} n'est pas en vocal, je lui ai écrit en privé.", to.name));
         lock(&self.busy).take(); // the DM is out: other messengers may go while this one waits
-        let said = match Self::listen(&self.dm, &to.id, rx, self.t.dm_ms).await {
-            Some(r) => format!("{} répond : {r}", to.name),
-            None => format!("{} n'a pas répondu.", to.name),
+        let said = match tokio::time::timeout(Duration::from_millis(self.t.dm_ms), rx).await {
+            Ok(Ok(r)) => format!("{} répond : {r}", to.name),
+            Ok(Err(_)) => return, // cleared
+            Err(_) => {
+                lock(&self.dm).remove(&self.id);
+                format!("{} n'a pas répondu.", to.name)
+            }
         };
         self.tell(&self.sender, &said);
     }
@@ -436,7 +572,7 @@ mod tests {
     }
 
     fn quick() -> Timings {
-        Timings { ask_ms: 2_000, reply_ms: 2_000, dm_ms: 2_000, ms_per_char: 0 }
+        Timings { confirm_ms: 2_000, ask_ms: 2_000, reply_ms: 2_000, dm_ms: 2_000, ms_per_char: 0 }
     }
 
     impl Rig {
@@ -472,8 +608,8 @@ mod tests {
         }
     }
 
-    fn ok(_: &Cap) -> Result<Value, String> {
-        Ok(Value::Null)
+    fn ok(c: &Cap) -> Result<Value, String> {
+        Ok(if matches!(c, Cap::Dm { .. }) { json!({"message_id": "m1"}) } else { Value::Null })
     }
 
     #[tokio::test]
@@ -555,9 +691,9 @@ mod tests {
         r.hear("Bobby, dis à Paul que le repas est prêt", ADMIN).await;
         r.until("pas en vocal").await;
         let t = r.trace();
-        assert_eq!(t[0], "run:Dm { user: \"paul\", text: \"Message de WakandeX : le repas est prêt\\nRéponds-moi ici si tu veux que je lui transmette ta réponse.\" }");
+        assert_eq!(t[0], "run:Dm { user: \"paul\", text: \"Message de WakandeX : le repas est prêt\\nPour lui répondre, utilise « Répondre » sur ce message.\" }");
         assert_eq!(t[1], "say:261531632589078528:Paul n'est pas en vocal, je lui ai écrit en privé.");
-        r.brain.on_client(&ClientMsg::Dm { user: "paul".into(), text: "merci, j'arrive".into(), reply_to: None });
+        r.brain.on_client(&ClientMsg::Dm { user: "paul".into(), text: "merci, j'arrive".into(), reply_to: Some("m1".into()) });
         r.until("répond :").await;
         assert_eq!(r.trace().last().unwrap(), "say:261531632589078528:Paul répond : merci, j'arrive");
     }
@@ -567,7 +703,7 @@ mod tests {
         let r = rig(Timings { dm_ms: 100, ..quick() }, ok);
         r.hear("Bobby, dis à Paul que le repas est prêt", ADMIN).await;
         r.until("Paul n'a pas répondu.").await;
-        assert!(!r.brain.messenger.deliver_dm("paul", "trop tard")); // dropped after the timeout
+        assert!(!r.brain.messenger.deliver_dm("paul", "trop tard", Some("m1"))); // dropped after the timeout
         let r = rig(quick(), |c| if matches!(c, Cap::Dm { .. }) { Err("closed DMs".into()) } else { Ok(Value::Null) });
         r.hear("Bobby, dis à Paul que le repas est prêt", ADMIN).await;
         r.until("Je n'ai pas pu lui écrire.").await;
@@ -591,7 +727,7 @@ mod tests {
         r.hear("Bobby, dis à Marie que ça va", ADMIN).await;
         r.until("expect:marie").await;
         assert!(!r.trace().iter().any(|l| l.contains("déjà en train")));
-        assert!(r.brain.messenger.deliver_dm("paul", "ok")); // Paul's waiter was kept
+        assert!(r.brain.messenger.deliver_dm("paul", "ok", Some("m1"))); // Paul's waiter was kept
     }
 
     #[tokio::test]
@@ -602,5 +738,179 @@ mod tests {
         assert!(!r.brain.messenger.deliver_voice("marie", "non merci")); // Bobby is still talking
         r.until("expect:marie").await;
         assert!(r.brain.messenger.deliver_voice("marie", "non merci"));
+    }
+
+    // ---------- second round ----------
+
+    fn fresh_ctx(f: impl Fn(&mut Context)) -> Context {
+        let mut c = context();
+        f(&mut c);
+        c
+    }
+
+    impl Rig {
+        async fn hear_in(&self, text: &str, user: &str, c: &Context) {
+            let h = Heard { text: text.into(), lang: "fr".into(), user: user.into(), user_name: user.into(), score: Some(0.9), ..Default::default() };
+            self.brain.hear(h, c).await;
+        }
+
+        /// The Discord client's new snapshot: `id` is now in `chan`.
+        fn move_to(&self, id: &str, chan: Option<&str>) {
+            let c = fresh_ctx(|c| c.members.iter_mut().filter(|m| m.id == id).for_each(|m| m.channel = chan.map(Into::into)));
+            self.brain.on_client(&ClientMsg::Context(c));
+        }
+
+        fn has(&self, part: &str) -> bool {
+            self.trace().iter().any(|l| l.contains(part))
+        }
+    }
+
+    #[test]
+    fn exact_names_ignore_case_and_accents() {
+        let store = Store::temp();
+        store.save("aliases", &json!({"lucas": ["le Grec"]})).unwrap();
+        let mut c = context();
+        c.members.push(member("zoe", "Zoé", None));
+        let exact = |who: &str| is_exact(who, &find(&c, &store, ADMIN, who).unwrap());
+        assert!(exact("marie") && exact("MARIE") && exact("zoe") && exact("Zoé") && exact("le grec") && exact("lucas_u"));
+        assert!(!exact("Mari") && !exact("Maria"));
+    }
+
+    #[tokio::test]
+    async fn fuzzy_name_waits_for_a_yes_and_no_cancels() {
+        let r = rig(quick(), ok);
+        r.hear("Bobby, dis à Maria que le repas est prêt", ADMIN).await; // not exactly "Marie"
+        r.until(&format!("expect:{ADMIN}")).await;
+        assert_eq!(r.trace()[0], format!("say:{ADMIN}:Je porte à Marie : « le repas est prêt » ? Dis oui pour confirmer."));
+        assert!(!r.has("run:")); // nothing delivered yet
+        r.hear("non", ADMIN).await;
+        r.until("je ne lui dis rien").await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!r.has("run:") && !r.has("te fait passer") && !r.has("expect:marie"));
+        // and "oui" lets it go
+        r.hear("Bobby, dis à Maria que le repas est prêt", ADMIN).await;
+        for _ in 0..600 {
+            if r.trace().iter().filter(|l| l.starts_with("expect:")).count() == 2 {
+                break; // the second confirmation is armed (the first one is already in the trace)
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        r.hear("oui", ADMIN).await;
+        r.until("expect:marie").await;
+        assert!(r.has("te fait passer un message : le repas est prêt"));
+    }
+
+    #[tokio::test]
+    async fn fuzzy_name_without_an_answer_is_not_delivered() {
+        let r = rig(Timings { confirm_ms: 100, ..quick() }, ok);
+        r.hear("Bobby, dis à Maria que le repas est prêt", ADMIN).await;
+        r.until("je ne lui dis rien").await;
+        assert!(!r.has("run:") && !r.has("te fait passer"));
+    }
+
+    #[tokio::test]
+    async fn target_leaves_before_bobby_goes() {
+        let r = rig(Timings { ms_per_char: 30, ..quick() }, ok);
+        r.hear("Bobby, va dire à Marie que le repas est prêt", ADMIN).await;
+        r.until("J'y vais").await;
+        r.move_to("marie", None);
+        r.until("avant que je lui parle").await;
+        assert!(!r.has("run:") && !r.has("te fait passer"));
+    }
+
+    #[tokio::test]
+    async fn target_leaves_while_bobby_waits() {
+        let r = rig(Timings { ask_ms: 300, ..quick() }, ok);
+        r.hear("Bobby, va dire à Marie que le repas est prêt", ADMIN).await;
+        r.until("expect:marie").await;
+        r.move_to("marie", None);
+        r.until("est parti(e) avant de répondre").await;
+        assert!(r.has("run:Join { channel: \"Général\" }") && r.has("run:MusicResume")); // Bobby went back
+        assert!(!r.has("n'a pas répondu"));
+    }
+
+    #[tokio::test]
+    async fn sender_leaves_so_bobby_does_not_join_an_empty_channel() {
+        let r = rig(quick(), ok);
+        r.hear("Bobby, va dire à Marie que le repas est prêt", ADMIN).await;
+        r.until("expect:marie").await;
+        r.move_to(ADMIN, None);
+        r.hear("non merci", "marie").await;
+        r.until("ne veut pas répondre").await;
+        assert!(r.has("run:Leave") && !r.has("Join { channel: \"Général\" }") && !r.has("MusicResume"));
+    }
+
+    #[tokio::test]
+    async fn join_failure_tells_the_sender() {
+        let r = rig(quick(), |c| if matches!(c, Cap::Join { .. }) { Err("no permission".into()) } else { Ok(Value::Null) });
+        r.hear("Bobby, va dire à Marie que le repas est prêt", ADMIN).await;
+        r.until("Je n'ai pas pu rejoindre Marie.").await;
+        assert!(!r.has("te fait passer") && !r.has("expect:marie"));
+        assert!(r.has("run:MusicResume")); // Bobby never left: the music goes on
+    }
+
+    #[tokio::test]
+    async fn sender_not_in_voice_bobby_leaves_and_never_resumes() {
+        let r = rig(quick(), ok);
+        let c = fresh_ctx(|c| c.members[0].channel = None);
+        r.hear_in("Bobby, va dire à Marie que le repas est prêt", ADMIN, &c).await;
+        r.until("expect:marie").await;
+        r.hear("non merci", "marie").await;
+        r.until("ne veut pas répondre").await;
+        assert!(r.has("run:Join { channel: \"Gaming\" }") && r.has("run:Leave"));
+        assert!(!r.has("MusicResume") && !r.has("MusicPause") && !r.has("Join { channel: \"Général\" }"));
+    }
+
+    #[tokio::test]
+    async fn dm_answer_only_by_reply_to_bobbys_message() {
+        let r = rig(quick(), ok);
+        r.hear("Bobby, dis à Paul que le repas est prêt", ADMIN).await;
+        r.until("pas en vocal").await;
+        assert!(r.has("Pour lui répondre, utilise « Répondre » sur ce message."));
+        assert!(!r.brain.messenger.deliver_dm("paul", "salut, tu fais quoi ?", None)); // unrelated DM
+        assert!(!r.brain.messenger.deliver_dm("paul", "autre", Some("m9"))); // a reply to something else
+        assert!(!r.brain.messenger.deliver_dm("lucas", "merci", Some("m1"))); // not the target
+        assert!(!r.has("répond :"));
+        r.brain.on_client(&ClientMsg::Dm { user: "paul".into(), text: "merci, j'arrive".into(), reply_to: Some("m1".into()) });
+        r.until("Paul répond : merci, j'arrive").await;
+    }
+
+    #[tokio::test]
+    async fn second_messenger_to_the_same_target_is_refused() {
+        let r = rig(quick(), ok);
+        r.hear("Bobby, dis à Paul que le repas est prêt", ADMIN).await;
+        r.until("pas en vocal").await;
+        r.hear("Bobby, dis à Paul que c'est urgent", ADMIN).await;
+        r.until("J'attends déjà une réponse de Paul.").await;
+        assert_eq!(r.trace().iter().filter(|l| l.starts_with("run:Dm")).count(), 1);
+        assert!(r.brain.messenger.deliver_dm("paul", "ok", Some("m1"))); // the first one still waits
+    }
+
+    #[tokio::test]
+    async fn non_admin_cannot_use_the_dm_path() {
+        let r = rig(quick(), ok);
+        r.hear("Bobby, dis à Paul que le repas est prêt", "passant").await;
+        assert!(!r.has("run:Dm") && !r.has("pas en vocal"));
+    }
+
+    #[tokio::test]
+    async fn clear_drops_waiters_and_ends_flows_quietly() {
+        let r = rig(Timings { ask_ms: 100, ..quick() }, ok);
+        r.hear("Bobby, va dire à Marie que le repas est prêt", ADMIN).await;
+        r.until("expect:marie").await;
+        r.hear("Bobby, dis à Paul que ça va", ADMIN).await;
+        r.until("déjà en train").await;
+        r.brain.messenger.clear();
+        assert!(!r.brain.messenger.deliver_voice("marie", "oui"));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!r.has("n'a pas répondu")); // the flow ended without a word
+        r.hear("Bobby, dis à Lucas que ça va", ADMIN).await; // the busy flag is free
+        r.until("expect:lucas").await;
+        // a waiting DM is dropped too
+        let r = rig(quick(), ok);
+        r.hear("Bobby, dis à Paul que le repas est prêt", ADMIN).await;
+        r.until("pas en vocal").await;
+        r.brain.messenger.clear();
+        assert!(!r.brain.messenger.deliver_dm("paul", "merci", Some("m1")));
     }
 }

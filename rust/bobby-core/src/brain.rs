@@ -221,9 +221,10 @@ impl<L: Understand + Sync> Brain<L> {
                 self.io.deliver(*id, *ok, data.clone(), error.clone());
             }
             ClientMsg::Speaking { user } => self.st().speaking.clone_from(user),
-            ClientMsg::Dm { user, text, .. } => {
-                self.messenger.deliver_dm(user, text);
+            ClientMsg::Dm { user, text, reply_to } => {
+                self.messenger.deliver_dm(user, text, reply_to.as_deref());
             }
+            ClientMsg::Context(c) => self.messenger.set_context(c),
             _ => {}
         }
     }

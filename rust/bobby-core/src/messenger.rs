@@ -7,6 +7,7 @@ use crate::resolve::pick;
 use crate::store::Store;
 use crate::types::Person;
 use crate::util::{caps, hit, re_i, replace1};
+use crate::wake::find_wake;
 use bobby_proto::msg::{Cap, Context, Voice};
 use fancy_regex::Regex;
 use serde_json::{json, Value};
@@ -61,7 +62,11 @@ pub enum Started {
 
 impl Messenger {
     /// The target's sentence, if the flow waits for it (no wake word needed). True = consumed.
+    /// A sentence that calls Bobby ("Bobby, stop") is a command, not the answer: it goes the normal way.
     pub fn deliver_voice(&self, user: &str, text: &str) -> bool {
+        if find_wake(text).is_some() {
+            return false;
+        }
         lock(&self.voice).remove(user).is_some_and(|tx| tx.send(text.to_string()).is_ok())
     }
 
@@ -85,7 +90,7 @@ impl Messenger {
             voice: self.voice.clone(),
             dm: self.dm.clone(),
             t: self.timings,
-            _busy: Busy(self.busy.clone()),
+            busy: Mutex::new(Some(Busy(self.busy.clone()))),
             sender: Peer { id: sender.into(), name: me.map_or_else(|| sender.to_string(), |m| m.name.clone()), chan: me.and_then(|m| m.channel.clone()) },
             target: Peer { id: target.id, name: target.name, chan: target.channel },
             msg: msg.into(),
@@ -221,7 +226,8 @@ struct Flow {
     voice: Waiters,
     dm: Waiters,
     t: Timings,
-    _busy: Busy,
+    /// Held for a voice flow only; a DM wait lets go of it (see `by_dm`).
+    busy: Mutex<Option<Busy>>,
     sender: Peer,
     target: Peer,
     msg: String,
@@ -242,10 +248,24 @@ impl Flow {
     async fn listen(w: &Waiters, user: &str, rx: oneshot::Receiver<String>, ms: u64) -> Option<String> {
         match tokio::time::timeout(Duration::from_millis(ms), rx).await {
             Ok(Ok(text)) => Some(text),
-            _ => {
+            Ok(Err(_)) => None, // replaced by a newer waiter for the same person: leave that one alone
+            Err(_) => {
                 lock(w).remove(user); // ponytail: an answer that lands after the timeout is dropped
                 None
             }
+        }
+    }
+
+    /// Says it, then lets the estimated speech time pass so the next step does not cut it off.
+    async fn say(&self, to: &Peer, text: &str) {
+        self.tell(to, text);
+        self.speech(text).await;
+    }
+
+    async fn speech(&self, text: &str) {
+        let ms = text.chars().count() as u64 * self.t.ms_per_char;
+        if ms > 0 {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
         }
     }
 
@@ -258,7 +278,7 @@ impl Flow {
 
     async fn by_voice(&self, chan: &str) {
         let (io, t, to) = (&self.io, self.t, &self.target);
-        self.tell(&self.sender, "J'y vais.");
+        self.say(&self.sender, "J'y vais.").await;
         let moved = self.sender.chan.as_deref() != Some(chan);
         let mut paused = false;
         if moved {
@@ -269,23 +289,23 @@ impl Flow {
             }
         }
         let line = format!("{} te fait passer un message : {}. Tu veux répondre ?", self.sender.name, self.msg);
-        let wait = t.ask_ms + line.chars().count() as u64 * t.ms_per_char;
+        // Armed only once the line is said: what the target says while Bobby still talks is not the answer.
+        self.say(to, &line).await;
         let rx = Self::arm(&self.voice, &to.id);
-        self.tell(to, &line);
-        io.expect(&to.id, wait as u32);
-        let end = match Self::listen(&self.voice, &to.id, rx, wait).await.map(|a| classify(&a)) {
+        io.expect(&to.id, t.ask_ms as u32);
+        let end = match Self::listen(&self.voice, &to.id, rx, t.ask_ms).await.map(|a| classify(&a)) {
             None => End::Silent,
             Some(Answer::No) => End::Refused,
             Some(Answer::Reply(r)) => End::Reply(r),
             Some(Answer::Yes) => {
+                self.say(to, "Je t'écoute.").await;
                 let rx = Self::arm(&self.voice, &to.id);
-                self.tell(to, "Je t'écoute.");
                 io.expect(&to.id, t.reply_ms as u32);
                 Self::listen(&self.voice, &to.id, rx, t.reply_ms).await.map_or(End::Silent, End::Reply)
             }
         };
         if matches!(end, End::Reply(_)) {
-            self.tell(to, "C'est noté, je lui transmets.");
+            self.say(to, "C'est noté, je lui transmets.").await;
         }
         self.go_back(moved, paused).await;
         let said = match end {
@@ -311,6 +331,7 @@ impl Flow {
 
     async fn by_dm(&self) {
         let (io, to) = (&self.io, &self.target);
+        // ponytail: one DM waiter per target; a second DM to the same person replaces the first (which ends as unanswered)
         let rx = Self::arm(&self.dm, &to.id);
         let text = format!("Message de {} : {}\nRéponds-moi ici si tu veux que je lui transmette ta réponse.", self.sender.name, self.msg);
         if io.run(Cap::Dm { user: to.id.clone(), text }).await.is_err() {
@@ -318,6 +339,7 @@ impl Flow {
             return self.tell(&self.sender, "Je n'ai pas pu lui écrire.");
         }
         self.tell(&self.sender, &format!("{} n'est pas en vocal, je lui ai écrit en privé.", to.name));
+        lock(&self.busy).take(); // the DM is out: other messengers may go while this one waits
         let said = match Self::listen(&self.dm, &to.id, rx, self.t.dm_ms).await {
             Some(r) => format!("{} répond : {r}", to.name),
             None => format!("{} n'a pas répondu.", to.name),
@@ -522,8 +544,9 @@ mod tests {
         let r = rig(quick(), ok);
         r.hear("Bobby, dis à Zorglub que ça va", ADMIN).await;
         r.until("Je ne trouve pas Zorglub.").await;
-        r.hear("Bobby, dis à Lucas que ça va", "passant").await; // no role
-        assert!(!r.trace().iter().any(|l| l.contains("expect:")));
+        r.hear("Bobby, dis à Lucas que ça va", "passant").await; // no role: falls through to the normal path
+        assert!(!r.trace().iter().any(|l| l.contains("expect:") || l.contains("forbidden")));
+        assert!(!r.trace().iter().any(|l| l.contains("Lucas")));
     }
 
     #[tokio::test]
@@ -548,5 +571,36 @@ mod tests {
         let r = rig(quick(), |c| if matches!(c, Cap::Dm { .. }) { Err("closed DMs".into()) } else { Ok(Value::Null) });
         r.hear("Bobby, dis à Paul que le repas est prêt", ADMIN).await;
         r.until("Je n'ai pas pu lui écrire.").await;
+    }
+
+    #[tokio::test]
+    async fn wake_word_from_the_target_is_a_command_not_the_answer() {
+        let r = rig(quick(), ok);
+        r.hear("Bobby, va dire à Marie que le repas est prêt", ADMIN).await;
+        r.until("expect:marie").await;
+        assert!(!r.brain.messenger.deliver_voice("marie", "Bobby, stop"));
+        assert!(!r.brain.messenger.deliver_voice("marie", "Bobby, coupe la musique"));
+        assert!(r.brain.messenger.deliver_voice("marie", "oui")); // the waiter is still there
+    }
+
+    #[tokio::test]
+    async fn dm_wait_does_not_block_another_messenger() {
+        let r = rig(quick(), ok);
+        r.hear("Bobby, dis à Paul que le repas est prêt", ADMIN).await;
+        r.until("pas en vocal").await;
+        r.hear("Bobby, dis à Marie que ça va", ADMIN).await;
+        r.until("expect:marie").await;
+        assert!(!r.trace().iter().any(|l| l.contains("déjà en train")));
+        assert!(r.brain.messenger.deliver_dm("paul", "ok")); // Paul's waiter was kept
+    }
+
+    #[tokio::test]
+    async fn speech_before_the_line_is_over_is_not_the_answer() {
+        let r = rig(Timings { ms_per_char: 8, ..quick() }, ok); // the line is ~80 chars: ~650 ms
+        r.hear("Bobby, va dire à Marie que le repas est prêt", ADMIN).await;
+        r.until("Tu veux répondre").await;
+        assert!(!r.brain.messenger.deliver_voice("marie", "non merci")); // Bobby is still talking
+        r.until("expect:marie").await;
+        assert!(r.brain.messenger.deliver_voice("marie", "non merci"));
     }
 }

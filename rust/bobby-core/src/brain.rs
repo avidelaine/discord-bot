@@ -651,14 +651,9 @@ impl<L: Understand + Sync> Brain<L> {
         }
         let ctx = self.ctx_for(c, role, history.clone());
         self.st().memory.start(key, &h.user_name, &query, now_ms());
-        // "va dire à Marie que…": Bobby carries the message (admin only), the flow speaks for itself.
-        if let Some((who, msg)) = messenger::parse(&query) {
+        // "va dire à Marie que…": Bobby carries the message (admin only: others take the normal path), the flow speaks for itself.
+        if let Some((who, msg)) = messenger::parse(&query).filter(|_| roles::allowed(role, Role::Admin)) {
             set(r, "intent", json!({ "via": "shortcut", "actions": [{ "type": "messenger", "who": who }] }));
-            if !roles::allowed(role, Role::Admin) {
-                set(r, "outcome", json!("forbidden"));
-                self.fail(r, l.forbidden);
-                return Ok(());
-            }
             match self.messenger.start(&self.io, &self.store, c, user, &who, &msg) {
                 Started::Refused(line) => {
                     set(r, "outcome", json!("resolve_error"));

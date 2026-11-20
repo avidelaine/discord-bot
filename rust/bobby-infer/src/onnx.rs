@@ -11,8 +11,16 @@ pub fn dll_path(model_dir: &Path) -> PathBuf {
     }
 }
 
-/// Loads the runtime once (later calls reuse it) and builds an environment for sessions.
+/// Loads the runtime and builds THE environment once; later calls share it. ort allows one environment per process,
+/// and the app loads several models (PC wake word, Discord listener, Piper).
 pub fn env(model_dir: &Path) -> Result<Environment, String> {
+    static ENV: std::sync::Mutex<Option<Environment>> = std::sync::Mutex::new(None);
+    let mut slot = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(e) = slot.as_ref() {
+        return Ok(e.clone());
+    }
     let p = dll_path(model_dir);
-    ort::init_from(&p).map_err(|e| format!("ONNX Runtime not loaded from {}: {e}", p.display()))?.build().map_err(|e| e.to_string())
+    let e = ort::init_from(&p).map_err(|e| format!("ONNX Runtime not loaded from {}: {e}", p.display()))?.build().map_err(|e| e.to_string())?;
+    *slot = Some(e.clone());
+    Ok(e)
 }

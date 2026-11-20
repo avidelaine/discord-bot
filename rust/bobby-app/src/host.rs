@@ -11,7 +11,7 @@ use bobby_infer::HttpLlm;
 use bobby_proto::infer::Understand;
 use bobby_proto::msg::{BrainMsg, Cap, CapKind, ClientMsg, Context, SignalKind, Voice};
 use bobby_proto::settings::Config;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -153,6 +153,7 @@ pub struct Host {
 
 impl Host {
     pub fn new(cfg: &Config, bridge: Arc<Bridge>, sup: Arc<Supervisor>) -> Arc<Self> {
+        capture_stdio(sup.clone());
         Arc::new(Host { cfg: cfg.clone(), bridge, sup, stop: Mutex::new(None), last: Default::default() })
     }
 
@@ -330,10 +331,34 @@ impl Host {
     }
 }
 
+/// The brain and the Discord client log with println!/eprintln!, and the app has no console (windows subsystem):
+/// both streams go to the supervisor's log (`_logs/bobby.log`, the dashboard), tagged "rust".
+fn capture_stdio(sup: Arc<Supervisor>) {
+    use std::io::BufRead;
+    use std::os::windows::io::IntoRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+    let Ok((reader, writer)) = std::io::pipe() else { return };
+    let h = HANDLE(writer.into_raw_handle()); // leaked on purpose: it lives as long as the process
+    // SAFETY: a valid pipe handle we own; Rust's stdout/stderr look the std handle up at each write.
+    unsafe {
+        let _ = SetStdHandle(STD_OUTPUT_HANDLE, h);
+        let _ = SetStdHandle(STD_ERROR_HANDLE, h);
+    }
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(reader).lines().map_while(Result::ok) {
+            if !line.trim().is_empty() {
+                sup.log("rust", line.trim_end());
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use bobby_proto::msg::{Channel, Member, MediaCmd, VolumeOp};
+    use serde_json::json;
 
     const SUPER: &str = "261531632589078528"; // the brain's default super admin
 

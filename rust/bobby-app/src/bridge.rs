@@ -34,7 +34,9 @@ pub struct Bridge {
     /// Builds Whisper again after a deep sleep.
     load_stt: Arc<dyn Fn() -> Stt + Send + Sync>,
     /// Set by a deep sleep: only then does `reload_stt` load (the startup load may still be running).
-    unloaded: AtomicBool,
+    unloaded: Arc<AtomicBool>,
+    /// Orders the startup load, deep-sleep unload/reload and the LLM hold (the host takes it for a whole step).
+    gate: Arc<Mutex<()>>,
     hook: Mutex<Option<Hook>>,
     http: reqwest::Client,
     enabled: AtomicBool,
@@ -62,8 +64,15 @@ impl Bridge {
         };
         let load: Arc<dyn Fn() -> Stt + Send + Sync> = Arc::new(load);
         let load_stt = load.clone();
+        let (gate, unloaded) = (Arc::new(Mutex::new(())), Arc::new(AtomicBool::new(false)));
         if bobby_infer::is_local(&cfg.models.stt) {
-            std::thread::spawn(move || cell.load(Arc::new(load())));
+            let (gate, unloaded) = (gate.clone(), unloaded.clone());
+            std::thread::spawn(move || {
+                let _g = gate.lock().unwrap_or_else(|e| e.into_inner());
+                if !unloaded.load(Ordering::SeqCst) {
+                    cell.load(Arc::new(load())); // asleep already: stay unloaded, the wake-up loads it
+                }
+            });
         } else {
             cell.load(Arc::new(load()));
         }
@@ -86,7 +95,8 @@ impl Bridge {
             tts,
             stt,
             load_stt,
-            unloaded: AtomicBool::new(false),
+            unloaded,
+            gate,
             hook: Mutex::new(None),
             http: reqwest::Client::new(),
             enabled: AtomicBool::new(false),
@@ -104,6 +114,11 @@ impl Bridge {
     /// Whisper, once loaded: shared with the Rust Discord client so it sits in VRAM once.
     pub fn stt_slot(&self) -> Arc<SttSlot> {
         self.stt.clone()
+    }
+
+    /// The service gate: hold it while unloading or reloading Whisper and holding or releasing the LLM.
+    pub fn gate(&self) -> &Mutex<()> {
+        &self.gate
     }
 
     /// Deep sleep: frees Whisper's VRAM (the in-process engine only; a remote one is not ours to unload).

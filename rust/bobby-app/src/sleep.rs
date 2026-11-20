@@ -26,7 +26,7 @@ pub enum Event {
     WakeWord,
     /// The services are back (the LLM answers `/health`).
     Ready,
-    /// The LLM is not healthy 60 s after the restart.
+    /// The LLM is not healthy 180 s after the restart.
     Failed,
 }
 

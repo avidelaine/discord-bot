@@ -148,6 +148,20 @@ impl<L: Understand + Send + Sync + 'static> Router<L> {
     }
 }
 
+// ponytail: 180 s, a cold LLM (model load into VRAM) took over 60 s; one constant, no config knob
+const HEALTH_WAIT_S: u32 = 180;
+
+/// The deep-sleep stop, serialised with the wake-up by `gate`: does nothing (false) unless Bobby is still asleep
+/// once it holds the gate, so a wake word that came first is not undone.
+fn stop_services(gate: &Mutex<()>, state: impl Fn() -> sleep::State, stop: impl FnOnce()) -> bool {
+    let _g = lock(gate);
+    let asleep = state() == sleep::State::Asleep;
+    if asleep {
+        stop();
+    }
+    asleep
+}
+
 type Shared<T> = Arc<Mutex<Option<T>>>;
 
 pub struct Host {
@@ -197,9 +211,13 @@ impl Host {
             Action::StopServices => {
                 // off the async threads: unloading Whisper and taskkill both block
                 std::thread::spawn(move || {
-                    h.bridge.unload_stt();
-                    h.sup.hold("llm", true);
-                    h.log("[sleep] deep sleep: Whisper unloaded, LLM stopped");
+                    let gate = h.bridge.gate();
+                    if stop_services(gate, || h.sup.sleep_state(), || {
+                        h.bridge.unload_stt();
+                        h.sup.hold("llm", true);
+                    }) {
+                        h.log("[sleep] deep sleep: Whisper unloaded, LLM stopped");
+                    }
                 });
             }
             Action::SayWaking => self.say(sleep::WAKING),
@@ -207,9 +225,13 @@ impl Host {
             Action::SayFailed => self.say(sleep::FAILED),
             Action::StartServices => {
                 tauri::async_runtime::spawn(async move {
-                    let b = h.bridge.clone();
-                    let _ = tauri::async_runtime::spawn_blocking(move || b.reload_stt()).await;
-                    h.sup.hold("llm", false);
+                    let h2 = h.clone();
+                    let _ = tauri::async_runtime::spawn_blocking(move || {
+                        let _g = lock(h2.bridge.gate()); // after a stop that is still running, never before it
+                        h2.bridge.reload_stt();
+                        h2.sup.hold("llm", false);
+                    })
+                    .await;
                     let ok = h.llm_healthy().await;
                     h.sleep_event(if ok { Event::Ready } else { Event::Failed });
                 });
@@ -217,11 +239,11 @@ impl Host {
         }
     }
 
-    /// The LLM's `/health`, polled for 60 s.
+    /// The LLM's `/health`, polled for `HEALTH_WAIT_S` seconds.
     async fn llm_healthy(&self) -> bool {
         let base = self.cfg.models.llm.trim_end_matches('/').trim_end_matches("/v1");
         let (url, http) = (format!("{base}/health"), reqwest::Client::new());
-        for _ in 0..60 {
+        for _ in 0..HEALTH_WAIT_S {
             if http.get(&url).timeout(Duration::from_secs(2)).send().await.is_ok_and(|r| r.status().is_success()) {
                 return true;
             }
@@ -236,7 +258,10 @@ impl Host {
 
     pub fn start(self: &Arc<Self>) {
         let b = self.bridge.clone();
-        std::thread::spawn(move || b.reload_stt()); // a stop during deep sleep left Whisper unloaded
+        std::thread::spawn(move || {
+            let _g = lock(b.gate());
+            b.reload_stt()
+        }); // a stop during deep sleep left Whisper unloaded
         let mut stop = lock(&self.stop);
         if stop.is_some() {
             return;
@@ -256,6 +281,7 @@ impl Host {
         if let Some(tx) = lock(&self.stop).take() {
             let _ = tx.send(());
         }
+        *lock(&self.router) = None;
     }
 
     async fn run(self: Arc<Self>, stop: oneshot::Receiver<()>) {
@@ -460,6 +486,33 @@ mod tests {
             assert_eq!(dest(&BrainMsg::Expect { user: SUPER.into(), ms: 8000 }, v), voice(v));
             assert_eq!(dest(&run(Cap::VoiceVolume { op: VolumeOp::Delta { delta: 10 } }), v), voice(v));
         }
+    }
+
+    #[test]
+    fn stop_waits_for_the_gate_and_yields_to_a_wake_up() {
+        let gate = Arc::new(Mutex::new(()));
+        let ran = std::cell::Cell::new(0);
+        // already awake or waking: nothing is stopped
+        for s in [sleep::State::Awake, sleep::State::Waking] {
+            assert!(!stop_services(&gate, || s, || ran.set(ran.get() + 1)));
+        }
+        assert_eq!(ran.get(), 0);
+        assert!(stop_services(&gate, || sleep::State::Asleep, || ran.set(1)));
+        assert_eq!(ran.get(), 1);
+        // a holder of the gate blocks the stop until it lets go
+        let guard = lock(&gate);
+        let g2 = gate.clone();
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let d2 = done.clone();
+        let t = std::thread::spawn(move || {
+            stop_services(&g2, || sleep::State::Asleep, || {});
+            d2.store(true, Ordering::SeqCst);
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!done.load(Ordering::SeqCst));
+        drop(guard);
+        t.join().unwrap();
+        assert!(done.load(Ordering::SeqCst));
     }
 
     fn member(id: &str, name: &str) -> Member {

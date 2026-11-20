@@ -231,6 +231,10 @@ impl Supervisor {
                         }
                         s.parts[i].pid = child.id();
                         s.parts[i].started_at = Some(now_ms());
+                        if s.parts[i].held {
+                            // a hold arrived while spawning: it saw no pid to kill
+                            kill_tree(child.id().unwrap_or(0));
+                        }
                     }
                     self.changed();
                     let out = tokio::spawn(self.clone().pipe(i, child.stdout.take()));
@@ -300,6 +304,11 @@ impl Supervisor {
             kill_tree(pid);
         }
         self.changed();
+    }
+
+    /// Where deep sleep stands now.
+    pub fn sleep_state(&self) -> sleep::State {
+        self.state.lock().unwrap().sleep
     }
 
     /// Applies a sleep event to the state and returns what the host must do.

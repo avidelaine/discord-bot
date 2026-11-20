@@ -1,6 +1,21 @@
 //! Model calls by address: speech-to-text, LLM, text-to-speech.
 //! HTTP clients for today's services (voice/server.py on :3000, llama-server on :8080).
 //! Later an in-process engine implements the same traits; the setting value "local" selects it.
+#[cfg(feature = "onnx")]
+pub mod collect;
+#[cfg(feature = "onnx")]
+pub mod onnx;
+#[cfg(feature = "onnx")]
+pub mod wake;
+#[cfg(feature = "onnx")]
+pub mod listen; // R5 5.4: the /listen exchange in process (Discord sentences)
+#[cfg(feature = "onnx")]
+pub mod vad; // R5 5.2: Silero VAD (faster-whisper vad_filter)
+#[cfg(feature = "ct2")]
+pub mod stt; // R5 5.2: in-process Whisper (LocalStt)
+#[cfg(feature = "piper")]
+pub mod tts; // R5 5.3: in-process Piper (LocalTts)
+
 use bobby_proto::infer::{ChatMsg, InferError, InferErrorKind, Speak, Transcribe, Transcript, Understand, Wav};
 pub mod loudness;
 use std::time::Duration;
@@ -150,9 +165,95 @@ impl Speak for HttpTts {
     }
 }
 
+// ---------- address switch: "local" = in-process engine, anything else = HTTP ----------
+
+/// Whisper large-v3-turbo inside `models/` (faster-whisper's Hugging Face cache layout).
+pub const WHISPER_DIR: &str = "whisper_models/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo/snapshots/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf";
+
+/// True for the address value that selects the in-process engine.
+pub fn is_local(addr: &str) -> bool {
+    addr.trim().eq_ignore_ascii_case("local")
+}
+
+#[allow(dead_code)] // unused when both engines are built in
+fn local_off(what: &str, feature: &str) -> InferError {
+    InferError::new(InferErrorKind::Down, format!("{what} = \"local\" but this build has no in-process engine (cargo feature {feature})"))
+}
+
+/// Speech-to-text by address. The traits are not object-safe (async fn), hence an enum.
+pub enum Stt {
+    Http(HttpStt),
+    #[cfg(feature = "ct2")]
+    Local(stt::LocalStt),
+}
+
+impl Stt {
+    /// `addr`: a URL, or "local" (loads Whisper and Silero VAD from `models`: slow, call once at start).
+    #[cfg_attr(not(feature = "ct2"), allow(unused_variables))]
+    pub fn from_addr(addr: &str, models: &std::path::Path) -> Result<Self, InferError> {
+        if !is_local(addr) {
+            return Ok(Stt::Http(HttpStt::new(addr)));
+        }
+        #[cfg(feature = "ct2")]
+        return Ok(Stt::Local(stt::LocalStt::new(&models.join(WHISPER_DIR), &models.join("vad/silero_vad_v6.onnx"))?));
+        #[cfg(not(feature = "ct2"))]
+        Err(local_off("stt", "ct2"))
+    }
+}
+
+impl Transcribe for Stt {
+    async fn transcribe(&self, pcm16k: &[f32], hotwords: &str) -> Result<Transcript, InferError> {
+        match self {
+            Stt::Http(s) => s.transcribe(pcm16k, hotwords).await,
+            #[cfg(feature = "ct2")]
+            Stt::Local(s) => s.transcribe(pcm16k, hotwords).await,
+        }
+    }
+}
+
+/// Text-to-speech by address.
+pub enum Tts {
+    Http(HttpTts),
+    #[cfg(feature = "piper")]
+    Local(tts::LocalTts),
+}
+
+impl Tts {
+    /// `addr`: a URL, or "local" (loads the Piper voices and espeak-ng data from `models`).
+    #[cfg_attr(not(feature = "piper"), allow(unused_variables))]
+    pub fn from_addr(addr: &str, models: &std::path::Path) -> Result<Self, InferError> {
+        if !is_local(addr) {
+            return Ok(Tts::Http(HttpTts::new(addr)));
+        }
+        #[cfg(feature = "piper")]
+        return Ok(Tts::Local(tts::LocalTts::new(&models.join("piper"), &models.join("espeak-ng-data"))?));
+        #[cfg(not(feature = "piper"))]
+        Err(local_off("tts", "piper"))
+    }
+}
+
+impl Speak for Tts {
+    async fn speak(&self, text: &str, lang: &str, voice: &str) -> Result<Wav, InferError> {
+        match self {
+            Tts::Http(t) => t.speak(text, lang, voice).await,
+            #[cfg(feature = "piper")]
+            Tts::Local(t) => t.speak(text, lang, voice).await,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn address_switch() {
+        assert!(is_local(" Local "));
+        assert!(matches!(Stt::from_addr("http://127.0.0.1:3000", std::path::Path::new("models")), Ok(Stt::Http(_))));
+        assert!(matches!(Tts::from_addr("http://x", std::path::Path::new("models")), Ok(Tts::Http(_))));
+        #[cfg(not(feature = "ct2"))]
+        assert!(Stt::from_addr("local", std::path::Path::new("models")).is_err());
+    }
 
     const DEAD: &str = "http://127.0.0.1:1";
 

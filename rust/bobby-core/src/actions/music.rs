@@ -157,7 +157,7 @@ pub fn module() -> Module {
             r##"- music_add : ajouter à la file d'attente, "text" et "kind" comme music_play"##,
             r##"- music_pause / music_resume / music_stop / music_skip / music_replay : pause, reprendre, arrêter (vide la file), passer au suivant, rejouer"##,
             r##"- music_queue : dire la file d'attente"##,
-            r##"- music_volume : volume de Bobby, de 0 à 100 (100 = le maximum) ; "text" vaut up, down ou le nombre demandé (même au-dessus de 100 : Bobby met le maximum et le dit)"##,
+            r##"- music_volume : volume de Bobby, de 0 à 100 (100 = le maximum) ; "text" vaut up, down ou le nombre demandé (même au-dessus de 100 : Bobby met le maximum et le dit), ou -N%, +N% ou /N pour un changement relatif"##,
             r##"- music_now : dire quel morceau joue"##,
         ],
         rules: vec![
@@ -175,6 +175,7 @@ pub fn module() -> Module {
             r##""play Around the World by Daft Punk" -> {"actions":[{"type":"music_play","text":"Around the World Daft Punk","kind":"youtube"}],"say":""}"##,
             r##""passe à la suivante" -> {"actions":[{"type":"music_skip"}],"say":""}"##,
             r##""mets le volume à 40" -> {"actions":[{"type":"music_volume","text":"40"}],"say":""}"##,
+            r##""baisse le son de 50 %" -> {"actions":[{"type":"music_volume","text":"-50%"}],"say":""}"##,
             r##""ajoute Blinding Lights à la file" -> {"actions":[{"type":"music_add","text":"Blinding Lights","kind":"youtube"}],"say":""}"##,
             r##""what song is this" -> {"actions":[{"type":"music_now"}],"say":""}"##,
             r##""quelle est ta plage de volume" -> {"analyse":{"genre":"capacite","faisable":true},"actions":[],"say":"Mon volume va de 0 à 100 %."}"##,
@@ -353,6 +354,29 @@ pub async fn run<L: bobby_proto::infer::Understand + Sync>(s: &mut Step, env: &s
             let lower = s.text.to_lowercase();
             let t = crate::util::replace1(&PERCENT, &lower, "");
             let t = t.trim();
+            let rel = REL_VOLUME.captures(lower.trim()).ok().flatten();
+            let div = t.strip_prefix('/').filter(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit())).and_then(|d| d.parse::<f64>().ok()).filter(|d| *d >= 1.0);
+            if rel.is_some() || div.is_some() {
+                // relative change: from the player's current volume (a zero step just reads it)
+                let cur = env.io.run(Cap::MusicVolume { op: VolumeOp::Delta { delta: 0 } }).await?;
+                if !cur["error"].is_null() {
+                    s.set("res", cur);
+                    return Ok(vec![]);
+                }
+                let cur = cur["volume"].as_f64().unwrap_or(0.0);
+                let (raw, dir) = match (&rel, div) {
+                    (Some(r), _) => {
+                        let k = r[2].parse::<f64>().unwrap_or(0.0) / 100.0;
+                        let dir = if k == 0.0 { 0.0 } else if &r[1] == "-" { -1.0 } else { 1.0 };
+                        ((cur * (1.0 + dir * k)).round(), dir)
+                    }
+                    (_, d) => ((cur / d.unwrap_or(1.0)).round(), if d.unwrap_or(1.0) > 1.0 { -1.0 } else { 0.0 }),
+                };
+                // a change too small to move the rounded volume ("-10 %" at 4) still moves it by one step
+                let n = if raw == cur && dir != 0.0 { cur + dir } else { raw };
+                clamped = Some(raw > 100.0);
+                Cap::MusicVolume { op: VolumeOp::Set { level: n.clamp(0.0, 100.0) as u8 } }
+            } else {
             match t {
                 "up" => Cap::MusicVolume { op: VolumeOp::Delta { delta: 10 } },
                 "down" => Cap::MusicVolume { op: VolumeOp::Delta { delta: -10 } },
@@ -366,6 +390,7 @@ pub async fn run<L: bobby_proto::infer::Understand + Sync>(s: &mut Step, env: &s
                     s.set("res", json!({ "error": format!("unknown volume \"{}\"", s.text) }));
                     return Ok(vec![]);
                 }
+            }
             }
         }
         "voice_volume" => {
@@ -405,6 +430,7 @@ pub async fn run<L: bobby_proto::infer::Understand + Sync>(s: &mut Step, env: &s
     Ok(vec![])
 }
 
+static REL_VOLUME: LazyLock<Regex> = LazyLock::new(|| re(r"^([+-])(\d+)\s*(?:%|pour ?cent|percent)$"));
 static PERCENT: LazyLock<Regex> = LazyLock::new(|| re(r"\s*(?:%|pour ?cent|percent)$"));
 
 #[cfg(test)]
@@ -570,6 +596,21 @@ mod tests {
         assert_eq!(last(), Cap::MusicVolume { op: VolumeOp::Delta { delta: 10 } });
         assert_eq!(say_of(json!({"type":"music_volume","text":"25"}), &io, "en").await, "Volume at 25.");
         assert_eq!(last(), Cap::MusicVolume { op: VolumeOp::Set { level: 25 } });
+        // relative changes start from the current volume (25 here)
+        assert_eq!(say_of(json!({"type":"music_volume","text":"-50%"}), &io, "en").await, "Volume at 13.");
+        assert_eq!(last(), Cap::MusicVolume { op: VolumeOp::Set { level: 13 } });
+        assert_eq!(say_of(json!({"type":"music_volume","text":"+20%"}), &io, "en").await, "Volume at 16.");
+        assert_eq!(say_of(json!({"type":"music_volume","text":"/2"}), &io, "en").await, "Volume at 8.");
+        assert_eq!(say_of(json!({"type":"music_volume","text":"+2000%"}), &io, "en").await, "100 % is the maximum, so I'm turning it all the way up.");
+        assert_eq!(say_of(json!({"type":"music_volume","text":"/0"}), &io, "fr").await, "Ça n'a pas marché : unknown volume \"/0\".");
+        // a change too small to move the rounded volume still moves it by one
+        say_of(json!({"type":"music_volume","text":"4"}), &io, "en").await;
+        assert_eq!(say_of(json!({"type":"music_volume","text":"-10%"}), &io, "en").await, "Volume at 3.");
+        say_of(json!({"type":"music_volume","text":"0"}), &io, "en").await;
+        assert_eq!(say_of(json!({"type":"music_volume","text":"+20%"}), &io, "en").await, "Volume at 1.");
+        assert_eq!(say_of(json!({"type":"music_volume","text":"/2"}), &io, "en").await, "Volume at 0.");
+        assert_eq!(say_of(json!({"type":"music_volume","text":"-10%"}), &io, "en").await, "Volume at 0.");
+
         // "200 %" sets the maximum and says so
         assert_eq!(say_of(json!({"type":"music_volume","text":"200 %"}), &io, "en").await, "100 % is the maximum, so I'm turning it all the way up.");
         assert_eq!(last(), Cap::MusicVolume { op: VolumeOp::Set { level: 100 } });

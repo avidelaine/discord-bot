@@ -38,9 +38,11 @@ class Mixer {
   pause(on) { this.paused = on; if (!on) this._ensure(); }
   // ponytail: a new overlay replaces the running one (same as player.play before). Resolves when it ends,
   // is replaced or is stopped.
-  overlay(stream) {
+  // opts.reply: Bobby's spoken reply. opts.beep: a short beep; it never cuts a reply in progress (dropped instead).
+  overlay(stream, { reply = false, beep = false } = {}) {
+    if (beep && this.over?.reply) { stream.destroy(); return Promise.resolve(0); }
     this.over?.finish();
-    const p = new Promise((done) => { this.over = channel(stream, done); });
+    const p = new Promise((done) => { this.over = channel(stream, done); this.over.reply = reply; });
     this._ensure();
     return p;
   }

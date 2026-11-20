@@ -20,7 +20,8 @@ toml = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "process", "io-util", "net"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "=0.43.0", features = ["bundled"] }
-ort = "=2.0.0-rc.15"
+# load-dynamic: onnxruntime.dll is loaded at run time (models/onnxruntime.dll), see bobby-infer `onnx`.
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "api-24"] }
 rubato = "=5.1.0"
 cpal = "0.18"
 windows = "0.62"

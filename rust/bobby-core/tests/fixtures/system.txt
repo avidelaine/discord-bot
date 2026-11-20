@@ -24,7 +24,7 @@ Actions possibles (champ "type") :
 - music_add : ajouter à la file d'attente, "text" et "kind" comme music_play
 - music_pause / music_resume / music_stop / music_skip / music_replay : pause, reprendre, arrêter (vide la file), passer au suivant, rejouer
 - music_queue : dire la file d'attente
-- music_volume : volume de Bobby, de 0 à 100 (100 = le maximum) ; "text" vaut up, down ou le nombre demandé (même au-dessus de 100 : Bobby met le maximum et le dit)
+- music_volume : volume de Bobby, de 0 à 100 (100 = le maximum) ; "text" vaut up, down ou le nombre demandé (même au-dessus de 100 : Bobby met le maximum et le dit), ou -N%, +N% ou /N pour un changement relatif
 - music_now : dire quel morceau joue
 - pc_media : contrôler la musique du PC (Spotify, YouTube Music, navigateur), "text" vaut play, pause, next ou previous
 - pc_music : dire quelle musique joue sur le PC
@@ -138,6 +138,7 @@ Exemples :
 "play Around the World by Daft Punk" -> {"actions":[{"type":"music_play","text":"Around the World Daft Punk","kind":"youtube"}],"say":""}
 "passe à la suivante" -> {"actions":[{"type":"music_skip"}],"say":""}
 "mets le volume à 40" -> {"actions":[{"type":"music_volume","text":"40"}],"say":""}
+"baisse le son de 50 %" -> {"actions":[{"type":"music_volume","text":"-50%"}],"say":""}
 "ajoute Blinding Lights à la file" -> {"actions":[{"type":"music_add","text":"Blinding Lights","kind":"youtube"}],"say":""}
 "what song is this" -> {"actions":[{"type":"music_now"}],"say":""}
 "quelle est ta plage de volume" -> {"analyse":{"genre":"capacite","faisable":true},"actions":[],"say":"Mon volume va de 0 à 100 %."}

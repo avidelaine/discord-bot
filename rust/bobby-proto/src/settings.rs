@@ -237,6 +237,39 @@ impl Config {
     pub fn models_dir(&self) -> PathBuf {
         self.root.join(&self.data.models)
     }
+    /// Brain and Discord client in Rust, inside the app: one brain for Discord and the PC. Both switches go together;
+    /// any other mix runs the Node bot (rollback: set either back to "node").
+    pub fn rust_bobby(&self) -> bool {
+        self.run.brain == BrainImpl::Rust && self.run.discord == DiscordImpl::Rust
+    }
+    /// Whether the supervisor starts this part: the Rust Bobby replaces `bot`, and `voice` too once speech is in process.
+    pub fn runs_part(&self, name: &str) -> bool {
+        let local = |a: &str| a.trim().eq_ignore_ascii_case("local");
+        match name {
+            "bot" => !self.rust_bobby(),
+            "voice" => !(self.rust_bobby() && local(&self.models.stt) && local(&self.models.tts)),
+            _ => true,
+        }
+    }
+}
+
+/// `Cap::VoiceVolume` on Discord (`discord: true`) or the PC speakers: changes that volume and saves the settings file.
+pub fn voice_volume(discord: bool, op: crate::msg::VolumeOp) -> Result<serde_json::Value, String> {
+    use crate::msg::VolumeOp;
+    let mut c = load();
+    let slot = if discord { &mut c.audio.voice_volume_discord } else { &mut c.audio.voice_volume_pc };
+    let now = *slot as i32;
+    let level = match op {
+        VolumeOp::Get => return Ok(serde_json::json!({ "level": now })),
+        VolumeOp::Set { level } => level as i32,
+        VolumeOp::Delta { delta } => now + delta as i32,
+        VolumeOp::Mute | VolumeOp::Unmute => return Err("unsupported".into()),
+    }
+    .clamp(0, 100) as u8;
+    *slot = level;
+    let text = toml::to_string_pretty(&c).map_err(|e| e.to_string())?;
+    std::fs::write(path(), text).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "level": level }))
 }
 
 impl Part {
@@ -259,6 +292,20 @@ impl Part {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rust_bobby_skips_bot_then_voice() {
+        let mut c = Config::default();
+        assert!(c.runs_part("bot") && c.runs_part("voice") && c.runs_part("llm"));
+        c.run.brain = BrainImpl::Rust; // a mix runs Node
+        assert!(!c.rust_bobby() && c.runs_part("bot"));
+        c.run.discord = DiscordImpl::Rust;
+        assert!(c.rust_bobby() && !c.runs_part("bot") && c.runs_part("voice"));
+        c.models.stt = "local".into();
+        assert!(c.runs_part("voice"), "tts still served by the voice service");
+        c.models.tts = "Local".into();
+        assert!(!c.runs_part("voice") && c.runs_part("llm"));
+    }
 
     /// Written by the pre-move code (`toml::to_string_pretty(&Config::default())`, root pinned).
     const OLD_TOML: &str = r#"port = 4100

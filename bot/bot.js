@@ -158,9 +158,9 @@ function makeIo(guild, textChannel) {
     // content: text, { embeds } or a list of those, split to Discord's limits. ch: another text channel ("écris-le dans général").
     post: async (content, ch = textChannel) => { for (const m of messages(content)) await ch.send(m); return ch.name; },
     // Short clips (beep, nope, ack): a reply that follows waits for the clip's end instead of cutting it.
-    beep: () => io.clip(BEEP),
+    beep: () => io.clip(BEEP, true),
     nope: () => io.clip(NOPE),
-    clip(pcm) { io.ringStop(); clip = mixer.overlay(new PassThrough().end(pcm)); },
+    clip(pcm, beep = false) { io.ringStop(); clip = mixer.overlay(new PassThrough().end(pcm), { beep }); },
     // Spoken "got it" once the transcript is an order. False while the clips are not synthesized yet (caller falls back to the beep).
     ack() {
       const pool = ACKS.filter((t) => t !== lastAck && ackPcm.has(t));
@@ -193,7 +193,9 @@ function makeIo(guild, textChannel) {
       console.log(`[${voice}] ${text}`);
       const me = (speech = { id: forId, gen: ++speechGen });
       try {
+        const t0 = performance.now();
         const res = await fetch(`${VOICE_URL}/tts?lang=${lang}&voice=${voice}&text=${encodeURIComponent(text)}`);
+        const firstByte = Math.round(performance.now() - t0);
         if (speech !== me) return res.body?.cancel(); // interrupted, or another reply started, while it was synthesized
         await clip; // the ack or the low sound just played ends first
         if (speech !== me) return res.body?.cancel();
@@ -201,11 +203,11 @@ function makeIo(guild, textChannel) {
         tts.pipe(pcm, { end: false });
         // the silence tail also ends a broken stream, so the overlay always resolves and `speech` is released
         let tail = false;
-        const end = () => { if (!tail) { tail = true; pcm.end(TAIL); } };
+        const end = () => { if (!tail) { tail = true; pcm.end(TAIL); console.log(`[timing] tts first byte ${firstByte} ms, total ${Math.round(performance.now() - t0)} ms`); } };
         tts.once('end', end).once('close', end).on('error', end);
         pcm.once('close', () => tts.destroy()); // interrupted: stop decoding too
         io.ringStop();
-        await mixer.overlay(pcm);
+        await mixer.overlay(pcm, { reply: true });
       } catch (e) { console.error(`[tts] ${e.cause?.code || e.message}`); }
       if (speech === me) speech = null;
     },
@@ -217,6 +219,8 @@ function makeIo(guild, textChannel) {
   };
   return io;
 }
+
+const STT_TIMEOUT_MS = 10000;
 
 function listen(connection, guild, io) {
   const busy = new Set();
@@ -235,14 +239,26 @@ function listen(connection, guild, io) {
     opus.on('error', (e) => { console.error(`[audio] ${e.message}`); pcm.end(); });
     let tEnd = performance.now();
     opus.once('end', () => { tEnd = performance.now() - SILENCE_MS; busy.delete(userId); });
-    let ws = null;
+    let ws = null, gate = null, timedOut = false, timer = null, forced = false;
+    const abort = new AbortController();
+    // Max delay on the voice service after the end of speech (a Whisper hang once held the GPU lock for 305 s).
+    opus.once('end', () => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        console.log('[stt] timed out after 10 s');
+        abort.abort();
+        try { ws?.close(); } catch { /* already closed */ }
+      }, STT_TIMEOUT_MS);
+    });
     try {
       const member = guild.members.cache.get(userId) ?? (await guild.members.fetch(userId));
       if (member.user.bot) return opus.destroy();
       // waiting for a "yes" or a command, or Bobby is answering this person (who may say "stop"): skip the wake word gate
       const expected = brain.expecting(userId); // judged when the sentence starts: a long order must not outlive the window
       const force = expected || io.speaking()?.id === userId ? '1' : '0';
-      const hotwords = encodeURIComponent(brain.hotwords(brain.context(member, guild)));
+      forced = force === '1';
+      const playing = [music.auto?.seed, music.current?.title?.split(/ [-–] /)[0]]; // seed and artist of "Artist - Title"
+      const hotwords = encodeURIComponent(brain.hotwords(brain.context(member, guild), playing));
       // The sentence streams to the voice service while it is spoken: the wake word is heard mid-sentence.
       ws = new WebSocket(`${VOICE_URL.replace(/^http/, 'ws')}/listen?force=${force}&hotwords=${hotwords}`);
       ws.binaryType = 'arraybuffer';
@@ -252,7 +268,6 @@ function listen(connection, guild, io) {
       const raw = []; // kept for a late "expected" (below)
       pcm.on('data', (b) => { raw.push(b); queue.push(b); flush(); });
       pcm.on('end', () => { queue.push('end'); flush(); });
-      let gate = null;
       const result = await new Promise((resolve, reject) => {
         ws.addEventListener('message', (ev) => {
           const m = JSON.parse(ev.data);
@@ -268,10 +283,13 @@ function listen(connection, guild, io) {
         ws.addEventListener('error', () => reject(Object.assign(new Error('voice service not reachable'), { cause: { code: 'ECONNREFUSED' } })));
         ws.addEventListener('close', () => (gate ? resolve(null) : reject(Object.assign(new Error('voice service closed the stream'), { cause: { code: 'ECONNREFUSED' } }))));
       });
+      const fallback = gate?.wake === false && brain.expecting(userId);
+      if (!fallback) clearTimeout(timer); // the timeout covers the transcription only, not the brain (LLM, yt-dlp, TTS)
       // "Bobby ?" then the order at once (the beep is instant): the order began before the brain waited for it.
       // No "Bobby" in it, but the brain expects it now: transcribe it anyway.
-      if (gate?.wake === false && brain.expecting(userId)) {
-        const r = await fetch(`${VOICE_URL}/transcribe`, { method: 'POST', headers: { 'x-force': '1', 'x-hotwords': hotwords }, body: Buffer.concat(raw) }).then((x) => x.json());
+      if (fallback) {
+        const r = await fetch(`${VOICE_URL}/transcribe`, { method: 'POST', headers: { 'x-force': '1', 'x-hotwords': hotwords }, body: Buffer.concat(raw), signal: abort.signal }).then((x) => x.json());
+        clearTimeout(timer);
         if (r.text) {
           console.log(`\n[heard] ${member.displayName}: "${r.text}" (${r.lang}, whisper ${r.ms} ms, expected after "Bobby")`);
           await brain.hear({ text: r.text, lang: r.lang, score: null, member, guild, tEnd, sttMs: r.ms, io, expected: true });
@@ -287,8 +305,11 @@ function listen(connection, guild, io) {
         await brain.hear({ text, lang, score: gate?.score ?? null, member, guild, tEnd, sttMs: ms, io, expected, woke: !!gate?.wake });
       }
     } catch (e) {
-      console.error(`[voice] ${e.cause?.code === 'ECONNREFUSED' ? `voice service not reachable at ${VOICE_URL} (is it running?)` : e.message}`);
+      opus.destroy(); // no stale 'end' listener piles up on the receive stream
+      if (!timedOut) console.error(`[voice] ${e.cause?.code === 'ECONNREFUSED' ? `voice service not reachable at ${VOICE_URL} (is it running?)` : e.message}`);
     } finally {
+      clearTimeout(timer);
+      if (timedOut && (gate?.wake === true || forced)) io.say("Je n'ai pas entendu.", 'fr', 'bobby', userId).catch(() => {});
       io.ringStop();
       try { ws?.close(); } catch { /* already closed */ }
       busy.delete(userId);

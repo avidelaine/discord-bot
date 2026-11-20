@@ -57,7 +57,7 @@ module.exports = {
     '- music_add : ajouter à la file d\'attente, "text" et "kind" comme music_play',
     '- music_pause / music_resume / music_stop / music_skip / music_replay : pause, reprendre, arrêter (vide la file), passer au suivant, rejouer',
     '- music_queue : dire la file d\'attente',
-    '- music_volume : volume de Bobby, de 0 à 100 (100 = le maximum) ; "text" vaut up, down ou le nombre demandé (même au-dessus de 100 : Bobby met le maximum et le dit)',
+    '- music_volume : volume de Bobby, de 0 à 100 (100 = le maximum) ; "text" vaut up, down ou le nombre demandé (même au-dessus de 100 : Bobby met le maximum et le dit), ou -N%, +N% ou /N pour un changement relatif',
     '- music_now : dire quel morceau joue',
   ],
   rules: [
@@ -75,6 +75,7 @@ module.exports = {
     '"play Around the World by Daft Punk" -> {"actions":[{"type":"music_play","text":"Around the World Daft Punk","kind":"youtube"}],"say":""}',
     '"passe à la suivante" -> {"actions":[{"type":"music_skip"}],"say":""}',
     '"mets le volume à 40" -> {"actions":[{"type":"music_volume","text":"40"}],"say":""}',
+    '"baisse le son de 50 %" -> {"actions":[{"type":"music_volume","text":"-50%"}],"say":""}',
     '"ajoute Blinding Lights à la file" -> {"actions":[{"type":"music_add","text":"Blinding Lights","kind":"youtube"}],"say":""}',
     '"what song is this" -> {"actions":[{"type":"music_now"}],"say":""}',
     '"quelle est ta plage de volume" -> {"analyse":{"genre":"capacite","faisable":true},"actions":[],"say":"Mon volume va de 0 à 100 %."}',
@@ -135,6 +136,14 @@ module.exports = {
         const t = s.text.toLowerCase().replace(/\s*(?:%|pour ?cent|percent)$/, '').trim();
         if (t === 'up') return p.volumeUp();
         if (t === 'down') return p.volumeDown();
+        const rel = /^([+-])(\d+)\s*(?:%|pour ?cent|percent)$/.exec(s.text.toLowerCase().trim()), div = /^\/(\d+)$/.exec(t);
+        if (rel || (div && +div[1] >= 1)) {
+          const cur = p.volume().volume, dir = rel ? (rel[1] === '-' ? -1 : 1) * (+rel[2] > 0) : (+div[1] > 1 ? -1 : 0);
+          const raw = rel ? Math.round(cur * (1 + dir * rel[2] / 100)) : Math.round(cur / +div[1]);
+          // a change too small to move the rounded volume ("-10 %" at 4) still moves it by one step
+          const n = raw === cur && dir ? cur + dir : raw;
+          return { ...p.setVolume(Math.max(0, Math.min(100, n))), clamped: raw > 100 };
+        }
         return /^\d+$/.test(t) ? { ...p.setVolume(+t), clamped: +t > 100 } : { error: `unknown volume "${s.text}"` };
       }),
       say: say(

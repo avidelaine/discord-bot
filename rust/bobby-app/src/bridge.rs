@@ -21,12 +21,17 @@ use std::time::{Duration, Instant};
 /// Same command words as bot/brain.js COMMAND_WORDS and voice/server.py LOCAL_HOTWORDS.
 const LOCAL_HOTWORDS: &str = "Bobby Discord le son volume musique hardstyle";
 
+/// The Rust brain's ear on the PC: (text, lang, wake score, whisper ms) -> whether Bobby now waits for the next
+/// sentence without "Bobby". Unset: sentences go to the Node bot (`BOT_URL/local`).
+pub type Hook = Arc<dyn Fn(String, String, Option<f32>, u32) -> bool + Send + Sync>;
+
 pub struct Bridge {
     cfg: Config,
     sup: Arc<Supervisor>,
     speaker: Speaker,
     tts: Arc<OnceLock<Tts>>,
-    stt: Arc<OnceLock<Stt>>,
+    stt: Arc<OnceLock<Arc<Stt>>>,
+    hook: Mutex<Option<Hook>>,
     http: reqwest::Client,
     enabled: AtomicBool,
     /// True while a listener thread exists. On/off decisions and the thread's exit check happen under this lock.
@@ -52,9 +57,9 @@ impl Bridge {
             })
         };
         if bobby_infer::is_local(&cfg.models.stt) {
-            std::thread::spawn(move || { let _ = cell.set(load()); });
+            std::thread::spawn(move || { let _ = cell.set(Arc::new(load())); });
         } else {
-            let _ = cell.set(load());
+            let _ = cell.set(Arc::new(load()));
         }
         let (addr, cell, s2) = (cfg.models.tts.clone(), tts.clone(), sup.clone());
         let load = move || {
@@ -74,6 +79,7 @@ impl Bridge {
             speaker: Speaker::new(),
             tts,
             stt,
+            hook: Mutex::new(None),
             http: reqwest::Client::new(),
             enabled: AtomicBool::new(false),
             running: Mutex::new(false),
@@ -87,12 +93,56 @@ impl Bridge {
         self.tts.clone()
     }
 
+    /// Whisper, once loaded: shared with the Rust Discord client so it sits in VRAM once.
+    pub fn stt_slot(&self) -> Arc<OnceLock<Arc<Stt>>> {
+        self.stt.clone()
+    }
+
+    pub fn set_hook(&self, hook: Option<Hook>) {
+        *self.hook.lock().unwrap_or_else(|e| e.into_inner()) = hook;
+    }
+
+    /// The next PC sentence needs no "Bobby" for `ms` (`BrainMsg::Expect`; 0 closes the window).
+    pub fn expect(&self, ms: u32) {
+        *self.force_until.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now() + Duration::from_millis(ms as u64);
+    }
+
+    /// Speaks on the PC speakers and returns once spoken (or hushed). Err: (HTTP code for `/speak`, reason).
+    pub async fn say(self: &Arc<Self>, text: &str, lang: &str, voice: &str) -> Result<(), (StatusCode, String)> {
+        let Some(tts) = self.tts.get() else {
+            self.log("[tts] speech engine still loading, nothing said");
+            return Err((StatusCode::SERVICE_UNAVAILABLE, "speech engine still loading".into()));
+        };
+        match tokio::time::timeout(Duration::from_secs(30), tts.speak(text, lang, voice)).await {
+            Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "tts timed out".into())),
+            Ok(Err(e)) => Err((StatusCode::BAD_GATEWAY, e.to_string())),
+            Ok(Ok(wav)) => {
+                let vol = bobby_proto::settings::load().audio.voice_volume_pc; // read at each use: applies live
+                let me = self.clone();
+                let _ = tokio::task::spawn_blocking(move || me.speaker.play(&out::scale_wav(&bobby_infer::loudness::normalize(&wav.0), vol))).await;
+                Ok(())
+            }
+        }
+    }
+
+    /// "yes" (heard) or "nope" beep on the PC speakers; returns once played.
+    pub async fn beep(self: &Arc<Self>, kind: &str) {
+        // 100 % = the normalized voice level: build the beep at full amplitude, normalize it, then scale by beep_volume.
+        let wav = out::scale_wav(&bobby_infer::loudness::normalize(&out::beep(kind, 100)), bobby_proto::settings::load().audio.beep_volume);
+        let me = self.clone();
+        let _ = tokio::task::spawn_blocking(move || me.speaker.play(&wav)).await;
+    }
+
+    pub fn hush(&self) {
+        self.speaker.hush();
+    }
+
     fn log(&self, line: &str) {
         self.sup.log("audio", line);
     }
 
     /// `/local/on|off`. One dedicated thread owns the microphone (a `Mic` is not Send) and drops it when switched off.
-    fn set_local(self: &Arc<Self>, on: bool) {
+    pub fn set_local(self: &Arc<Self>, on: bool) {
         let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         if on != self.enabled.swap(on, Ordering::SeqCst) {
             self.log(if on { "[local] on: Bobby listens on the PC" } else { "[local] off: Bobby is on Discord" });
@@ -187,6 +237,11 @@ impl Bridge {
         if tr.text.is_empty() {
             return;
         }
+        let hook = self.hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(hear) = hook {
+            let expect = hear(tr.text, tr.lang, score, ms as u32);
+            return self.expect(if expect { 8000 } else { 0 });
+        }
         let body = json!({"text": tr.text, "lang": tr.lang, "score": score.map(|s| (s as f64 * 1000.0).round() / 1000.0), "ms": ms});
         let bot = std::env::var("BOT_URL").unwrap_or_else(|_| "http://127.0.0.1:3001".into());
         let reply = tauri::async_runtime::block_on(async {
@@ -232,27 +287,15 @@ async fn speak_h(State(b): S, Query(q): Q, h: HeaderMap) -> Response {
     if text.is_empty() {
         return reply(StatusCode::BAD_REQUEST, json!({ "detail": "text is required" }));
     }
-    let Some(tts) = b.tts.get() else {
-        b.log("[tts] speech engine still loading, /speak refused");
-        return reply(StatusCode::SERVICE_UNAVAILABLE, json!({ "error": "speech engine still loading" }));
-    };
-    let spoken = tokio::time::timeout(Duration::from_secs(30), tts.speak(&text, &get("lang", "fr"), &get("voice", "bobby"))).await;
-    match spoken {
-        Err(_) => reply(StatusCode::GATEWAY_TIMEOUT, json!({ "error": "tts timed out" })),
-        Ok(Ok(wav)) => {
-            let vol = bobby_proto::settings::load().audio.voice_volume_pc; // read at each use: applies live
-            let _ = tokio::task::spawn_blocking(move || b.speaker.play(&out::scale_wav(&bobby_infer::loudness::normalize(&wav.0), vol))).await; // returns once spoken
-            reply(StatusCode::OK, json!({ "ok": true }))
-        }
-        Ok(Err(e)) => reply(StatusCode::BAD_GATEWAY, json!({ "error": e.to_string() })),
+    match b.say(&text, &get("lang", "fr"), &get("voice", "bobby")).await {
+        Ok(()) => reply(StatusCode::OK, json!({ "ok": true })),
+        Err((code, e)) => reply(code, json!({ "error": e })),
     }
 }
 
 async fn beep_h(State(b): S, Query(q): Q, h: HeaderMap) -> Response {
     if let Some(r) = forbidden(&h) { return r; }
-    // 100 % = the normalized voice level: build the beep at full amplitude, normalize it, then scale by beep_volume.
-    let wav = out::scale_wav(&bobby_infer::loudness::normalize(&out::beep(q.get("kind").map_or("yes", String::as_str), 100)), bobby_proto::settings::load().audio.beep_volume);
-    let _ = tokio::task::spawn_blocking(move || b.speaker.play(&wav)).await;
+    b.beep(q.get("kind").map_or("yes", String::as_str)).await;
     reply(StatusCode::OK, json!({ "ok": true }))
 }
 

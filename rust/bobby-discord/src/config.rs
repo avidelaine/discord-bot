@@ -17,6 +17,8 @@ pub struct Config {
     pub super_admins: Vec<u64>,
     /// Local models (`MODELS_DIR`, default `models` next to the `.env`); used when `VOICE_URL=local`.
     pub models_dir: PathBuf,
+    /// Whisper already loaded by the host (the app shares its PC one): used instead of loading a second copy in VRAM.
+    pub shared_stt: Option<std::sync::Arc<std::sync::OnceLock<std::sync::Arc<bobby_infer::Stt>>>>,
 }
 
 // Custom Debug: a stray `{:?}` in a log must never leak the token.
@@ -62,6 +64,7 @@ impl Config {
                 .map(|s| s.split(',').filter_map(|x| x.trim().parse::<u64>().ok()).filter(|&n| n > 0).collect())
                 .unwrap_or_default(),
             models_dir: get("MODELS_DIR").filter(|v| !v.is_empty()).map_or_else(|| env_dir.join("models"), PathBuf::from),
+            shared_stt: None,
         })
     }
 
@@ -70,9 +73,14 @@ impl Config {
     pub fn load() -> Result<Config, String> {
         let path = std::env::var("BOBBY_ENV")
             .unwrap_or_else(|_| r"C:\Users\alexa\Desktop\Personal Projects\discord-bot\.env".into());
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
+        Config::load_from(&path)
+    }
+
+    /// Like `load`, from a given `.env`.
+    pub fn load_from(path: &str) -> Result<Config, String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
         let file = parse_env(&text);
-        let dir = std::path::Path::new(&path).parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+        let dir = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
         Config::from_lookup_in(|k| std::env::var(k).ok().or_else(|| file.get(k).cloned()), &dir)
     }
 }

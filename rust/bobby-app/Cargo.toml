@@ -27,12 +27,14 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 bobby-infer = { workspace = true }
 bobby-audio = { workspace = true }
 bobby-pc = { workspace = true }
+bobby-core = { workspace = true }
+bobby-discord = { workspace = true }
 reqwest = { workspace = true }
 
 [features]
 # In-process engines (stt/tts = "local" in bobby.toml); local-stt needs the CUDA toolkit and CMake to build.
-local-stt = ["bobby-infer/ct2"]
-local-tts = ["bobby-infer/piper"]
+local-stt = ["bobby-infer/ct2", "bobby-discord/local-stt"]
+local-tts = ["bobby-infer/piper", "bobby-discord/local-tts"]
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -49,6 +49,8 @@ pub struct Supervisor {
     log_file: Mutex<Option<std::fs::File>>,
     bus: Bus,
     env: Vec<(String, String)>,
+    /// Called with true on start, false on stop: the in-process Rust Bobby follows Bobby's state (see `host`).
+    on_run: std::sync::OnceLock<Box<dyn Fn(bool) + Send + Sync>>,
 }
 
 /// Extra env for every part, from the `[run]` switches. Flip the switch back + restart = rollback.
@@ -65,15 +67,28 @@ impl Supervisor {
         let logs = cfg.logs();
         let _ = std::fs::create_dir_all(&logs);
         let log_file = std::fs::OpenOptions::new().create(true).append(true).open(logs.join("bobby.log")).ok();
+        // The Rust Bobby replaces the bot part (and the voice part once speech runs in process): see `runs_part`.
+        let parts: Vec<Part> = cfg.parts.iter().filter(|p| cfg.runs_part(&p.name)).cloned().collect();
         Arc::new(Supervisor {
             root: cfg.root.clone(),
             logs,
-            parts: cfg.parts.clone(),
-            state: Mutex::new(State { parts: cfg.parts.iter().map(|_| PartState::default()).collect(), ..Default::default() }),
+            state: Mutex::new(State { parts: parts.iter().map(|_| PartState::default()).collect(), ..Default::default() }),
+            parts,
             log_file: Mutex::new(log_file),
             bus,
             env: part_env(cfg),
+            on_run: std::sync::OnceLock::new(),
         })
+    }
+
+    pub fn on_run(&self, f: Box<dyn Fn(bool) + Send + Sync>) {
+        let _ = self.on_run.set(f);
+    }
+
+    fn run_hook(&self, on: bool) {
+        if let Some(f) = self.on_run.get() {
+            f(on);
+        }
     }
 
     pub fn part_names(&self) -> Vec<String> {
@@ -173,6 +188,7 @@ impl Supervisor {
         for i in 0..self.parts.len() {
             tokio::spawn(self.clone().keep_alive(i, run));
         }
+        self.run_hook(true);
         Ok(self.status())
     }
 
@@ -275,6 +291,7 @@ impl Supervisor {
             s.run += 1;
             s.parts.iter_mut().filter_map(|p| { p.started_at = None; p.pid.take() }).collect()
         };
+        self.run_hook(false);
         // ponytail: taskkill /T kills each part's whole tree (voice's venv python.exe is only a launcher); sync so Quit can exit after
         for pid in pids {
             kill_tree(pid);

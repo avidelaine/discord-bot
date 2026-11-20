@@ -92,14 +92,25 @@ impl Bot {
     /// Builds the context for `speaker` from the cache and sends it if it differs from the last one sent.
     /// Call before each `Heard` so the brain never reasons on a stale server.
     pub fn send_context(&self, speaker: UserId) {
-        let bobby = self.default_text().map(|c| c.to_string());
-        let Some(ctx) = self.cache.guild(self.guild).map(|g| context::from_guild(&g, speaker.get(), bobby)) else { return };
+        let Some(ctx) = self.context_for(speaker.get()) else { return };
         let mut st = self.state.lock().unwrap();
         if st.last_ctx.as_ref() != Some(&ctx) {
             st.last_ctx = Some(ctx.clone());
             drop(st);
             self.send(ClientMsg::Context(ctx));
         }
+    }
+
+    /// The server as the brain sees it, for `speaker` (None until the guild is in the cache).
+    pub fn context_for(&self, speaker: u64) -> Option<BrainContext> {
+        let bobby = self.default_text().map(|c| c.to_string());
+        self.cache.guild(self.guild).map(|g| context::from_guild(&g, speaker, bobby))
+    }
+
+    /// True while Bobby has a voice call (from a join until a leave): the host then speaks on Discord, not the PC.
+    // ponytail: a call kicked out by a moderator keeps existing until the never-alone logic or a leave removes it
+    pub fn in_voice(&self) -> bool {
+        self.songbird.get(self.guild).is_some()
     }
 
     /// Joins `channel` and listens there. Handlers go on the call BEFORE the join (see `receive::attach`).
@@ -313,6 +324,18 @@ impl EventHandler for Handler {
 
 /// Connects to Discord and serves the brain until the gateway stops.
 pub async fn run(cfg: Config, from_brain: UnboundedReceiver<BrainMsg>, to_brain: UnboundedSender<ClientMsg>) -> Result<(), String> {
+    run_until(cfg, from_brain, to_brain, |_| {}, std::future::pending()).await
+}
+
+/// Like `run`; `on_bot` gets the client once built (the host asks it `in_voice`, `context_for`), and `stop` ending
+/// leaves voice and closes the gateway, so `run_until` returns `Ok`.
+pub async fn run_until(
+    cfg: Config,
+    from_brain: UnboundedReceiver<BrainMsg>,
+    to_brain: UnboundedSender<ClientMsg>,
+    on_bot: impl FnOnce(Arc<Bot>),
+    stop: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<(), String> {
     // Decoded PCM per speaker is what the receive side consumes (same setup as the R0 spike).
     let sb_config = songbird::Config::default().decode_mode(DecodeMode::Decode(DecodeConfig::new(Channels::Stereo, SampleRate::Hz48000)));
     let songbird = Songbird::serenity_from_config(sb_config);
@@ -324,7 +347,7 @@ pub async fn run(cfg: Config, from_brain: UnboundedReceiver<BrainMsg>, to_brain:
         .map_err(|e| format!("discord client: {e}"))?;
     if bobby_infer::is_local(&cfg.voice_url) {
         // Models load in the background so the gateway starts at once; callers tolerate "not loaded yet".
-        tokio::spawn(load_local_engines(cfg.models_dir.clone()));
+        tokio::spawn(load_local_engines(cfg.models_dir.clone(), cfg.shared_stt.clone()));
     }
     let (mix_tx, mix_rx) = tokio::sync::mpsc::unbounded_channel();
     let mixer = Arc::new(Mutex::new(Mixer::new(mix_tx)));
@@ -346,19 +369,38 @@ pub async fn run(cfg: Config, from_brain: UnboundedReceiver<BrainMsg>, to_brain:
         hello_sent: AtomicBool::new(false),
     });
     let _ = slot.set(bot.clone());
+    on_bot(bot.clone());
     tokio::spawn(bot.clone().mix_events(mix_rx));
-    tokio::spawn(bot.brain_loop(from_brain));
+    tokio::spawn(bot.clone().brain_loop(from_brain));
+    let shards = client.shard_manager.clone();
+    tokio::spawn(async move {
+        stop.await;
+        bot.leave().await;
+        shards.shutdown_all().await;
+    });
     client.start().await.map_err(|e| format!("gateway: {e}"))
 }
 
 /// Loads Whisper, the wake word and Piper in process (slow: once, off the async threads). A failure is
 /// logged once and leaves the engine unset, which behaves like an unreachable voice service.
-async fn load_local_engines(models: std::path::PathBuf) {
+async fn load_local_engines(models: std::path::PathBuf, shared: Option<Arc<OnceLock<Arc<bobby_infer::Stt>>>>) {
     use bobby_infer::listen::{wake_threshold, Listener};
+    if receive::LOCAL_LISTENER.get().is_some() {
+        return; // a restarted client in the same process keeps the engines it loaded
+    }
     let loaded = tokio::task::spawn_blocking(move || {
-        let stt = bobby_infer::Stt::from_addr("local", &models).map_err(|e| format!("stt: {e}"))?;
+        let stt = match shared {
+            // ponytail: polls the host's slot while its Whisper loads (startup only, a few seconds)
+            Some(slot) => loop {
+                if let Some(s) = slot.get() {
+                    break s.clone();
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            },
+            None => Arc::new(bobby_infer::Stt::from_addr("local", &models).map_err(|e| format!("stt: {e}"))?),
+        };
         let root = models.parent().map(|p| p.to_path_buf());
-        let listener = Listener::new(Arc::new(stt), Some(&models.join("wakeword")), wake_threshold(), root);
+        let listener = Listener::new(stt, Some(&models.join("wakeword")), wake_threshold(), root);
         let tts = bobby_infer::Tts::from_addr("local", &models).map_err(|e| format!("tts: {e}"))?;
         Ok::<_, String>((listener, tts))
     })

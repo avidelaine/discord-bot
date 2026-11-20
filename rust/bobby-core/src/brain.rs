@@ -15,7 +15,7 @@ use crate::util::{hit, re_i, replace1, replace_all, BrainError, Hist, Res};
 use crate::wake::find_wake;
 use crate::writing::{writing, Written, RIGHTS_Q};
 use bobby_proto::infer::Understand;
-use bobby_proto::msg::{ClientMsg, Context, Embed, SignalKind, Voice};
+use bobby_proto::msg::{BrainMsg, Cap, ClientMsg, Context, Embed, SignalKind, Voice};
 use chrono::Local;
 use fancy_regex::Regex;
 use serde_json::{json, Map, Value};
@@ -405,6 +405,48 @@ impl<L: Understand + Sync> Brain<L> {
         let name = w.channel.as_ref().map(|c| c.name.clone()).or_else(|| ctx.text_channel.as_ref().map(|c| c.name.clone()));
         r.rec.insert("written".into(), name.map_or(json!(true), Value::from));
         println!("[written] \"{}\" -> {}", w.query, w.channel.as_ref().map_or("default text channel", |c| c.name.as_str()));
+    }
+
+    /// A slash command typed in Discord (`bot.js` `onCommand`): `/join` (Prime) joins the typer's voice channel, `/leave`
+    /// (admin) leaves, `/surnoms` (super) lists the nicknames. Answers with `Reply { id }` first (Discord's 3 s deadline),
+    /// then runs the cap. `c` is the server with `c.speaker` = the typer.
+    pub async fn command(&self, id: u64, name: &str, c: &Context) {
+        let reply = |text: String, embeds: Vec<Embed>, ephemeral: bool| self.io.send(BrainMsg::Reply { id, text: Some(text).filter(|t| !t.is_empty()), embeds, ephemeral });
+        let me = c.members.iter().find(|m| m.id == c.speaker);
+        let role = roles::role_of(&c.speaker, me.map_or(&[][..], |m| &m.roles), &self.store);
+        let need = match name {
+            "join" => Role::Prime,
+            "leave" => Role::Admin,
+            _ => Role::Super,
+        };
+        if !roles::allowed(role, need) {
+            return reply("Tu n'as pas le droit d'utiliser cette commande.".into(), vec![], true);
+        }
+        let cap = match name {
+            "leave" => {
+                reply("À plus.".into(), vec![], false);
+                Cap::Leave
+            }
+            "surnoms" => {
+                let ctx = self.ctx_for(c, role, vec![]);
+                let env = Env { io: &self.io, store: &self.store, ctx: &ctx, llm: &self.llm, post_to: None };
+                return match actions::aliases::list_card(&env).await {
+                    Ok(Some(card)) => reply(String::new(), vec![card], false),
+                    _ => reply("Personne n'a de surnom.".into(), vec![], false),
+                };
+            }
+            _ => {
+                let Some(ch) = me.and_then(|m| m.channel.clone()) else {
+                    return reply("Rejoins un salon vocal d'abord.".into(), vec![], true);
+                };
+                let label = c.voice_channels.iter().find(|v| v.id == ch).map_or(ch.as_str(), |v| v.name.as_str());
+                reply(format!("Bobby écoute dans {label}. Dis « Bobby, … »."), vec![], false);
+                Cap::Join { channel: ch }
+            }
+        };
+        if let Err(e) = self.io.run(cap).await {
+            println!("[command] /{name} failed: {e}");
+        }
     }
 
     fn ctx_for(&self, c: &Context, role: Role, history: Vec<Hist>) -> Ctx {
@@ -846,6 +888,28 @@ mod tests {
 
     fn ok(_: &Cap) -> Result<Value, String> {
         Ok(Value::Null)
+    }
+
+    #[tokio::test]
+    async fn slash_commands_follow_bot_js_rights() {
+        let r = rig(vec![], ok);
+        let as_ = |who: &str| Context { speaker: who.into(), ..context() };
+        r.brain.command(1, "join", &as_("u9")).await; // no Prime role
+        r.brain.command(2, "join", &as_(ADMIN)).await;
+        r.brain.command(3, "surnoms", &as_(ADMIN)).await;
+        r.brain.command(4, "leave", &as_("kev")).await; // not an admin
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let reply = |id: u64, text: &str, ephemeral: bool| BrainMsg::Reply { id, text: Some(text.into()), embeds: vec![], ephemeral };
+        assert_eq!(
+            r.msgs(),
+            [
+                reply(1, "Tu n'as pas le droit d'utiliser cette commande.", true),
+                reply(2, "Bobby écoute dans Général. Dis « Bobby, … ».", false),
+                BrainMsg::Run { id: 1, cap: Cap::Join { channel: "Général".into() } },
+                reply(3, "Personne n'a de surnom.", false),
+                reply(4, "Tu n'as pas le droit d'utiliser cette commande.", true),
+            ]
+        );
     }
 
     #[tokio::test]

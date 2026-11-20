@@ -159,7 +159,7 @@ async fn edit<L>(s: &mut Step, env: &Env<'_, L>, f: impl FnOnce(&mut Map<String,
 
 /// Nicknames as a card holding an aligned table (person | nicknames), sorted by name; None when nobody has one.
 /// People may have left voice: names come from the client.
-async fn list_card<L>(env: &Env<'_, L>) -> Res<Option<Embed>> {
+pub(crate) async fn list_card<L>(env: &Env<'_, L>) -> Res<Option<Embed>> {
     let all = env.store.load_or("aliases", json!({}));
     let mut rows: Vec<Vec<String>> = vec![];
     for (id, l) in all.as_object().into_iter().flatten() {

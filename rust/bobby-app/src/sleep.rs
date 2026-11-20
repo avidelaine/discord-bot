@@ -56,6 +56,13 @@ pub fn on(state: State, event: Event) -> (State, Vec<Action>) {
     }
 }
 
+/// Whether a heard sentence may reach the brain. While Bobby is not fully awake (Waking: Whisper is back, the LLM is
+/// not healthy yet) the LLM path would only answer "Mon cerveau ne répond pas.", so the sentence is dropped, unless it
+/// answers a waiting messenger (that flow needs no LLM).
+pub fn accept_sentence(state: State, answers_messenger: bool) -> bool {
+    state == State::Awake || answers_messenger
+}
+
 static HOOK: OnceLock<Box<dyn Fn(Event) + Send + Sync>> = OnceLock::new();
 
 /// Installed once by the host; every source (brain, wake word, tray, API) goes through `fire`.
@@ -90,6 +97,15 @@ mod tests {
     fn second_sleep_does_nothing() {
         assert_eq!(on(Asleep, SleepAsked), (Asleep, vec![]));
         assert_eq!(on(Waking, SleepAsked), (Waking, vec![]));
+    }
+
+    #[test]
+    fn sentences_are_dropped_unless_awake_or_answering_a_messenger() {
+        assert!(accept_sentence(Awake, false));
+        assert!(!accept_sentence(Waking, false));
+        assert!(!accept_sentence(Asleep, false));
+        assert!(accept_sentence(Waking, true));
+        assert!(accept_sentence(Asleep, true));
     }
 
     #[test]

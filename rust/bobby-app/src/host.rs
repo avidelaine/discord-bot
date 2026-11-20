@@ -63,6 +63,8 @@ pub struct Router<L> {
     /// The latest server snapshot (Discord sends it before each sentence and command).
     pub ctx: Mutex<Context>,
     pub in_voice: Box<dyn Fn() -> bool + Send + Sync>,
+    /// The deep-sleep state: sentences are not sent to the brain until Bobby is awake.
+    pub sleep_state: Box<dyn Fn() -> sleep::State + Send + Sync>,
     /// PC caps (run on a blocking thread).
     pub pc_run: Box<dyn Fn(Cap) -> Result<Value, String> + Send + Sync>,
     /// Bobby's voice, signals, hush and windows on the PC.
@@ -119,6 +121,10 @@ impl<L: Understand + Send + Sync + 'static> Router<L> {
 
     /// One transcribed sentence, from Discord or the PC.
     pub async fn hear(&self, user: String, text: String, lang: String, score: Option<f32>, stt_ms: u32, expected: bool) {
+        let answers = self.brain.messenger.has_voice_waiter(&user);
+        if !sleep::accept_sentence((self.sleep_state)(), answers) {
+            return println!("[sleep] not awake yet: dropped a sentence from {user}");
+        }
         let c = self.ctx_of(&user);
         let me = c.members.iter().find(|m| m.id == user);
         let (user_roles, user_name) = me.map_or_else(Default::default, |m| (m.roles.clone(), m.name.clone()));
@@ -342,6 +348,7 @@ impl Host {
             discord: Mutex::new(None),
             ctx: Default::default(),
             in_voice: Box::new(move || lock(&b).as_ref().is_some_and(|b| b.in_voice())),
+            sleep_state: { let sup = self.sup.clone(); Box::new(move || sup.sleep_state()) },
             pc_run: Box::new(pc_cap),
             pc_out: Box::new(move |m| match m {
                 BrainMsg::Hush => {
@@ -588,6 +595,7 @@ mod tests {
                 bobby_channel: None,
             }),
             in_voice: Box::new(|| false), // local mode: Bobby speaks on the PC
+            sleep_state: Box::new(|| sleep::State::Awake),
             pc_run: Box::new(move |cap| {
                 lock(&c1).push(cap);
                 Ok(json!({ "found": "Valorant" }))
@@ -622,7 +630,7 @@ mod tests {
         let (io, brain_rx) = Io::new();
         let io = Arc::new(io);
         let brain = Arc::new(Brain::new(Store::temp(), HttpLlm::new("http://127.0.0.1:9"), io.clone(), bobby_core::store::temp_dir("host-down").join("j.jsonl")));
-        let router = Arc::new(Router { brain, discord: Mutex::new(None), ctx: Default::default(), in_voice: Box::new(|| false), pc_run: Box::new(pc_cap), pc_out: Box::new(|_| {}) });
+        let router = Arc::new(Router { brain, discord: Mutex::new(None), ctx: Default::default(), in_voice: Box::new(|| false), sleep_state: Box::new(|| sleep::State::Awake), pc_run: Box::new(pc_cap), pc_out: Box::new(|_| {}) });
         tokio::spawn(router.route(brain_rx));
         let r = tokio::time::timeout(Duration::from_secs(2), io.run(Cap::Leave)).await.expect("answered before the 30 s timeout");
         assert!(r.is_err());

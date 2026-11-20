@@ -231,10 +231,9 @@ impl<L: Understand + Sync> Brain<L> {
 
     /// True while Bobby is in the middle of something: a `hear` is running or a confirmation window is open.
     /// Deep sleep waits for it to be false.
-    // ponytail: long-lived flows that live outside `hear` (the messenger, on another branch) must also count here
-    // (take `io.enter()` for their whole run), or Bobby could fall asleep under them.
+    /// The messenger counts too: a flow or a waiter alive means a message is being carried.
     pub fn busy(&self) -> bool {
-        self.io.in_flight() > 0 || self.st().pending.values().any(|p| p.until_ms > now_ms())
+        self.io.in_flight() > 0 || self.messenger.busy() || self.st().pending.values().any(|p| p.until_ms > now_ms())
     }
 
     /// True while Bobby waits for this person's next sentence, which then needs no "Bobby".

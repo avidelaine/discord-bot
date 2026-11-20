@@ -98,6 +98,16 @@ impl Messenger {
         dm.remove(&id).is_some_and(|w| w.tx.send(text.to_string()).is_ok())
     }
 
+    /// True while a flow runs or any waiter (voice or DM) is alive: Bobby is carrying a message.
+    pub fn busy(&self) -> bool {
+        self.busy.load(Ordering::SeqCst) || !lock(&self.voice).is_empty() || !lock(&self.dm).is_empty()
+    }
+
+    /// True if a flow waits for this person's spoken answer (the sentence needs no "Bobby").
+    pub fn has_voice_waiter(&self, user: &str) -> bool {
+        lock(&self.voice).contains_key(user)
+    }
+
     /// The latest server snapshot (people's voice channels), as the host's Discord client sent it.
     pub fn set_context(&self, c: &Context) {
         *lock(&self.ctx) = Some(c.clone());
@@ -346,6 +356,7 @@ impl Flow {
     }
 
     async fn run(self) {
+        let _flight = self.io.enter(); // a message being carried counts as a request in flight: no deep sleep under it
         if self.confirm && !self.confirmed().await {
             return;
         }
@@ -633,6 +644,20 @@ mod tests {
                 "say:261531632589078528:Marie répond : j'arrive".into(),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn deep_sleep_is_refused_while_the_messenger_waits_for_an_answer() {
+        let r = rig(quick(), ok);
+        assert!(!r.brain.messenger.busy());
+        r.hear("Bobby, va dire à Marie que le repas est prêt", ADMIN).await;
+        r.until("expect:marie").await;
+        assert!(r.brain.messenger.has_voice_waiter("marie"));
+        assert!(r.brain.busy());
+        r.hear("Bobby, dors", ADMIN).await;
+        assert!(!r.sent.lock().unwrap().contains(&BrainMsg::DeepSleep), "asleep under a message");
+        r.hear("oui, dis-lui que j'arrive", "marie").await;
+        r.until("répond :").await;
     }
 
     #[tokio::test]

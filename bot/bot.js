@@ -55,6 +55,16 @@ const BEEP = (() => {
   return b;
 })();
 
+// Bobby's recorded "Oui." (voice/oui.wav) replaces the beep once decoded at startup; WAKE_SOUND=beep keeps the beep.
+let OUI = null;
+if (process.env.WAKE_SOUND !== 'beep') {
+  (async () => {
+    const chunks = [];
+    for await (const c of decode(fs.createReadStream(path.join(__dirname, '..', 'voice', 'oui.wav')))) chunks.push(c);
+    OUI = Buffer.concat(chunks);
+  })().catch((e) => console.error('[wake] oui.wav not loaded, beep instead:', e.message));
+}
+
 // "Heard Bobby, did not get it": two soft descending tones (330 Hz then 220 Hz), 250 ms, raised-cosine envelope per tone (no clicks).
 const NOPE = (() => {
   const seg = 6000, b = Buffer.alloc(seg * 2 * 4);
@@ -158,7 +168,7 @@ function makeIo(guild, textChannel) {
     // content: text, { embeds } or a list of those, split to Discord's limits. ch: another text channel ("écris-le dans général").
     post: async (content, ch = textChannel) => { for (const m of messages(content)) await ch.send(m); return ch.name; },
     // Short clips (beep, nope, ack): a reply that follows waits for the clip's end instead of cutting it.
-    beep: () => io.clip(BEEP),
+    beep: () => io.clip(OUI || BEEP),
     nope: () => io.clip(NOPE),
     clip(pcm) { io.ringStop(); clip = mixer.overlay(new PassThrough().end(pcm)); },
     // Spoken "got it" once the transcript is an order. False while the clips are not synthesized yet (caller falls back to the beep).

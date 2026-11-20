@@ -25,7 +25,7 @@ from fastapi.responses import Response
 from faster_whisper import WhisperModel
 from piper import PiperVoice
 from wakescan import MicWake, WakeScan, to_16k  # live wake word scoring (testable without Whisper)
-from local import Local, post, scale_wav, settings, tone, voice_volume  # local mode: PC microphone and speakers
+from local import OUI_WAV, Local, post, scale_wav, settings, tone, voice_volume  # local mode: PC microphone and speakers
 
 try:  # PC control is optional: without its packages (requirements-pc.txt), STT and TTS still work
     import pc
@@ -285,7 +285,14 @@ def _local_sentence(audio: np.ndarray, score):
 
 def beep_wav(kind: str = "yes") -> bytes:
     """Built at each use with the current beep_volume setting, so a change applies at once."""
-    return tone([330, 247], 140) if kind == "nope" else tone([880])
+    if kind == "nope":
+        return tone([330, 247], 140)
+    if os.getenv("WAKE_SOUND") == "beep":
+        return tone([880])
+    return scale_wav(OUI, voice_volume())  # Bobby's recorded "Oui.", at his voice level (like /speak)
+
+
+OUI = Path(OUI_WAV).read_bytes()
 
 
 local = Local(local_sentence, local_wake, WAKE_THRESHOLD, lambda: local.chirp(beep_wav("yes")))

@@ -12,6 +12,10 @@ import winsound
 
 import numpy as np
 
+# Bobby's "Oui." (Piper fr_FR-siwis, recorded once, leading silence trimmed): the wake acknowledgement on Discord
+# and the PC instead of the beep, at the level of his speech. WAKE_SOUND=beep in .env brings the beep back.
+OUI_WAV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "oui.wav")
+
 RATE = 16000
 BLOCK = 1280  # 80 ms: the wake word model's frame
 SILENCE_S = 0.6  # end of a sentence, like RECORD_SILENCE_MS on Discord
@@ -201,4 +205,7 @@ if __name__ == "__main__":  # self-check without microphone or speakers
     assert peak(tone([880], volume=10)) < peak(tone([880], volume=100))
     assert abs(peak(tone([880], volume=30)) - 0.09 * 32767) < 100
     assert peak(scale_wav(tone([880], volume=100), 50)) < peak(tone([880], volume=100)) * 0.51
+    with wave.open(OUI_WAV) as r:  # the wake acknowledgement: a real, short, non-empty clip
+        assert r.getsampwidth() == 2 and 0.15 < r.getnframes() / r.getframerate() < 0.6
+    assert "oui.wav" in open(os.path.join(os.path.dirname(OUI_WAV), "..", "bot", "bot.js"), encoding="utf8").read()
     print("local: ok")

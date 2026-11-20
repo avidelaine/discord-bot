@@ -50,6 +50,7 @@ Whisper downloads itself into `models/whisper_models` on first start.
 | `CLAUDE_MODEL` | Claude model for those questions (default `haiku`). |
 | `TEXT_CHANNEL` | Text channel (name or ID) where Bobby posts lists and answers asked in writing (it never echoes what it says). Empty: the channel where `/join` was typed. |
 | `WAKE_THRESHOLD` | Wake word score needed to wake Whisper (default 0.10). Higher means fewer wasted transcriptions but more missed "Bobby". |
+| `WAKE_SOUND` | `beep` brings back the 880 Hz beep. Default: Bobby says "Oui" (`voice/oui.wav`, his Piper voice recorded once) the moment he hears his name, on Discord and on the PC. |
 
 The bot needs the **Connect**, **Speak**, **Mute Members**, **Deafen Members**, **Move Members**, **Send Messages** and **Read Message History** permissions (the last one to find its own messages to edit or delete). It deliberately does not have **Manage Messages**: it can only delete its own messages. No privileged intent is required.
 

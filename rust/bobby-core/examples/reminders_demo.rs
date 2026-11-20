@@ -64,7 +64,9 @@ async fn main() {
 
     // Fast time: no waiting, the ticker's own function gets a "now" 10 minutes later.
     println!("-- 10 minutes later --");
-    let n = reminders::fire_due(&brain.store, &brain.io, reminders::now_ms() + 10 * 60_000 + 1_000);
+    let marie = Member { id: "42".into(), name: "Marie".into(), username: "Marie".into(), global_name: None, channel: Some("Général".into()), roles: vec![], bot: false };
+    let in_voice = Context { speaker: "42".into(), members: vec![marie], voice_channels: vec![], text_channels: vec![], bobby_channel: None };
+    let n = reminders::fire_due(&brain.store, &brain.io, reminders::now_ms() + 10 * 60_000 + 1_000, Some(&in_voice)).await;
     flush(&lines).await;
     println!("({n} reminder fired)");
     say(&brain, &lines, "Bobby, quels sont mes rappels").await;

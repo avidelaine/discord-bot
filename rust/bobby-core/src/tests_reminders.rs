@@ -29,6 +29,13 @@ fn context(speaker: &str) -> Context {
     Context { speaker: speaker.into(), members: vec![member(MARIE), member(NOBODY)], voice_channels: vec![ch("Général")], text_channels: vec![ch("dev-bot-test")], bobby_channel: Some("dev-bot-test".into()) }
 }
 
+/// Marie is in a voice channel: reminders are said aloud.
+fn voice_ctx() -> Context {
+    let mut c = context("42");
+    c.members[0].channel = Some("Général".into());
+    c
+}
+
 struct Rig {
     brain: Brain<FakeLlm>,
     sent: Sent,
@@ -61,7 +68,7 @@ impl Rig {
     }
 
     async fn fire(&mut self, now: i64) -> Vec<(String, String, Option<String>)> {
-        fire_due(&self.brain.store, &self.brain.io, now);
+        fire_due(&self.brain.store, &self.brain.io, now, Some(&voice_ctx())).await;
         self.flush().await
     }
 }
@@ -288,7 +295,7 @@ async fn a_restart_fires_overdue_reminders_and_drops_old_ones() {
     } // Bobby stops
     let store = Store::open(&db, &dir.join("data")).unwrap(); // Bobby starts again
     let (io, sent) = fake_client(|_| Ok(Value::Null));
-    assert_eq!(fire_due(&store, &io, now), 1);
+    assert_eq!(fire_due(&store, &io, now, Some(&voice_ctx())).await, 1);
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
     let said: Vec<_> = sent.lock().unwrap().iter().filter_map(|m| if let BrainMsg::Say { text, to_user, voice, .. } = m { Some((text.clone(), to_user.clone(), *voice == Voice::Bobby)) } else { None }).collect();
     assert_eq!(said, vec![("Marie, rappel : sortir le linge (en retard).".to_string(), Some("42".to_string()), true)]);

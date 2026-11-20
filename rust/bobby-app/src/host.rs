@@ -154,6 +154,17 @@ pub struct Host {
     last: Shared<tauri::async_runtime::JoinHandle<()>>,
 }
 
+/// Aborts its task when dropped (the end of a run).
+struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(h) = self.0.take() {
+            h.abort();
+        }
+    }
+}
+
 impl Host {
     pub fn new(cfg: &Config, bridge: Arc<Bridge>, sup: Arc<Supervisor>) -> Arc<Self> {
         capture_stdio(sup.clone());
@@ -197,7 +208,7 @@ impl Host {
         let (io, brain_rx) = Io::new();
         let brain = Arc::new(Brain::new(store, HttpLlm::new(&cfg.models.llm), Arc::new(io), cfg.logs().join("conversations.jsonl")));
         tokio::spawn(bobby_core::actions::ask::check());
-        bobby_core::actions::reminders::spawn_ticker(brain.clone()); // due reminders and timers, and the catch-up after a restart
+        let _ticker = AbortOnDrop(bobby_core::actions::reminders::spawn_ticker(brain.clone())); // due reminders and timers, and the catch-up; one at a time, stopped when this run ends
         tokio::task::spawn_blocking(|| bobby_core::actions::pc::set_apps(bobby_pc::apps::index().iter().map(|a| a.name.clone()).collect()));
 
         let bot: Shared<Arc<Bot>> = Default::default();

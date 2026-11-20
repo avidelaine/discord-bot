@@ -28,3 +28,5 @@ mod tests_batch34;
 mod tests_r4;
 #[cfg(test)]
 mod tests_reminders;
+#[cfg(test)]
+mod tests_reminders2;

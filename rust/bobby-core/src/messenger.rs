@@ -103,6 +103,11 @@ impl Messenger {
         *lock(&self.ctx) = Some(c.clone());
     }
 
+    /// The latest snapshot, if the client sent one (reminders look at who is in voice).
+    pub fn context(&self) -> Option<Context> {
+        lock(&self.ctx).clone()
+    }
+
     /// Stop or restart: no waiter survives, no messenger is out, the flows end without a word.
     pub fn clear(&self) {
         for h in lock(&self.tasks).drain(..) {

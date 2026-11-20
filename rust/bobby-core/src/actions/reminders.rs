@@ -7,10 +7,11 @@ use crate::shortcuts::clean;
 use crate::store::Store;
 use crate::types::{ActionDef, Module, Role, Step};
 use crate::util::{caps, group, hit, re, replace1, BrainError, Res, Say};
-use bobby_proto::msg::Voice;
-use chrono::{DateTime, Duration, Local, TimeZone, Timelike};
+use bobby_proto::msg::{Cap, Context, Voice};
+use chrono::{DateTime, Local, NaiveDate, TimeZone, Timelike};
 use fancy_regex::Regex;
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 const DOC: &str = "reminders";
@@ -268,48 +269,137 @@ fn guard() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Says every reminder due at `now` (epoch ms) to its person and removes it. One more than 10 min late is dropped and
-/// logged; one more than 30 s late (Bobby was off) is said with "(en retard)". Returns how many were said.
-/// A restart loses nothing: this reads the store, and the store is all the state there is.
-pub fn fire_due(store: &Store, io: &crate::io::Io, now: i64) -> usize {
+/// Reminders taken out of the store whose save failed: they stay out of memory so they never fire twice.
+/// Keyed by store folder, id, owner and due time (ids are reused once a reminder is gone).
+type TakenKey = (String, i64, String, i64);
+static TAKEN: Mutex<Vec<TakenKey>> = Mutex::new(Vec::new());
+
+fn taken_key(store: &Store, r: &Value) -> TakenKey {
+    (store.json_dir().display().to_string(), r["id"].as_i64().unwrap_or(0), r["user"].as_str().unwrap_or("").into(), r["due"].as_i64().unwrap_or(0))
+}
+
+/// Takes every reminder due at `now` out of the store and returns it, before anything is said.
+/// If the save fails the error is logged and the reminders are remembered as taken, so a failing disk never repeats one
+/// every second (it may fire once more after a restart: better than a loop). With `hold_fresh`, a reminder less than
+/// `MAX_LATE_MS` late stays in the store (the owner's voice channel is not known yet), a later tick will fire it.
+pub(crate) fn take_due(store: &Store, now: i64, hold_fresh: bool, save: impl Fn(&Store, Vec<Value>) -> Res<()>) -> Vec<Value> {
     let _g = guard();
-    let (due, keep): (Vec<Value>, Vec<Value>) = load(store).into_iter().partition(|r| r["due"].as_i64().is_some_and(|d| d <= now));
+    let mut taken = TAKEN.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = store.json_dir().display().to_string();
+    let all: Vec<Value> = load(store).into_iter().filter(|r| !taken.contains(&taken_key(store, r))).collect();
+    let is_due = |r: &Value| r["due"].as_i64().is_some_and(|d| d <= now && !(hold_fresh && now - d <= MAX_LATE_MS));
+    let (due, keep): (Vec<Value>, Vec<Value>) = all.into_iter().partition(is_due);
     if due.is_empty() {
-        return 0;
-    }
-    let mut said = 0;
-    for r in &due {
-        let late = now - r["due"].as_i64().unwrap_or(now);
-        if late > MAX_LATE_MS {
-            eprintln!("[reminders] dropped, {} min late: {r}", late / 60_000);
-            continue;
-        }
-        io.say(&fire_text(r, late > LATE_TAG_MS), r["lang"].as_str().unwrap_or("fr"), Voice::Bobby, r["user"].as_str());
-        said += 1;
+        return due;
     }
     if let Err(e) = save(store, keep) {
-        eprintln!("[reminders] cannot save: {e}"); // they would fire again next second: better than losing them
+        eprintln!("[reminders] cannot save: {e}");
+        taken.extend(due.iter().map(|r| taken_key(store, r)));
+    } else {
+        taken.retain(|k| k.0 != dir);
+    }
+    due
+}
+
+fn owner_in_voice(ctx: Option<&Context>, user: &str) -> bool {
+    ctx.is_some_and(|c| c.members.iter().any(|m| m.id == user && m.channel.is_some()))
+}
+
+/// What a reminder says in a DM (the owner is not in voice).
+pub fn dm_text(r: &Value) -> String {
+    let en = r["lang"] == "en";
+    let text = r["text"].as_str().unwrap_or("");
+    let dur = dur_text(r["secs"].as_u64().unwrap_or(0), if en { "en" } else { "fr" });
+    match (is_timer(r), en) {
+        (true, true) => format!("Your {dur} timer is done."),
+        (true, false) => format!("Ton minuteur de {dur} est fini."),
+        (false, true) => format!("Reminder: {text}"),
+        (false, false) => format!("Rappel : {text}"),
+    }
+}
+
+/// What the owner reads for a reminder that came due while Bobby was off.
+pub fn missed_text(r: &Value) -> String {
+    let en = r["lang"] == "en";
+    let l = if en { "en" } else { "fr" };
+    let what = if is_timer(r) { format!("{} {}", if en { "timer for" } else { "minuteur de" }, dur_text(r["secs"].as_u64().unwrap_or(0), l)) } else { r["text"].as_str().unwrap_or("").to_string() };
+    let at = clock_text(r["due"].as_i64().unwrap_or(0), l);
+    if en { format!("While I was off, I missed your reminder: {what} ({at}).") } else { format!("Pendant que j'étais éteint, j'ai raté ton rappel : {what} ({at}).") }
+}
+
+async fn dm(io: &crate::io::Io, user: &str, text: String) {
+    if let Err(e) = io.run(Cap::Dm { user: user.into(), text }).await {
+        eprintln!("[reminders] cannot DM {user}: {e}");
+    }
+}
+
+/// Delivers every reminder due at `now` (epoch ms) and removes it from the store first.
+/// - Owner in a voice channel (per `ctx`): said aloud to them, "(en retard)" if more than 30 s late.
+/// - Owner absent: sent as a DM, never said aloud in a channel they are not in.
+/// - More than 10 min late (Bobby was off): not fired, the owner is told by DM what was missed.
+/// Returns how many were delivered. A restart loses nothing: this reads the store, and the store is all the state there is.
+pub async fn fire_due(store: &Store, io: &crate::io::Io, now: i64, ctx: Option<&Context>) -> usize {
+    let mut said = 0;
+    for r in take_due(store, now, ctx.is_none(), save) {
+        let late = now - r["due"].as_i64().unwrap_or(now);
+        let user = r["user"].as_str();
+        if late > MAX_LATE_MS {
+            eprintln!("[reminders] missed, {} min late: {r}", late / 60_000);
+            if let Some(u) = user {
+                dm(io, u, missed_text(&r)).await;
+            }
+        } else if user.is_none_or(|u| owner_in_voice(ctx, u)) {
+            io.say(&fire_text(&r, late > LATE_TAG_MS), r["lang"].as_str().unwrap_or("fr"), Voice::Bobby, user);
+            said += 1;
+        } else if let Some(u) = user {
+            dm(io, u, dm_text(&r)).await;
+            said += 1;
+        }
     }
     said
 }
 
+/// One ticker at a time, whatever the number of host runs.
+static TICKER: AtomicBool = AtomicBool::new(false);
+
+struct Claim;
+impl Drop for Claim {
+    fn drop(&mut self) {
+        TICKER.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Starts the ticker: `fire_due` every second, the first time at once (the catch-up after a restart).
+/// None if one already runs. Abort the handle when the run ends: the claim is released when the task is dropped.
 /// ponytail: one ticker reading one small document each second beats one task per reminder (those must be rebuilt
 /// at startup anyway). Limits: a reminder fires up to 1 s late, and the store is read every second, forever.
-pub fn spawn_ticker<L: Send + Sync + 'static>(brain: std::sync::Arc<crate::brain::Brain<L>>) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+pub fn spawn_ticker<L: Send + Sync + 'static>(brain: std::sync::Arc<crate::brain::Brain<L>>) -> Option<tokio::task::JoinHandle<()>> {
+    let claim = (!TICKER.swap(true, Ordering::SeqCst)).then_some(Claim)?;
+    Some(tokio::spawn(async move {
+        let _claim = claim;
         let mut t = tokio::time::interval(std::time::Duration::from_secs(1));
         loop {
             t.tick().await;
-            fire_due(&brain.store, &brain.io, now_ms());
+            fire_due(&brain.store, &brain.io, now_ms(), brain.messenger.context().as_ref()).await;
         }
-    })
+    }))
+}
+
+/// Today at h:m in `now`'s zone, the next calendar day if that is not in the future.
+/// Calendar arithmetic, not +24 h: "tomorrow 8h" stays 8h across a DST change. None if the time does not exist (spring gap).
+pub fn next_at_tz<Tz: TimeZone>(now: DateTime<Tz>, h: u32, m: u32) -> Option<DateTime<Tz>> {
+    let tz = now.timezone();
+    let at = |d: NaiveDate| tz.from_local_datetime(&d.and_hms_opt(h, m, 0)?).earliest();
+    let today = now.date_naive();
+    match at(today)? {
+        d if d > now => Some(d),
+        _ => at(today.succ_opt()?),
+    }
 }
 
 /// Today at h:m, tomorrow if that is not in the future.
 pub fn next_at(now: DateTime<Local>, h: u32, m: u32) -> Option<DateTime<Local>> {
-    let d = now.date_naive().and_hms_opt(h, m, 0)?.and_local_timezone(Local).earliest()?;
-    Some(if d <= now { d + Duration::days(1) } else { d })
+    next_at_tz(now, h, m)
 }
 
 // ---------- Actions ----------

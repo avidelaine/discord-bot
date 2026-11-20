@@ -1119,4 +1119,16 @@ mod tests {
         assert_eq!(r.signals(), [SignalKind::Nope, SignalKind::Nope]);
         assert_eq!(keys(&r.last()), ["at", "who", "id", "lang", "wakeScore", "heard", "role", "outcome"]);
     }
+
+    #[tokio::test]
+    async fn deep_sleep_shortcut_is_admin_only() {
+        let r = rig(vec![], ok);
+        r.hear("Bobby, dors", ADMIN).await;
+        assert!(r.msgs().contains(&BrainMsg::DeepSleep), "{:?} {:?}", r.msgs(), r.last());
+        assert!(caps(&r.sent).contains(&Cap::MusicStop));
+        assert!(r.said().iter().any(|t| t == "Bonne nuit."));
+        let r = rig(vec![], ok);
+        r.hear("Bobby, dors", "kev").await;
+        assert!(!r.msgs().contains(&BrainMsg::DeepSleep));
+    }
 }

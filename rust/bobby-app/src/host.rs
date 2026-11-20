@@ -9,6 +9,7 @@ use bobby_core::store::Store;
 use bobby_discord::Bot;
 use bobby_infer::HttpLlm;
 use bobby_proto::infer::Understand;
+use crate::sleep::{self, Action, Event};
 use bobby_proto::msg::{BrainMsg, Cap, CapKind, ClientMsg, Context, SignalKind, Voice};
 use bobby_proto::settings::Config;
 use serde_json::Value;
@@ -79,6 +80,10 @@ impl<L: Understand + Send + Sync + 'static> Router<L> {
     /// Brain -> clients.
     pub async fn route(self: Arc<Self>, mut rx: mpsc::UnboundedReceiver<BrainMsg>) {
         while let Some(m) = rx.recv().await {
+            if m == BrainMsg::DeepSleep {
+                sleep::fire(Event::SleepAsked);
+                continue;
+            }
             match dest(&m, (self.in_voice)()) {
                 Dest::Discord => {
                     let tx = lock(&self.discord).clone();
@@ -152,12 +157,77 @@ pub struct Host {
     stop: Mutex<Option<oneshot::Sender<()>>>,
     /// The previous run, awaited by the next one so two gateways never overlap on a restart.
     last: Shared<tauri::async_runtime::JoinHandle<()>>,
+    /// The running brain's router, for Bobby's own lines (deep sleep and wake-up).
+    router: Mutex<Option<Arc<Router<HttpLlm>>>>,
 }
 
 impl Host {
     pub fn new(cfg: &Config, bridge: Arc<Bridge>, sup: Arc<Supervisor>) -> Arc<Self> {
         capture_stdio(sup.clone());
-        Arc::new(Host { cfg: cfg.clone(), bridge, sup, stop: Mutex::new(None), last: Default::default() })
+        let host = Arc::new(Host { cfg: cfg.clone(), bridge, sup, stop: Mutex::new(None), last: Default::default(), router: Default::default() });
+        let h = host.clone();
+        sleep::set_hook(move |e| h.sleep_event(e));
+        bobby_infer::on_wake(|| sleep::fire(Event::WakeWord));
+        host
+    }
+
+    fn sleep_event(self: &Arc<Self>, e: Event) {
+        for a in self.sup.sleep_step(e) {
+            self.exec(a);
+        }
+    }
+
+    /// Bobby's own line, through the normal Say path (Piper stays loaded in deep sleep).
+    fn say(&self, text: &str) {
+        let Some(r) = lock(&self.router).clone() else { return };
+        let m = BrainMsg::Say { text: text.into(), lang: "fr".into(), voice: Voice::Bobby, to_user: None };
+        match dest(&m, (r.in_voice)()) {
+            Dest::Discord => {
+                if let Some(tx) = lock(&r.discord).as_ref() {
+                    let _ = tx.send(m);
+                }
+            }
+            Dest::Pc => (r.pc_out)(m),
+        }
+    }
+
+    fn exec(self: &Arc<Self>, a: Action) {
+        let h = self.clone();
+        match a {
+            Action::StopServices => {
+                // off the async threads: unloading Whisper and taskkill both block
+                std::thread::spawn(move || {
+                    h.bridge.unload_stt();
+                    h.sup.hold("llm", true);
+                    h.log("[sleep] deep sleep: Whisper unloaded, LLM stopped");
+                });
+            }
+            Action::SayWaking => self.say(sleep::WAKING),
+            Action::SayReady => self.say(sleep::READY),
+            Action::SayFailed => self.say(sleep::FAILED),
+            Action::StartServices => {
+                tauri::async_runtime::spawn(async move {
+                    let b = h.bridge.clone();
+                    let _ = tauri::async_runtime::spawn_blocking(move || b.reload_stt()).await;
+                    h.sup.hold("llm", false);
+                    let ok = h.llm_healthy().await;
+                    h.sleep_event(if ok { Event::Ready } else { Event::Failed });
+                });
+            }
+        }
+    }
+
+    /// The LLM's `/health`, polled for 60 s.
+    async fn llm_healthy(&self) -> bool {
+        let base = self.cfg.models.llm.trim_end_matches('/').trim_end_matches("/v1");
+        let (url, http) = (format!("{base}/health"), reqwest::Client::new());
+        for _ in 0..60 {
+            if http.get(&url).timeout(Duration::from_secs(2)).send().await.is_ok_and(|r| r.status().is_success()) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        false
     }
 
     fn log(&self, line: &str) {
@@ -165,6 +235,8 @@ impl Host {
     }
 
     pub fn start(self: &Arc<Self>) {
+        let b = self.bridge.clone();
+        std::thread::spawn(move || b.reload_stt()); // a stop during deep sleep left Whisper unloaded
         let mut stop = lock(&self.stop);
         if stop.is_some() {
             return;
@@ -221,6 +293,7 @@ impl Host {
                 }
             }),
         });
+        *lock(&self.router) = Some(router.clone());
         let (stop_tx, stop_rx) = watch::channel(false);
         let tasks = [
             tokio::spawn(router.clone().route(brain_rx)),

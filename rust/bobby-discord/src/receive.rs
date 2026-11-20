@@ -155,7 +155,7 @@ pub use bobby_infer::listen::{Gate, Outcome};
 pub use bobby_proto::infer::Transcript;
 
 /// The in-process listener (`VOICE_URL=local`), loaded once by `client::run`.
-pub static LOCAL_LISTENER: std::sync::OnceLock<Arc<bobby_infer::listen::Listener<bobby_infer::Stt>>> = std::sync::OnceLock::new();
+pub static LOCAL_LISTENER: std::sync::OnceLock<Arc<bobby_infer::listen::Listener<bobby_infer::SttSlot>>> = std::sync::OnceLock::new();
 
 /// `http://host:port` -> `ws://host:port/listen?force=..&hotwords=..`.
 pub fn listen_url(voice_url: &str, force: bool, hotwords: &str) -> String {

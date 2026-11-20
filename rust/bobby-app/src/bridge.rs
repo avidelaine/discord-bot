@@ -8,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use bobby_audio::{collect::collect, gate::Gate, mic, out, out::Speaker, wake::Wake};
-use bobby_infer::{HttpStt, HttpTts, Stt, Tts};
+use bobby_infer::{HttpStt, HttpTts, Stt, SttSlot, Tts};
 use bobby_proto::infer::{Speak, Transcribe};
 use bobby_proto::msg::{MediaCmd, VolumeOp};
 use bobby_proto::settings::Config;
@@ -30,7 +30,11 @@ pub struct Bridge {
     sup: Arc<Supervisor>,
     speaker: Speaker,
     tts: Arc<OnceLock<Tts>>,
-    stt: Arc<OnceLock<Arc<Stt>>>,
+    stt: Arc<SttSlot>,
+    /// Builds Whisper again after a deep sleep.
+    load_stt: Arc<dyn Fn() -> Stt + Send + Sync>,
+    /// Set by a deep sleep: only then does `reload_stt` load (the startup load may still be running).
+    unloaded: AtomicBool,
     hook: Mutex<Option<Hook>>,
     http: reqwest::Client,
     enabled: AtomicBool,
@@ -47,7 +51,7 @@ impl Bridge {
         // Engines load once ("local" = in-process Whisper/Piper, slow: off the main thread); on failure the app still starts on the HTTP engine.
         const FALLBACK: &str = "http://127.0.0.1:3000";
         let models = cfg.models_dir();
-        let (stt, tts) = (Arc::new(OnceLock::new()), Arc::new(OnceLock::new()));
+        let (stt, tts) = (Arc::new(SttSlot::empty()), Arc::new(OnceLock::new()));
         let (addr, cell, s2) = (cfg.models.stt.clone(), stt.clone(), sup.clone());
         let m2 = models.clone();
         let load = move || {
@@ -56,10 +60,12 @@ impl Bridge {
                 Stt::Http(HttpStt::new(FALLBACK))
             })
         };
+        let load: Arc<dyn Fn() -> Stt + Send + Sync> = Arc::new(load);
+        let load_stt = load.clone();
         if bobby_infer::is_local(&cfg.models.stt) {
-            std::thread::spawn(move || { let _ = cell.set(Arc::new(load())); });
+            std::thread::spawn(move || cell.load(Arc::new(load())));
         } else {
-            let _ = cell.set(Arc::new(load()));
+            cell.load(Arc::new(load()));
         }
         let (addr, cell, s2) = (cfg.models.tts.clone(), tts.clone(), sup.clone());
         let load = move || {
@@ -79,6 +85,8 @@ impl Bridge {
             speaker: Speaker::new(),
             tts,
             stt,
+            load_stt,
+            unloaded: AtomicBool::new(false),
             hook: Mutex::new(None),
             http: reqwest::Client::new(),
             enabled: AtomicBool::new(false),
@@ -94,8 +102,23 @@ impl Bridge {
     }
 
     /// Whisper, once loaded: shared with the Rust Discord client so it sits in VRAM once.
-    pub fn stt_slot(&self) -> Arc<OnceLock<Arc<Stt>>> {
+    pub fn stt_slot(&self) -> Arc<SttSlot> {
         self.stt.clone()
+    }
+
+    /// Deep sleep: frees Whisper's VRAM (the in-process engine only; a remote one is not ours to unload).
+    pub fn unload_stt(&self) {
+        if bobby_infer::is_local(&self.cfg.models.stt) {
+            self.unloaded.store(true, Ordering::SeqCst);
+            self.stt.unload();
+        }
+    }
+
+    /// Loads Whisper again if a deep sleep unloaded it (slow: call off the async threads).
+    pub fn reload_stt(&self) {
+        if self.unloaded.swap(false, Ordering::SeqCst) {
+            self.stt.load(Arc::new((self.load_stt)()));
+        }
     }
 
     pub fn set_hook(&self, hook: Option<Hook>) {
@@ -221,6 +244,7 @@ impl Bridge {
                     return; // not for Bobby: never transcribed
                 }
                 score = Some(s);
+                bobby_infer::wake_heard();
             }
         }
         let Some(stt) = self.stt.get() else {

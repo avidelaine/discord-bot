@@ -18,7 +18,7 @@ pub struct Config {
     /// Local models (`MODELS_DIR`, default `models` next to the `.env`); used when `VOICE_URL=local`.
     pub models_dir: PathBuf,
     /// Whisper already loaded by the host (the app shares its PC one): used instead of loading a second copy in VRAM.
-    pub shared_stt: Option<std::sync::Arc<std::sync::OnceLock<std::sync::Arc<bobby_infer::Stt>>>>,
+    pub shared_stt: Option<std::sync::Arc<bobby_infer::SttSlot>>,
 }
 
 // Custom Debug: a stray `{:?}` in a log must never leak the token.

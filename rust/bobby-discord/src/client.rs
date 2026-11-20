@@ -394,21 +394,16 @@ pub async fn run_until(
 
 /// Loads Whisper, the wake word and Piper in process (slow: once, off the async threads). A failure is
 /// logged once and leaves the engine unset, which behaves like an unreachable voice service.
-async fn load_local_engines(models: std::path::PathBuf, shared: Option<Arc<OnceLock<Arc<bobby_infer::Stt>>>>) {
+async fn load_local_engines(models: std::path::PathBuf, shared: Option<Arc<bobby_infer::SttSlot>>) {
     use bobby_infer::listen::{wake_threshold, Listener};
     if receive::LOCAL_LISTENER.get().is_some() {
         return; // a restarted client in the same process keeps the engines it loaded
     }
     let loaded = tokio::task::spawn_blocking(move || {
         let stt = match shared {
-            // ponytail: polls the host's slot while its Whisper loads (startup only, a few seconds)
-            Some(slot) => loop {
-                if let Some(s) = slot.get() {
-                    break s.clone();
-                }
-                std::thread::sleep(Duration::from_millis(200));
-            },
-            None => Arc::new(bobby_infer::Stt::from_addr("local", &models).map_err(|e| format!("stt: {e}"))?),
+            // the host's slot: empty while its Whisper loads or in deep sleep (transcribing then reports "down")
+            Some(slot) => slot,
+            None => Arc::new(bobby_infer::SttSlot::loaded(bobby_infer::Stt::from_addr("local", &models).map_err(|e| format!("stt: {e}"))?)),
         };
         let root = models.parent().map(|p| p.to_path_buf());
         let listener = Listener::new(stt, Some(&models.join("wakeword")), wake_threshold(), root);

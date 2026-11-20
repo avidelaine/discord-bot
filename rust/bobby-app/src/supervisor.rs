@@ -1,6 +1,7 @@
 // Runs Bobby's parts: spawn, restart 3 s after a crash, stop whole process trees. Port of app/supervisor.js.
 // Publishes `status` (snapshot, on any change) and `log` ({part, line, at}) on the bus; every line also goes to _logs/bobby.log.
 use crate::config::{Config, Part};
+use crate::sleep;
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::PathBuf;
@@ -29,6 +30,8 @@ struct PartState {
     pid: Option<u32>,
     restarts: u32,
     started_at: Option<i64>,
+    /// Deep sleep: the restart loop waits while set (`stop()` clears it, so Bobby starts awake).
+    held: bool,
 }
 
 #[derive(Default)]
@@ -36,6 +39,7 @@ struct State {
     running: bool,
     since: Option<i64>,
     external: bool,
+    sleep: sleep::State,
     /// Bumped on every start and stop: a part task from an older run must not restart anything.
     run: u64,
     parts: Vec<PartState>,
@@ -99,6 +103,7 @@ impl Supervisor {
         json!({
             "running": s.running,
             "since": s.since,
+            "sleep": s.sleep.label(),
             "external": !s.running && s.external,
             "parts": self.parts.iter().zip(&s.parts).map(|(d, p)| json!({
                 "name": d.name, "pid": p.pid, "up": p.pid.is_some(), "restarts": p.restarts, "startedAt": p.started_at,
@@ -157,6 +162,14 @@ impl Supervisor {
                 self.log("bobby", "restart from the app");
                 self.stop();
                 self.start()
+            }
+            "sleep" => {
+                sleep::fire(sleep::Event::SleepAsked);
+                Ok(self.status())
+            }
+            "wake" => {
+                sleep::fire(sleep::Event::WakeWord);
+                Ok(self.status())
             }
             _ => Err(format!("unknown action {what}")),
         }
@@ -241,12 +254,18 @@ impl Supervisor {
             self.log(&def.name, &format!("stopped (exit code {code}), restarting in 3 s"));
             self.changed();
             tokio::time::sleep(RESTART_DELAY).await;
-            {
-                let mut s = self.state.lock().unwrap();
-                if s.run != run || !s.running {
-                    return;
+            loop {
+                {
+                    let mut s = self.state.lock().unwrap();
+                    if s.run != run || !s.running {
+                        return;
+                    }
+                    if !s.parts[i].held {
+                        s.parts[i].restarts += 1;
+                        break;
+                    }
                 }
-                s.parts[i].restarts += 1;
+                tokio::time::sleep(Duration::from_millis(500)).await; // held (deep sleep)
             }
         }
     }
@@ -269,6 +288,33 @@ impl Supervisor {
         }
     }
 
+    /// Deep sleep: `on` stops the part and keeps it down; `!on` lets the restart loop bring it back.
+    pub fn hold(&self, name: &str, on: bool) {
+        let pid = {
+            let mut s = self.state.lock().unwrap();
+            let Some(i) = self.parts.iter().position(|p| p.name == name) else { return };
+            s.parts[i].held = on;
+            if on { s.parts[i].pid } else { None }
+        };
+        if let Some(pid) = pid {
+            kill_tree(pid);
+        }
+        self.changed();
+    }
+
+    /// Applies a sleep event to the state and returns what the host must do.
+    pub fn sleep_step(&self, e: sleep::Event) -> Vec<sleep::Action> {
+        let (acts, changed) = {
+            let mut s = self.state.lock().unwrap();
+            let (next, acts) = sleep::on(s.sleep, e);
+            (acts, std::mem::replace(&mut s.sleep, next) != next)
+        };
+        if changed {
+            self.changed();
+        }
+        acts
+    }
+
     pub fn stop(&self) -> Value {
         let pids: Vec<u32> = {
             let mut s = self.state.lock().unwrap();
@@ -289,6 +335,8 @@ impl Supervisor {
             s.running = false;
             s.since = None;
             s.run += 1;
+            s.sleep = sleep::State::Awake;
+            s.parts.iter_mut().for_each(|p| p.held = false);
             s.parts.iter_mut().filter_map(|p| { p.started_at = None; p.pid.take() }).collect()
         };
         self.run_hook(false);

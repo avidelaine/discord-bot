@@ -281,6 +281,9 @@ impl<T: Transcribe + Send + Sync + 'static> Listener<T> {
         let mut outcome = Outcome { gate: Some(Gate { wake: passed, score }), transcript: None };
         if let Some(wake) = passed {
             eprintln!("[wake] {} (score {:.2})", if wake { "Bobby heard" } else { "no Bobby" }, score.unwrap_or(0.0));
+            if wake {
+                crate::wake_heard();
+            }
         }
         if passed == Some(false) {
             self.keep(audio, score, None); // a near-miss (collect keeps only score >= COLLECT_MIN_SCORE)

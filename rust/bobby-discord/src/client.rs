@@ -107,6 +107,11 @@ impl Bot {
         self.cache.guild(self.guild).map(|g| context::from_guild(&g, speaker, bobby))
     }
 
+    /// Music is actually playing right now (a track is loaded and not paused).
+    pub async fn playing(&self) -> bool {
+        self.player.is_playing().await
+    }
+
     /// True while Bobby has a voice call (from a join until a leave): the host then speaks on Discord, not the PC.
     // ponytail: a call kicked out by a moderator keeps existing until the never-alone logic or a leave removes it
     pub fn in_voice(&self) -> bool {

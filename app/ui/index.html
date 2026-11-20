@@ -128,6 +128,7 @@ pre{background:var(--panel2);padding:8px;border-radius:6px;overflow:auto;font:12
   <p><label>Voix sur le PC : <b id="sVoiceV">100</b> %<br><input type="range" id="sVoice" min="0" max="100" step="1" style="width:100%"></label></p>
   <p><button class="btn" id="sTestVoice">Tester la voix</button></p>
   <p><label>Voix sur Discord : <b id="sVoiceDV">100</b> %<br><input type="range" id="sVoiceD" min="0" max="100" step="1" style="width:100%"></label><br><span class="mu">La voix Discord s'applique quand Discord passe en Rust.</span></p>
+  <p><label>Veille profonde automatique (minutes, 0 = jamais)<br><input type="number" id="sAuto" min="0" max="1440" step="1" oninput="autoState()"> <b id="sAutoState"></b></label></p>
   <p><label>Seuil du mot d'activation<br><input type="number" id="sWake" min="0.01" max="0.9" step="0.01"></label></p>
   <p><button class="btn go" id="sSave">Enregistrer</button> <span class="mu" id="sMsg"></span></p>
   <p class="mu">Les volumes s'appliquent tout de suite ; le seuil au prochain redémarrage de Bobby.</p>
@@ -149,14 +150,15 @@ async function api(path,opt){const r=await fetch(path,opt);if(!r.ok)throw new Er
 const sMsg=t=>{$('#sMsg').textContent=t};
 async function loadSet(){
  try{const s=await api('/api/settings');
-  $('#sBeep').value=s.beep_volume;$('#sVoice').value=s.voice_volume_pc;$('#sVoiceD').value=s.voice_volume_discord;$('#sWake').value=s.wake_threshold;
+  $('#sBeep').value=s.beep_volume;$('#sVoice').value=s.voice_volume_pc;$('#sVoiceD').value=s.voice_volume_discord;$('#sWake').value=s.wake_threshold;$('#sAuto').value=s.auto_sleep_min;autoState();
   $('#sBeepV').textContent=s.beep_volume;$('#sVoiceV').textContent=s.voice_volume_pc;$('#sVoiceDV').textContent=s.voice_volume_discord;sMsg('')}
  catch(e){sMsg('Lecture impossible ('+e.message+')')}}
 $('#sBeep').oninput=()=>{$('#sBeepV').textContent=$('#sBeep').value};
 $('#sVoice').oninput=()=>{$('#sVoiceV').textContent=$('#sVoice').value};
 $('#sVoiceD').oninput=()=>{$('#sVoiceDV').textContent=$('#sVoiceD').value};
 const postJson=(path,body)=>api(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body||{})});
-const saveSet=()=>postJson('/api/settings',{beep_volume:+$('#sBeep').value,voice_volume_pc:+$('#sVoice').value,voice_volume_discord:+$('#sVoiceD').value,wake_threshold:+$('#sWake').value});
+const autoState=()=>{const v=$('#sAuto').value,n=+v;$('#sAutoState').textContent=v===''||!(n>=0&&n<=1440)?'valeur invalide (0 à 1440)':n===0?'désactivée':'après '+n+' min'};
+const saveSet=()=>postJson('/api/settings',{beep_volume:+$('#sBeep').value,voice_volume_pc:+$('#sVoice').value,voice_volume_discord:+$('#sVoiceD').value,wake_threshold:+$('#sWake').value,auto_sleep_min:$('#sAuto').value===''?null:+$('#sAuto').value});
 $('#sSave').onclick=async()=>{try{await saveSet();sMsg('Enregistré.')}catch(e){sMsg('Refusé : valeurs invalides ('+e.message+')')}};
 $('#sTest').onclick=async()=>{try{await saveSet();await postJson('/api/settings/test-beep');sMsg('Bip joué (réglage enregistré).')}catch(e){sMsg('Échec ('+e.message+')')}};
 $('#sTestVoice').onclick=async()=>{try{await saveSet();sMsg('Lecture en cours...');await postJson('/api/settings/test-voice');sMsg('Voix jouée (réglage enregistré).')}catch(e){sMsg('Échec ('+e.message+')')}};

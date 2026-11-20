@@ -26,6 +26,8 @@ pub struct Config {
     pub discord: DiscordAt,
     /// PC speaker volumes (editable live from the app).
     pub audio: Audio,
+    /// Deep Sleep options (read live).
+    pub sleep: Sleep,
 }
 
 /// Volumes of the PC speakers, in percent. Read at each use, so a change applies at once.
@@ -44,6 +46,20 @@ pub struct Audio {
 impl Default for Audio {
     fn default() -> Self {
         Audio { beep_volume: 30, voice_volume_pc: 100, voice_volume_discord: 100 }
+    }
+}
+
+/// Deep Sleep settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Sleep {
+    /// Minutes with nothing to do before Bobby goes to deep sleep by himself; 0 = never.
+    pub auto_after_min: u32,
+}
+
+impl Default for Sleep {
+    fn default() -> Self {
+        Sleep { auto_after_min: 30 }
     }
 }
 
@@ -184,6 +200,7 @@ impl Default for Config {
             brain: Brain::default(),
             discord: DiscordAt::default(),
             audio: Audio::default(),
+            sleep: Sleep::default(),
         }
     }
 }
@@ -362,6 +379,13 @@ cwd = "bot"
         let mut d = Config::default();
         d.root = PathBuf::from("C:/Bobby");
         assert_eq!(old, d);
+    }
+
+    #[test]
+    fn auto_sleep_defaults_to_30_and_parses() {
+        assert_eq!(parse("").unwrap().sleep.auto_after_min, 30);
+        assert_eq!(parse("[sleep]\nauto_after_min = 0\n").unwrap().sleep.auto_after_min, 0);
+        assert_eq!(parse("[sleep]\nauto_after_min = 1\n").unwrap().sleep.auto_after_min, 1);
     }
 
     #[test]

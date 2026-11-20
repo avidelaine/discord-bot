@@ -110,7 +110,13 @@ async fn logs_h(State(s): State<AppState>, Query(q): Q) -> Response {
 
 /// The settings the app edits, as JSON.
 fn settings_json(c: &Config) -> Value {
-    json!({ "beep_volume": c.audio.beep_volume, "voice_volume_pc": c.audio.voice_volume_pc, "voice_volume_discord": c.audio.voice_volume_discord, "wake_threshold": c.models.wake_threshold })
+    json!({ "beep_volume": c.audio.beep_volume, "voice_volume_pc": c.audio.voice_volume_pc, "voice_volume_discord": c.audio.voice_volume_discord, "wake_threshold": c.models.wake_threshold, "auto_sleep_min": c.sleep.auto_after_min })
+}
+
+/// The idle minutes before automatic deep sleep: a whole number from 0 (off) to 1440. An empty field (null) or a
+/// string is refused rather than read as 0.
+fn parse_auto_sleep(v: &Value) -> Result<u32, String> {
+    v.as_u64().filter(|v| *v <= 1440).map(|v| v as u32).ok_or_else(|| "La veille automatique doit être un nombre entier de minutes, de 0 (désactivée) à 1440.".to_string())
 }
 
 /// Validates the posted values and rewrites only those fields of the settings file at `path`.
@@ -120,6 +126,7 @@ fn update_settings(path: &std::path::Path, body: &Value) -> Result<Value, String
     };
     let (beep, pc, discord) = (vol("beep_volume")?, vol("voice_volume_pc")?, vol("voice_volume_discord")?);
     let thr = body.get("wake_threshold").and_then(Value::as_f64).filter(|v| (0.01..=0.9).contains(v)).ok_or("wake_threshold must be between 0.01 and 0.9")?;
+    let auto = body.get("auto_sleep_min").map(parse_auto_sleep).transpose()?;
     let mut c = match std::fs::read_to_string(path) {
         Ok(text) => settings::parse(&text).map_err(|e| format!("settings file is broken: {e}"))?,
         Err(_) => Config::default(),
@@ -127,6 +134,9 @@ fn update_settings(path: &std::path::Path, body: &Value) -> Result<Value, String
     c.audio.beep_volume = beep;
     c.audio.voice_volume_pc = pc;
     c.audio.voice_volume_discord = discord;
+    if let Some(a) = auto {
+        c.sleep.auto_after_min = a;
+    }
     c.models.wake_threshold = (thr * 100.0).round() as f32 / 100.0;
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -223,12 +233,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn auto_sleep_accepts_0_to_1440_only() {
+        assert_eq!(parse_auto_sleep(&json!(0)), Ok(0));
+        assert_eq!(parse_auto_sleep(&json!(30)), Ok(30));
+        assert_eq!(parse_auto_sleep(&json!(1440)), Ok(1440));
+        for bad in [json!(1441), json!(-1), json!(null), json!(""), json!("30"), json!(1.5)] {
+            assert!(parse_auto_sleep(&bad).unwrap_err().contains("0 (désactivée) à 1440"), "{bad}");
+        }
+    }
+
+    #[test]
     fn settings_update_changes_only_audio_and_threshold() {
         let path = std::env::temp_dir().join(format!("bobby-settings-test-{}.toml", std::process::id()));
         std::fs::write(&path, "port = 4111\n[run]\naudio = 'rust'\n[[parts]]\nname = 'x'\ncmd = 'tools/x.exe'\n").unwrap();
         let before = settings::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let out = update_settings(&path, &json!({ "beep_volume": 12, "voice_volume_pc": 80, "voice_volume_discord": 70, "wake_threshold": 0.25 })).unwrap();
-        assert_eq!(out, json!({ "beep_volume": 12, "voice_volume_pc": 80, "voice_volume_discord": 70, "wake_threshold": 0.25 }));
+        assert_eq!(out, json!({ "beep_volume": 12, "voice_volume_pc": 80, "voice_volume_discord": 70, "wake_threshold": 0.25, "auto_sleep_min": 30 }));
         let after = settings::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!((after.port, &after.parts, &after.run), (before.port, &before.parts, &before.run));
         assert_eq!((after.audio.beep_volume, after.audio.voice_volume_pc, after.audio.voice_volume_discord), (12, 80, 70));

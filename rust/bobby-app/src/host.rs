@@ -197,6 +197,7 @@ impl Host {
         let (io, brain_rx) = Io::new();
         let brain = Arc::new(Brain::new(store, HttpLlm::new(&cfg.models.llm), Arc::new(io), cfg.logs().join("conversations.jsonl")));
         tokio::spawn(bobby_core::actions::ask::check());
+        bobby_core::actions::reminders::spawn_ticker(brain.clone()); // due reminders and timers, and the catch-up after a restart
         tokio::task::spawn_blocking(|| bobby_core::actions::pc::set_apps(bobby_pc::apps::index().iter().map(|a| a.name.clone()).collect()));
 
         let bot: Shared<Arc<Bot>> = Default::default();

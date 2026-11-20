@@ -90,7 +90,7 @@ Exemples :
 static SYSTEM: LazyLock<String> = LazyLock::new(|| {
     let join = |f: fn(&crate::types::Module) -> &Vec<&'static str>| actions::modules().iter().flat_map(|m| f(m).iter().copied()).collect::<Vec<_>>().join("\n");
     // older examples have no "analyse": the JSON grammar adds it (writing it in each cost 1100 tokens)
-    [SYS_A, &join(|m| &m.prompt), SYS_B, &info::capabilities("fr"), SYS_C, &join(|m| &m.rules), SYS_D, &join(|m| &m.examples)].concat()
+    [SYS_A, &join(|m| &m.prompt), SYS_B, &info::capabilities_llm("fr"), SYS_C, &join(|m| &m.rules), SYS_D, &join(|m| &m.examples)].concat()
 });
 
 /// Fixed and first: llama-server caches this prefix, so only the tail is processed for each sentence.

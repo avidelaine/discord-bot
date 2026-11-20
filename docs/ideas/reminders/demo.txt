@@ -1,0 +1,15 @@
+Marie : Bobby, mets un minuteur de 2 minutes
+  Bobby : (to 42) Minuteur de 2 minutes lancé.
+Marie : Bobby, rappelle-moi dans 10 minutes de sortir le linge
+  Bobby : (to 42) C'est noté, je te le rappelle dans 10 minutes.
+Marie : Bobby, quels sont mes rappels
+  Bobby : (to 42) Tu as 2 rappels : minuteur à 19 h 59, sortir le linge à 20 h 07.
+Marie : Bobby, annule le minuteur
+  Bobby : (to 42) J'ai annulé ton minuteur.
+Marie : Bobby, quels sont mes rappels
+  Bobby : (to 42) Tu as 1 rappel : sortir le linge à 20 h 07.
+-- 10 minutes later --
+  Bobby : (to 42) Marie, rappel : sortir le linge.
+(1 reminder fired)
+Marie : Bobby, quels sont mes rappels
+  Bobby : (to 42) Tu n'as aucun rappel.

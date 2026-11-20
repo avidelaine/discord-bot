@@ -95,9 +95,15 @@ pub enum ClientMsg {
     /// Answer to `BrainMsg::Run { id }`. `data` is the plain-data result (see `Cap` docs).
     /// `error` starting with "50013" means Discord refused for missing permissions (said as such to the user).
     Result { id: u64, ok: bool, data: Value, error: Option<String> },
+    /// A slash command (`join`, `leave`, `surnoms`) typed by `user` in `text_channel`. The brain decides
+    /// (roles, nicknames are its data) and answers with `BrainMsg::Reply { id }`, then any `Run`.
+    Command { id: u64, name: String, user: String, text_channel: String },
     /// Bobby's voice started (`user`: the person the reply is for, see `Say::to_user`) or ended (`None`).
     /// The brain needs it to let that person interrupt with a plain "stop".
     Speaking { user: Option<String> },
+    /// A direct message someone wrote to Bobby. `reply_to`: the id of Bobby's message it answers (Discord "reply"),
+    /// which is how the messenger tells an answer from an unrelated DM.
+    Dm { user: String, text: String, reply_to: Option<String> },
 }
 
 // ---------- Brain -> client ----------
@@ -131,6 +137,10 @@ pub enum BrainMsg {
     Run { id: u64, cap: Cap },
     /// Listen to `user` without a wake word for `ms` milliseconds. `ms: 0` closes the window.
     Expect { user: String, ms: u32 },
+    /// Answer to `ClientMsg::Command { id }`. `ephemeral`: only the person who typed it sees it.
+    Reply { id: u64, text: Option<String>, embeds: Vec<Embed>, ephemeral: bool },
+    /// "Deep sleep": the app unloads Whisper and stops the LLM until the next wake word.
+    DeepSleep,
 }
 
 // ---------- Capabilities ----------
@@ -229,6 +239,9 @@ pub enum Cap {
     /// Delete all Bobby's own messages of the channel.
     Clean { channel: Option<String> },
     MemberName { id: String },
+    /// Direct message to one member (the messenger when they are not in voice). Their written answers come back
+    /// as `ClientMsg::Dm`. Answers `{"message_id": "<id>"}`, the id a reply will carry in `reply_to`.
+    Dm { user: String, text: String },
     // Music (Bobby's own player, Discord only)
     /// `add: false` plays now, `add: true` queues (starts if nothing plays).
     MusicPlay { item: MusicItem, add: bool },
@@ -263,7 +276,7 @@ impl Cap {
         use Cap::*;
         match self {
             Mute { .. } | Deafen { .. } | Move { .. } | Disconnect { .. } | Join { .. } | Leave => CapKind::DiscordVoice,
-            Post { .. } | Ping { .. } | EditLast { .. } | DeleteLast { .. } | Clean { .. } | MemberName { .. } => CapKind::DiscordText,
+            Post { .. } | Ping { .. } | EditLast { .. } | DeleteLast { .. } | Clean { .. } | MemberName { .. } | Dm { .. } => CapKind::DiscordText,
             MusicPlay { .. } | MusicStop | MusicSkip | MusicReplay | MusicPause | MusicResume | MusicVolume { .. } | MusicNow | MusicQueue => CapKind::Music,
             PcMedia { .. } | PcNow => CapKind::PcMedia,
             PcVolume { .. } => CapKind::PcVolume,
@@ -374,6 +387,7 @@ mod tests {
             ClientMsg::Heard { utterance: 5, user: s("1"), text: s("coupe le micro"), lang: s("fr"), score: Some(0.75), stt_ms: 120, expected: false },
             ClientMsg::Result { id: 7, ok: true, data: json!({"prev": {"1": false}}), error: None },
             ClientMsg::Result { id: 8, ok: false, data: Value::Null, error: Some(s("no player")) },
+            ClientMsg::Command { id: 9, name: s("join"), user: s("1"), text_channel: s("3") },
             ClientMsg::Speaking { user: Some(s("1")) },
         ];
         for m in &client {
@@ -387,6 +401,7 @@ mod tests {
             BrainMsg::Say { text: s("Salut"), lang: s("fr"), voice: Voice::Claude, to_user: Some(s("1")) },
             BrainMsg::Hush,
             BrainMsg::Expect { user: s("1"), ms: 8000 },
+            BrainMsg::Reply { id: 9, text: Some(s("À plus.")), embeds: vec![], ephemeral: true },
         ];
         for m in &brain {
             round_trip(m);

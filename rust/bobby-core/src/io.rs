@@ -21,13 +21,35 @@ pub struct Io {
     tx: mpsc::UnboundedSender<BrainMsg>,
     waiting: Mutex<HashMap<u64, oneshot::Sender<Reply>>>,
     next: AtomicU64,
+    /// Requests being handled (`Brain::hear` holds a `Flight` for its whole run).
+    inflight: std::sync::atomic::AtomicUsize,
+}
+
+/// Counts one request in flight until dropped.
+pub struct Flight<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl Drop for Flight<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl Io {
     /// The brain side and the receiver the client (or a test) reads.
     pub fn new() -> (Io, mpsc::UnboundedReceiver<BrainMsg>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (Io { tx, waiting: Mutex::new(HashMap::new()), next: AtomicU64::new(1) }, rx)
+        (Io { tx, waiting: Mutex::new(HashMap::new()), next: AtomicU64::new(1), inflight: Default::default() }, rx)
+    }
+
+    /// Marks one request as in flight for as long as the guard lives.
+    pub fn enter(&self) -> Flight<'_> {
+        self.inflight.fetch_add(1, Ordering::SeqCst);
+        Flight(&self.inflight)
+    }
+
+    /// How many requests are in flight right now.
+    pub fn in_flight(&self) -> usize {
+        self.inflight.load(Ordering::SeqCst)
     }
 
     pub fn send(&self, m: BrainMsg) {

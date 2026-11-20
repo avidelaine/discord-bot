@@ -13,6 +13,8 @@ const norm = (t = '') => t.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase(
 const song = (e) => e.duration >= 60 && e.duration <= 600; // a song: not a 2 h mix, a live set or a podcast
 // "Judas (Hardstyle)" and "JUDAS (HARDSTYLE)" are the same song for the "already played" check
 const key = (title) => norm(title).replace(/\(.*?\)|\[.*?\]|official|video|clip|lyrics?|audio|hd|4k/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+// Seconds played if a non-live track ended more than 5 s before its known duration, else null (bytes: s16le 48 kHz stereo).
+const endedEarly = (bytes, duration, live) => { const t = bytes / 192000; return !live && duration > 0 && t + 5 < duration ? t : null; };
 const label = (it) => it.title || (it.kind === 'radio' ? `${it.style} radio` : it.query);
 
 class Player extends EventEmitter {
@@ -60,7 +62,7 @@ class Player extends EventEmitter {
 
   _start(item, cross = false) {
     this.current = item;
-    this.mixer.setMusic(decode(item.url, { live: item.live }), (bytes) => this._ended(item, bytes), cross);
+    this.mixer.setMusic(decode(item.url, { headers: item.headers }), (bytes) => this._ended(item, bytes), cross);
     if (this.auto && item.kind === 'youtube') {
       this.auto.played.add(item.id).add(key(item.title));
       this.auto.last = item.id;
@@ -73,6 +75,8 @@ class Player extends EventEmitter {
 
   _ended(item, bytes) {
     if (this.current !== item) return;
+    const early = endedEarly(bytes, item.duration, item.live);
+    if (early !== null) console.error(`[music] track ended early: ${item.title} at ${Math.round(early)}s of ${Math.round(item.duration)}s`);
     // a radio stream that died before any sound: try the next station of the list
     if (item.alts?.length && !bytes) {
       const [next, ...alts] = item.alts;
@@ -170,4 +174,4 @@ class Player extends EventEmitter {
   volumeDown(step = 10) { return this.setVolume(this.vol - step); }
 }
 
-module.exports = { Player };
+module.exports = { Player, endedEarly };

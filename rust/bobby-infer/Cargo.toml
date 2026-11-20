@@ -9,4 +9,38 @@ bobby-proto = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
+# Wake word, VAD, Piper (ONNX models; onnxruntime.dll loaded at run time).
+ort = { workspace = true, optional = true }
 hound = "3.5"
+chrono = { workspace = true, optional = true }
+# In-process speech-to-text (CTranslate2, the engine under faster-whisper). Off by default: needs CMake + CUDA toolkit.
+ct2rs = { version = "=0.11.2", optional = true, default-features = false, features = ["whisper", "cuda", "cuda-dynamic-loading", "ruy"] }
+ct2rs-sys = { version = "=0.11.2", optional = true, default-features = false, features = ["cuda", "cuda-dynamic-loading", "ruy"] }
+rustfft = { version = "6", optional = true }
+# Piper: Unicode NFD of phonemes (as Python unicodedata), espeak-ng built by build.rs.
+unicode-normalization = { version = "0.1", optional = true }
+
+[build-dependencies]
+cmake = { version = "0.1", optional = true }
+
+[features]
+onnx = ["dep:ort", "dep:chrono"]
+ct2 = ["onnx", "dep:ct2rs", "dep:ct2rs-sys", "dep:rustfft"]
+piper = ["onnx", "dep:unicode-normalization", "dep:cmake"]
+
+[dev-dependencies]
+anyhow = "1"
+
+
+[[example]]
+name = "tts_compare"
+required-features = ["piper"]
+
+[[example]]
+name = "gate_compare"
+required-features = ["onnx"]
+
+[[example]]
+name = "stt_compare"
+required-features = ["ct2"]
+

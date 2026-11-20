@@ -8,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use bobby_audio::{collect::collect, gate::Gate, mic, out, out::Speaker, wake::Wake};
-use bobby_infer::{HttpStt, HttpTts};
+use bobby_infer::{HttpStt, HttpTts, Stt, SttSlot, Tts};
 use bobby_proto::infer::{Speak, Transcribe};
 use bobby_proto::msg::{MediaCmd, VolumeOp};
 use bobby_proto::settings::Config;
@@ -18,12 +18,35 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+/// Same command words as bot/brain.js COMMAND_WORDS and voice/server.py LOCAL_HOTWORDS.
+const LOCAL_HOTWORDS: &str = "Bobby Discord le son volume musique hardstyle";
+
+/// The startup load of Whisper: skipped (false) when a deep sleep unloaded it already; the wake-up loads it then.
+fn startup_load(unloaded: &AtomicBool, load: impl FnOnce()) -> bool {
+    let go = !unloaded.load(Ordering::SeqCst);
+    if go {
+        load();
+    }
+    go
+}
+
+/// The Rust brain's ear on the PC: (text, lang, wake score, whisper ms) -> whether Bobby now waits for the next
+/// sentence without "Bobby". Unset: sentences go to the Node bot (`BOT_URL/local`).
+pub type Hook = Arc<dyn Fn(String, String, Option<f32>, u32) -> bool + Send + Sync>;
+
 pub struct Bridge {
     cfg: Config,
     sup: Arc<Supervisor>,
     speaker: Speaker,
-    tts: HttpTts,
-    stt: HttpStt,
+    tts: Arc<OnceLock<Tts>>,
+    stt: Arc<SttSlot>,
+    /// Builds Whisper again after a deep sleep.
+    load_stt: Arc<dyn Fn() -> Stt + Send + Sync>,
+    /// Set by a deep sleep: only then does `reload_stt` load (the startup load may still be running).
+    unloaded: Arc<AtomicBool>,
+    /// Orders the startup load, deep-sleep unload/reload and the LLM hold (the host takes it for a whole step).
+    gate: Arc<Mutex<()>>,
+    hook: Mutex<Option<Hook>>,
     http: reqwest::Client,
     enabled: AtomicBool,
     /// True while a listener thread exists. On/off decisions and the thread's exit check happen under this lock.
@@ -36,12 +59,52 @@ pub struct Bridge {
 
 impl Bridge {
     pub fn new(cfg: &Config, sup: Arc<Supervisor>) -> Arc<Self> {
+        // Engines load once ("local" = in-process Whisper/Piper, slow: off the main thread); on failure the app still starts on the HTTP engine.
+        const FALLBACK: &str = "http://127.0.0.1:3000";
+        let models = cfg.models_dir();
+        let (stt, tts) = (Arc::new(SttSlot::empty()), Arc::new(OnceLock::new()));
+        let (addr, cell, s2) = (cfg.models.stt.clone(), stt.clone(), sup.clone());
+        let m2 = models.clone();
+        let load = move || {
+            Stt::from_addr(&addr, &m2).unwrap_or_else(|e| {
+                s2.log("audio", &format!("[stt] {addr} failed to load, falling back to {FALLBACK}: {e}"));
+                Stt::Http(HttpStt::new(FALLBACK))
+            })
+        };
+        let load: Arc<dyn Fn() -> Stt + Send + Sync> = Arc::new(load);
+        let load_stt = load.clone();
+        let (gate, unloaded) = (Arc::new(Mutex::new(())), Arc::new(AtomicBool::new(false)));
+        if bobby_infer::is_local(&cfg.models.stt) {
+            let (gate, unloaded) = (gate.clone(), unloaded.clone());
+            std::thread::spawn(move || {
+                let _g = gate.lock().unwrap_or_else(|e| e.into_inner());
+                startup_load(&unloaded, || cell.load(Arc::new(load())));
+            });
+        } else {
+            cell.load(Arc::new(load()));
+        }
+        let (addr, cell, s2) = (cfg.models.tts.clone(), tts.clone(), sup.clone());
+        let load = move || {
+            Tts::from_addr(&addr, &models).unwrap_or_else(|e| {
+                s2.log("audio", &format!("[tts] {addr} failed to load, falling back to {FALLBACK}: {e}"));
+                Tts::Http(HttpTts::new(FALLBACK))
+            })
+        };
+        if bobby_infer::is_local(&cfg.models.tts) {
+            std::thread::spawn(move || { let _ = cell.set(load()); });
+        } else {
+            let _ = cell.set(load());
+        }
         Arc::new(Self {
             cfg: cfg.clone(),
             sup,
             speaker: Speaker::new(),
-            tts: HttpTts::new(&cfg.models.tts),
-            stt: HttpStt::new(&cfg.models.stt),
+            tts,
+            stt,
+            load_stt,
+            unloaded,
+            gate,
+            hook: Mutex::new(None),
             http: reqwest::Client::new(),
             enabled: AtomicBool::new(false),
             running: Mutex::new(false),
@@ -50,12 +113,89 @@ impl Bridge {
         })
     }
 
+    /// The TTS slot, shared with the settings page's voice test (empty while a local engine loads).
+    pub fn tts_slot(&self) -> Arc<OnceLock<Tts>> {
+        self.tts.clone()
+    }
+
+    /// Whisper, once loaded: shared with the Rust Discord client so it sits in VRAM once.
+    pub fn stt_slot(&self) -> Arc<SttSlot> {
+        self.stt.clone()
+    }
+
+    /// The service gate: hold it while unloading or reloading Whisper and holding or releasing the LLM.
+    pub fn gate(&self) -> &Mutex<()> {
+        &self.gate
+    }
+
+    /// Deep sleep: frees Whisper's VRAM (the in-process engine only; a remote one is not ours to unload).
+    pub fn unload_stt(&self) {
+        if bobby_infer::is_local(&self.cfg.models.stt) {
+            self.unloaded.store(true, Ordering::SeqCst);
+            self.stt.unload();
+        }
+    }
+
+    /// Loads Whisper again if a deep sleep unloaded it (slow: call off the async threads).
+    pub fn reload_stt(&self) {
+        if self.unloaded.swap(false, Ordering::SeqCst) {
+            self.stt.load(Arc::new((self.load_stt)()));
+        }
+    }
+
+    pub fn set_hook(&self, hook: Option<Hook>) {
+        *self.hook.lock().unwrap_or_else(|e| e.into_inner()) = hook;
+    }
+
+    /// The next PC sentence needs no "Bobby" for `ms` (`BrainMsg::Expect`; 0 closes the window).
+    pub fn expect(&self, ms: u32) {
+        *self.force_until.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now() + Duration::from_millis(ms as u64);
+    }
+
+    /// Speaks on the PC speakers and returns once spoken (or hushed). Err: (HTTP code for `/speak`, reason).
+    pub async fn say(self: &Arc<Self>, text: &str, lang: &str, voice: &str) -> Result<(), (StatusCode, String)> {
+        let Some(tts) = self.tts.get() else {
+            self.log("[tts] speech engine still loading, nothing said");
+            return Err((StatusCode::SERVICE_UNAVAILABLE, "speech engine still loading".into()));
+        };
+        match tokio::time::timeout(Duration::from_secs(30), tts.speak(text, lang, voice)).await {
+            Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "tts timed out".into())),
+            Ok(Err(e)) => Err((StatusCode::BAD_GATEWAY, e.to_string())),
+            Ok(Ok(wav)) => {
+                let vol = bobby_proto::settings::load().audio.voice_volume_pc; // read at each use: applies live
+                let me = self.clone();
+                let _ = tokio::task::spawn_blocking(move || me.speaker.play(&out::scale_wav(&bobby_infer::loudness::normalize(&wav.0), vol))).await;
+                Ok(())
+            }
+        }
+    }
+
+    /// "yes" (heard) or "nope" beep on the PC speakers; returns once played.
+    pub async fn beep(self: &Arc<Self>, kind: &str) {
+        // 100 % = the normalized voice level: build the beep at full amplitude, normalize it, then scale by beep_volume.
+        let wav = out::scale_wav(&bobby_infer::loudness::normalize(&out::beep(kind, 100)), bobby_proto::settings::load().audio.beep_volume);
+        let me = self.clone();
+        let _ = tokio::task::spawn_blocking(move || me.speaker.play(&wav)).await;
+    }
+
+    /// The wake acknowledgement on the PC speakers: the recorded WAV, or the "yes" beep when there is none.
+    pub async fn wake_ack(self: &Arc<Self>, wav: Option<Vec<u8>>) {
+        let Some(wav) = wav else { return self.beep("yes").await };
+        let wav = out::scale_wav(&bobby_infer::loudness::normalize(&wav), bobby_proto::settings::load().audio.beep_volume);
+        let me = self.clone();
+        let _ = tokio::task::spawn_blocking(move || me.speaker.play(&wav)).await;
+    }
+
+    pub fn hush(&self) {
+        self.speaker.hush();
+    }
+
     fn log(&self, line: &str) {
         self.sup.log("audio", line);
     }
 
     /// `/local/on|off`. One dedicated thread owns the microphone (a `Mic` is not Send) and drops it when switched off.
-    fn set_local(self: &Arc<Self>, on: bool) {
+    pub fn set_local(self: &Arc<Self>, on: bool) {
         let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         if on != self.enabled.swap(on, Ordering::SeqCst) {
             self.log(if on { "[local] on: Bobby listens on the PC" } else { "[local] off: Bobby is on Discord" });
@@ -134,9 +274,13 @@ impl Bridge {
                     return; // not for Bobby: never transcribed
                 }
                 score = Some(s);
+                bobby_infer::wake_heard(None);
             }
         }
-        let tr = match tauri::async_runtime::block_on(tokio::time::timeout(Duration::from_secs(60), self.stt.transcribe(&audio, ""))) {
+        let Some(stt) = self.stt.get() else {
+            return self.log("[local] speech engine still loading, sentence dropped");
+        };
+        let tr = match tauri::async_runtime::block_on(tokio::time::timeout(Duration::from_secs(60), stt.transcribe(&audio, LOCAL_HOTWORDS))) {
             Ok(Ok(tr)) => tr,
             Ok(Err(e)) => return self.log(&format!("[local] transcription failed: {e}")),
             Err(_) => return self.log("[local] transcription timed out after 60 s, sentence dropped"),
@@ -146,6 +290,11 @@ impl Bridge {
         self.log(&format!("[local] {ms} ms  {:.1} s  {}  {:?}", audio.len() as f64 / 16000.0, tr.lang, tr.text));
         if tr.text.is_empty() {
             return;
+        }
+        let hook = self.hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(hear) = hook {
+            let expect = hear(tr.text, tr.lang, score, ms as u32);
+            return self.expect(if expect { 8000 } else { 0 });
         }
         let body = json!({"text": tr.text, "lang": tr.lang, "score": score.map(|s| (s as f64 * 1000.0).round() / 1000.0), "ms": ms});
         let bot = std::env::var("BOT_URL").unwrap_or_else(|_| "http://127.0.0.1:3001".into());
@@ -192,23 +341,15 @@ async fn speak_h(State(b): S, Query(q): Q, h: HeaderMap) -> Response {
     if text.is_empty() {
         return reply(StatusCode::BAD_REQUEST, json!({ "detail": "text is required" }));
     }
-    let spoken = tokio::time::timeout(Duration::from_secs(30), b.tts.speak(&text, &get("lang", "fr"), &get("voice", "bobby"))).await;
-    match spoken {
-        Err(_) => reply(StatusCode::GATEWAY_TIMEOUT, json!({ "error": "tts timed out" })),
-        Ok(Ok(wav)) => {
-            let vol = bobby_proto::settings::load().audio.voice_volume_pc; // read at each use: applies live
-            let _ = tokio::task::spawn_blocking(move || b.speaker.play(&out::scale_wav(&bobby_infer::loudness::normalize(&wav.0), vol))).await; // returns once spoken
-            reply(StatusCode::OK, json!({ "ok": true }))
-        }
-        Ok(Err(e)) => reply(StatusCode::BAD_GATEWAY, json!({ "error": e.to_string() })),
+    match b.say(&text, &get("lang", "fr"), &get("voice", "bobby")).await {
+        Ok(()) => reply(StatusCode::OK, json!({ "ok": true })),
+        Err((code, e)) => reply(code, json!({ "error": e })),
     }
 }
 
 async fn beep_h(State(b): S, Query(q): Q, h: HeaderMap) -> Response {
     if let Some(r) = forbidden(&h) { return r; }
-    // 100 % = the normalized voice level: build the beep at full amplitude, normalize it, then scale by beep_volume.
-    let wav = out::scale_wav(&bobby_infer::loudness::normalize(&out::beep(q.get("kind").map_or("yes", String::as_str), 100)), bobby_proto::settings::load().audio.beep_volume);
-    let _ = tokio::task::spawn_blocking(move || b.speaker.play(&wav)).await;
+    b.beep(q.get("kind").map_or("yes", String::as_str)).await;
     reply(StatusCode::OK, json!({ "ok": true }))
 }
 
@@ -285,6 +426,15 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
+
+    #[test]
+    fn startup_load_is_skipped_once_a_deep_sleep_unloaded_whisper() {
+        let (unloaded, n) = (AtomicBool::new(false), std::cell::Cell::new(0));
+        assert!(startup_load(&unloaded, || n.set(n.get() + 1)));
+        unloaded.store(true, Ordering::SeqCst);
+        assert!(!startup_load(&unloaded, || n.set(n.get() + 1)));
+        assert_eq!(n.get(), 1);
+    }
 
     fn app() -> Router {
         let cfg = Config { root: std::env::temp_dir().join("bobby-bridge-test"), ..Default::default() };

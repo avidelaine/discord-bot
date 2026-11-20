@@ -5,6 +5,7 @@ use crate::actions::{self, ask, Env, Post, UndoOp};
 use crate::guard::{decide, guard, note_guard, note_text, understand};
 use crate::io::Io;
 use crate::journal::{self, num_f32, Journal, Memory};
+use crate::messenger::{self, Messenger, Started};
 use crate::prompt::{prompt, system, unsure};
 use crate::resolve::{needed, needs_confirm, names, plan_text, resolve};
 use crate::roles;
@@ -15,7 +16,7 @@ use crate::util::{hit, re_i, replace1, replace_all, BrainError, Hist, Res};
 use crate::wake::find_wake;
 use crate::writing::{writing, Written, RIGHTS_Q};
 use bobby_proto::infer::Understand;
-use bobby_proto::msg::{ClientMsg, Context, Embed, SignalKind, Voice};
+use bobby_proto::msg::{BrainMsg, Cap, ClientMsg, Context, Embed, SignalKind, Voice};
 use chrono::Local;
 use fancy_regex::Regex;
 use serde_json::{json, Map, Value};
@@ -183,6 +184,7 @@ pub struct Brain<L> {
     pub llm: L,
     pub io: Arc<Io>,
     pub journal: Journal,
+    pub messenger: Messenger,
     state: Mutex<State>,
 }
 
@@ -205,7 +207,7 @@ impl<L: Understand + Sync> Brain<L> {
         println!("[brain] {n} past exchange(s) reloaded from the journal");
         // `claude.check()` is the host's job at startup (bot.js ClientReady): `tokio::spawn(actions::ask::check())`.
         // Not here, so tests and the replay never start the real Claude CLI.
-        Brain { store, llm, io, journal, state: Mutex::new(State { memory, ..Default::default() }) }
+        Brain { store, llm, io, journal, messenger: Messenger::default(), state: Mutex::new(State { memory, ..Default::default() }) }
     }
 
     fn st(&self) -> MutexGuard<'_, State> {
@@ -219,8 +221,19 @@ impl<L: Understand + Sync> Brain<L> {
                 self.io.deliver(*id, *ok, data.clone(), error.clone());
             }
             ClientMsg::Speaking { user } => self.st().speaking.clone_from(user),
+            ClientMsg::Dm { user, text, reply_to } => {
+                self.messenger.deliver_dm(user, text, reply_to.as_deref());
+            }
+            ClientMsg::Context(c) => self.messenger.set_context(c),
             _ => {}
         }
+    }
+
+    /// True while Bobby is in the middle of something: a `hear` is running or a confirmation window is open.
+    /// Deep sleep waits for it to be false.
+    /// The messenger counts too: a flow or a waiter alive means a message is being carried.
+    pub fn busy(&self) -> bool {
+        self.io.in_flight() > 0 || self.messenger.busy() || self.st().pending.values().any(|p| p.until_ms > now_ms())
     }
 
     /// True while Bobby waits for this person's next sentence, which then needs no "Bobby".
@@ -407,6 +420,48 @@ impl<L: Understand + Sync> Brain<L> {
         println!("[written] \"{}\" -> {}", w.query, w.channel.as_ref().map_or("default text channel", |c| c.name.as_str()));
     }
 
+    /// A slash command typed in Discord (`bot.js` `onCommand`): `/join` (Prime) joins the typer's voice channel, `/leave`
+    /// (admin) leaves, `/surnoms` (super) lists the nicknames. Answers with `Reply { id }` first (Discord's 3 s deadline),
+    /// then runs the cap. `c` is the server with `c.speaker` = the typer.
+    pub async fn command(&self, id: u64, name: &str, c: &Context) {
+        let reply = |text: String, embeds: Vec<Embed>, ephemeral: bool| self.io.send(BrainMsg::Reply { id, text: Some(text).filter(|t| !t.is_empty()), embeds, ephemeral });
+        let me = c.members.iter().find(|m| m.id == c.speaker);
+        let role = roles::role_of(&c.speaker, me.map_or(&[][..], |m| &m.roles), &self.store);
+        let need = match name {
+            "join" => Role::Prime,
+            "leave" => Role::Admin,
+            _ => Role::Super,
+        };
+        if !roles::allowed(role, need) {
+            return reply("Tu n'as pas le droit d'utiliser cette commande.".into(), vec![], true);
+        }
+        let cap = match name {
+            "leave" => {
+                reply("À plus.".into(), vec![], false);
+                Cap::Leave
+            }
+            "surnoms" => {
+                let ctx = self.ctx_for(c, role, vec![]);
+                let env = Env { io: &self.io, store: &self.store, ctx: &ctx, llm: &self.llm, post_to: None };
+                return match actions::aliases::list_card(&env).await {
+                    Ok(Some(card)) => reply(String::new(), vec![card], false),
+                    _ => reply("Personne n'a de surnom.".into(), vec![], false),
+                };
+            }
+            _ => {
+                let Some(ch) = me.and_then(|m| m.channel.clone()) else {
+                    return reply("Rejoins un salon vocal d'abord.".into(), vec![], true);
+                };
+                let label = c.voice_channels.iter().find(|v| v.id == ch).map_or(ch.as_str(), |v| v.name.as_str());
+                reply(format!("Bobby écoute dans {label}. Dis « Bobby, … »."), vec![], false);
+                Cap::Join { channel: ch }
+            }
+        };
+        if let Err(e) = self.io.run(cap).await {
+            println!("[command] /{name} failed: {e}");
+        }
+    }
+
     fn ctx_for(&self, c: &Context, role: Role, history: Vec<Hist>) -> Ctx {
         let trouble = self.st().memory.trouble(now_ms());
         Ctx { role, history, trouble, ..crate::context::build(c, &self.store) }
@@ -415,8 +470,20 @@ impl<L: Understand + Sync> Brain<L> {
     /// The transcript must still contain "Bobby" (the wake word model upstream is a cheap, lenient filter), so a false
     /// trigger ("beau bilan") costs one transcription and never an action.
     pub async fn hear(&self, h: Heard, c: &Context) {
+        let _flight = self.io.enter();
         let started = Instant::now();
         let now = now_ms();
+        // A messenger waits for this person's answer: it needs no "Bobby" and goes to the flow, not to the brain.
+        if self.messenger.deliver_voice(&h.user, &h.text) {
+            let mut rec = Map::new();
+            rec.insert("at".into(), json!(journal::iso_now_ms(now_ms())));
+            rec.insert("who".into(), json!(h.user_name));
+            rec.insert("id".into(), json!(h.user));
+            rec.insert("heard".into(), json!(h.text));
+            rec.insert("outcome".into(), json!("messenger_reply"));
+            self.journal.append(&rec);
+            return println!("[messenger] {} answered", h.user_name);
+        }
         let lang = if h.lang.is_empty() { "fr".to_string() } else { h.lang.clone() };
         let h = Heard { lang, ..h };
         let (mut p, talking) = {
@@ -593,6 +660,18 @@ impl<L: Understand + Sync> Brain<L> {
         }
         let ctx = self.ctx_for(c, role, history.clone());
         self.st().memory.start(key, &h.user_name, &query, now_ms());
+        // "va dire à Marie que…": Bobby carries the message (admin only: others take the normal path), the flow speaks for itself.
+        if let Some((who, msg)) = messenger::parse(&query).filter(|_| roles::allowed(role, Role::Admin)) {
+            set(r, "intent", json!({ "via": "shortcut", "actions": [{ "type": "messenger", "who": who }] }));
+            match self.messenger.start(&self.io, &self.store, c, user, &who, &msg) {
+                Started::Refused(line) => {
+                    set(r, "outcome", json!("resolve_error"));
+                    self.say(r, &line, None);
+                }
+                Started::Launched => set(r, "outcome", json!("messenger")),
+            }
+            return Ok(());
+        }
         // "dis-moi par écrit…": the request without its writing words; the answer is posted, Bobby only says where.
         let mut w: Option<Written> = None;
         if let Some(asked) = writing(&query, &ctx, &mine_of(&history, user)) {
@@ -849,6 +928,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slash_commands_follow_bot_js_rights() {
+        let r = rig(vec![], ok);
+        let as_ = |who: &str| Context { speaker: who.into(), ..context() };
+        r.brain.command(1, "join", &as_("u9")).await; // no Prime role
+        r.brain.command(2, "join", &as_(ADMIN)).await;
+        r.brain.command(3, "surnoms", &as_(ADMIN)).await;
+        r.brain.command(4, "leave", &as_("kev")).await; // not an admin
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let reply = |id: u64, text: &str, ephemeral: bool| BrainMsg::Reply { id, text: Some(text.into()), embeds: vec![], ephemeral };
+        assert_eq!(
+            r.msgs(),
+            [
+                reply(1, "Tu n'as pas le droit d'utiliser cette commande.", true),
+                reply(2, "Bobby écoute dans Général. Dis « Bobby, … ».", false),
+                BrainMsg::Run { id: 1, cap: Cap::Join { channel: "Général".into() } },
+                reply(3, "Personne n'a de surnom.", false),
+                reply(4, "Tu n'as pas le droit d'utiliser cette commande.", true),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn ignored_sentence_is_journaled() {
         let r = rig(vec![], ok);
         r.hear("on se retrouve à huit heures", ADMIN).await;
@@ -1025,5 +1126,44 @@ mod tests {
         assert_eq!(r.said(), ["Je n'ai pas le droit de te répondre."]);
         assert_eq!(r.signals(), [SignalKind::Nope, SignalKind::Nope]);
         assert_eq!(keys(&r.last()), ["at", "who", "id", "lang", "wakeScore", "heard", "role", "outcome"]);
+    }
+
+    #[tokio::test]
+    async fn deep_sleep_shortcut_is_admin_only() {
+        let r = rig(vec![], ok);
+        r.hear("Bobby, dors", ADMIN).await;
+        assert!(r.msgs().contains(&BrainMsg::DeepSleep), "{:?} {:?}", r.msgs(), r.last());
+        assert!(caps(&r.sent).contains(&Cap::MusicStop));
+        assert!(r.said().iter().any(|t| t == "Bonne nuit."));
+        let r = rig(vec![], ok);
+        r.hear("Bobby, dors", "kev").await;
+        assert!(!r.msgs().contains(&BrainMsg::DeepSleep));
+    }
+
+    #[tokio::test]
+    async fn busy_while_a_request_runs_or_a_window_is_open() {
+        let r = rig(vec![], ok);
+        assert!(!r.brain.busy());
+        {
+            let _flight = r.brain.io.enter();
+            assert!(r.brain.busy());
+        }
+        assert!(!r.brain.busy(), "the guard releases the count");
+        r.hear("Bobby", ADMIN).await; // "Bobby ?" alone opens a window
+        assert!(r.brain.busy());
+        r.hear("mute Kévin", ADMIN).await; // answering closes it
+        assert!(!r.brain.busy());
+    }
+
+    #[tokio::test]
+    async fn deep_sleep_is_refused_while_another_request_is_in_flight() {
+        let r = rig(vec![], ok);
+        let _other = r.brain.io.enter(); // another request, not this `hear`
+        r.hear("Bobby, dors", ADMIN).await;
+        assert!(!r.msgs().contains(&BrainMsg::DeepSleep));
+        assert!(r.said().iter().any(|t| t == crate::actions::music::BUSY), "{:?}", r.said());
+        drop(_other);
+        r.hear("Bobby, dors", ADMIN).await;
+        assert!(r.msgs().contains(&BrainMsg::DeepSleep));
     }
 }

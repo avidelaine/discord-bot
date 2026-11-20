@@ -38,9 +38,10 @@ pub fn build(c: &Context, store: &Store) -> Ctx {
     Ctx { speaker, members, voice_channels, text_channels, text_channel, ..Default::default() }
 }
 
-/// Words Whisper should favour: Bobby, names, nicknames, voice channels (400 chars at most).
+/// Words Whisper should favour: Bobby, command words, names, nicknames, voice channels (400 chars at most).
 pub fn hotwords(ctx: &Ctx) -> String {
-    let all: Vec<&str> = std::iter::once("Bobby")
+    let all: Vec<&str> = ["Bobby", "Discord", "le son", "volume", "musique", "hardstyle"] // command words stay ahead of the 400-char cut
+        .into_iter()
         .chain(ctx.members.iter().flat_map(|m| std::iter::once(m.name.as_str()).chain(m.nicknames.iter().map(String::as_str))))
         .chain(ctx.voice_channels.iter().map(|c| c.name.as_str()))
         .collect();
@@ -74,6 +75,6 @@ mod tests {
         assert_eq!((ctx.speaker.id.as_str(), ctx.speaker.name.as_str(), ctx.speaker.channel.clone()), ("9", "Marie", None));
         assert_eq!(ctx.speaker.roles, vec!["Team Prime".to_string()]); // final review: a speaker out of voice keeps their roles
         assert_eq!(ctx.text_channel.unwrap().name, "bobby");
-        assert_eq!(hotwords(&crate::testing::ctx()), "Bobby Alex Zyklon le Grec Kévin Marie Lucas Prime Ilias Sorciax Vinice Lapute WakandeX Général Gaming AFK Réunion");
+        assert_eq!(hotwords(&crate::testing::ctx()), "Bobby Discord le son volume musique hardstyle Alex Zyklon le Grec Kévin Marie Lucas Prime Ilias Sorciax Vinice Lapute WakandeX Général Gaming AFK Réunion");
     }
 }

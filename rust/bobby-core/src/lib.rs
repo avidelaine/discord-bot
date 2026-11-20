@@ -7,6 +7,7 @@ pub mod format;
 pub mod guard;
 pub mod io;
 pub mod journal;
+pub mod messenger;
 pub mod prompt;
 pub mod resolve;
 pub mod roles;
@@ -23,3 +24,5 @@ pub mod testing;
 mod tests_batch2;
 #[cfg(test)]
 mod tests_batch34;
+#[cfg(test)]
+mod tests_r4;

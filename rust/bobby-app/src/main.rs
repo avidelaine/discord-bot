@@ -5,9 +5,11 @@
 mod bridge;
 mod config;
 mod gpu_procs;
+mod host;
 mod journal;
 mod metrics;
 mod server;
+mod sleep;
 mod supervisor;
 
 use std::sync::{Arc, Mutex};
@@ -83,11 +85,18 @@ fn main() {
             let db = Arc::new(Mutex::new(metrics::open(&logs.join("metrics.db"))?));
             tauri::async_runtime::spawn(metrics::run(sup.clone(), db.clone(), bus.clone()));
             tauri::async_runtime::spawn(journal::follow(logs.join("conversations.jsonl"), bus.clone()));
-            let state = server::AppState { sup: sup.clone(), db, bus: bus.clone(), logs: logs.clone() };
             let port = cfg.port;
             let listener = tauri::async_runtime::block_on(server::bind(port))
                 .map_err(|e| format!("port {port} is taken (is the Node app, Bobby.cmd, still running?): {e}"))?;
-            let bridge = bridge::routes(bridge::Bridge::new(&cfg, sup.clone()));
+            let bridge = bridge::Bridge::new(&cfg, sup.clone());
+            if cfg.rust_bobby() {
+                // one brain for Discord and the PC, started and stopped with Bobby (rollback: [run] brain/discord = "node")
+                let host = host::Host::new(&cfg, bridge.clone(), sup.clone());
+                sup.on_run(Box::new(move |on| if on { host.start() } else { host.stop() }));
+                sup.log("bobby", "Rust brain and Discord client: the bot part is not started");
+            }
+            let state = server::AppState { sup: sup.clone(), db, bus: bus.clone(), logs: logs.clone(), tts: bridge.tts_slot() };
+            let bridge = bridge::routes(bridge);
             tauri::async_runtime::spawn(async move {
                 let _ = axum::serve(listener, server::router(state, bridge)).await;
             });
@@ -101,9 +110,10 @@ fn main() {
                 MenuItem::with_id(app, "restart", "Redémarrer", true, None::<&str>)?,
                 CheckMenuItem::with_id(app, "autostart", "Lancer au démarrage de Windows", true, autostart, None::<&str>)?,
                 MenuItem::with_id(app, "quit", "Quitter", true, None::<&str>)?,
+                MenuItem::with_id(app, "sleep", "Deep Sleep / Réveiller", true, None::<&str>)?,
             );
             let sep = || PredefinedMenuItem::separator(app);
-            let menu = Menu::with_items(app, &[&items.0, &sep()?, &items.1, &items.2, &items.3, &sep()?, &items.4, &sep()?, &items.5])?;
+            let menu = Menu::with_items(app, &[&items.0, &sep()?, &items.1, &items.2, &items.3, &items.6, &sep()?, &items.4, &sep()?, &items.5])?;
             let auto_item = items.4.clone();
             let (icon, tip) = tray_look(&sup.status());
             let tray = TrayIconBuilder::with_id("bobby")
@@ -115,6 +125,12 @@ fn main() {
                     let sup = app.state::<Arc<Supervisor>>().inner().clone();
                     match ev.id.as_ref() {
                         "open" => open_window(app),
+                        "sleep" => {
+                            let what = if sup.status()["sleep"] == "awake" { "sleep" } else { "wake" };
+                            tauri::async_runtime::spawn_blocking(move || {
+                                let _ = sup.act(what);
+                            });
+                        }
                         what @ ("start" | "stop" | "restart") => {
                             let what = what.to_string();
                             // off the UI thread (stop waits for taskkill), inside the runtime (start spawns tasks)

@@ -263,6 +263,10 @@ def local_sentence(audio: np.ndarray, score):
         _local_sentence(audio, score)
 
 
+# Same command words as bot/brain.js COMMAND_WORDS: "quitte Discord" was heard "qui te discorde" on the PC.
+LOCAL_HOTWORDS = "Bobby Discord le son volume musique hardstyle"
+
+
 def _local_sentence(audio: np.ndarray, score):
     t = time.perf_counter()
     if score is not None:
@@ -270,7 +274,7 @@ def _local_sentence(audio: np.ndarray, score):
             print(f"[local] no Bobby (score {score:.3f}, {len(audio) / 16000:.1f} s)", flush=True)
             collect(audio, score, where="pc")
             return  # not for Bobby: never transcribed, like on Discord
-    text, lang = run_whisper(audio, None)
+    text, lang = run_whisper(audio, LOCAL_HOTWORDS)
     collect(audio, score, text, where="pc")
     ms = round((time.perf_counter() - t) * 1000)
     print(f"[local] {ms} ms  {len(audio) / 16000:.1f} s  {lang}  {text!r}", flush=True)

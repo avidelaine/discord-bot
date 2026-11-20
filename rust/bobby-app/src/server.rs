@@ -26,6 +26,7 @@ pub struct AppState {
     pub db: Db,
     pub bus: Bus,
     pub logs: PathBuf,
+    pub tts: Arc<std::sync::OnceLock<bobby_infer::Tts>>,
 }
 
 type Q = Query<HashMap<String, String>>;
@@ -49,7 +50,7 @@ async fn action(State(s): State<AppState>, UrlPath(what): UrlPath<String>, heade
     if !origin_ok(headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())) {
         return no_store(StatusCode::FORBIDDEN, json!({ "error": "forbidden origin" }));
     }
-    if !matches!(what.as_str(), "start" | "stop" | "restart") {
+    if !matches!(what.as_str(), "start" | "stop" | "restart" | "sleep" | "wake") {
         return no_store(StatusCode::NOT_FOUND, json!({ "error": "not found" }));
     }
     let sup = s.sup.clone();
@@ -166,14 +167,22 @@ async fn test_beep(headers: HeaderMap) -> Response {
 }
 
 /// Plays the reference sentence through the TTS, normalized, at the saved PC voice volume.
-async fn test_voice(headers: HeaderMap) -> Response {
+async fn test_voice(State(s): State<AppState>, headers: HeaderMap) -> Response {
     use bobby_proto::infer::Speak;
     if !origin_ok(headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())) {
         return no_store(StatusCode::FORBIDDEN, json!({ "error": "forbidden origin" }));
     }
     let cfg = tokio::task::spawn_blocking(settings::load).await.unwrap_or_default();
-    let tts = bobby_infer::HttpTts::new(&cfg.models.tts);
-    let wav = match tts.speak("Ceci est le niveau de référence de Bobby.", "fr", "bobby").await {
+    let http = bobby_infer::HttpTts::new(&cfg.models.tts);
+    let spoken = if bobby_infer::is_local(&cfg.models.tts) {
+        match s.tts.get() {
+            Some(t) => t.speak("Ceci est le niveau de référence de Bobby.", "fr", "bobby").await,
+            None => return no_store(StatusCode::SERVICE_UNAVAILABLE, json!({ "error": "speech engine still loading" })),
+        }
+    } else {
+        http.speak("Ceci est le niveau de référence de Bobby.", "fr", "bobby").await
+    };
+    let wav = match spoken {
         Ok(w) => w.0,
         Err(e) => return no_store(StatusCode::BAD_GATEWAY, json!({ "error": e.to_string() })),
     };

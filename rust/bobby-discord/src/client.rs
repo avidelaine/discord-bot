@@ -315,6 +315,17 @@ impl EventHandler for Handler {
         }
     }
 
+    /// Direct messages to Bobby (the messenger's written answers). Not privileged: a bot always gets the content of
+    /// its own DMs. Guild messages are not subscribed to, so this only ever sees DMs.
+    async fn message(&self, _: serenity::all::Context, msg: serenity::all::Message) {
+        if let (None, false, Some(bot)) = (msg.guild_id, msg.author.bot, self.0.get()) {
+            if !msg.content.trim().is_empty() {
+                let reply_to = msg.message_reference.as_ref().and_then(|r| r.message_id).map(|id| id.to_string());
+                bot.send(ClientMsg::Dm { user: msg.author.id.to_string(), text: msg.content.clone(), reply_to });
+            }
+        }
+    }
+
     async fn interaction_create(&self, _: serenity::all::Context, it: Interaction) {
         if let (Interaction::Command(cmd), Some(bot)) = (it, self.0.get()) {
             bot.on_command(cmd).await;
@@ -340,7 +351,7 @@ pub async fn run_until(
     let sb_config = songbird::Config::default().decode_mode(DecodeMode::Decode(DecodeConfig::new(Channels::Stereo, SampleRate::Hz48000)));
     let songbird = Songbird::serenity_from_config(sb_config);
     let slot = Arc::new(OnceLock::new());
-    let mut client = Client::builder(&cfg.token, GatewayIntents::GUILDS | GatewayIntents::GUILD_VOICE_STATES)
+    let mut client = Client::builder(&cfg.token, GatewayIntents::GUILDS | GatewayIntents::GUILD_VOICE_STATES | GatewayIntents::DIRECT_MESSAGES)
         .event_handler(Handler(slot.clone()))
         .register_songbird_with(songbird.clone())
         .await

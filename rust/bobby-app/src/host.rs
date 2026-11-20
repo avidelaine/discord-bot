@@ -124,7 +124,10 @@ impl<L: Understand + Send + Sync + 'static> Router<L> {
     pub async fn serve(self: Arc<Self>, mut rx: mpsc::UnboundedReceiver<ClientMsg>) {
         while let Some(m) = rx.recv().await {
             match m {
-                ClientMsg::Context(c) => *lock(&self.ctx) = c,
+                ClientMsg::Context(c) => {
+                    self.brain.on_client(&ClientMsg::Context(c.clone())); // the messenger reads people's channels from it
+                    *lock(&self.ctx) = c;
+                }
                 ClientMsg::Heard { user, text, lang, score, stt_ms, expected, .. } => {
                     let me = self.clone();
                     tokio::spawn(async move { me.hear(user, text, lang, score, stt_ms, expected).await });
@@ -133,7 +136,7 @@ impl<L: Understand + Send + Sync + 'static> Router<L> {
                     let (me, c) = (self.clone(), self.ctx_of(&user));
                     tokio::spawn(async move { me.brain.command(id, &name, &c).await });
                 }
-                ClientMsg::Result { .. } | ClientMsg::Speaking { .. } => self.brain.on_client(&m),
+                ClientMsg::Result { .. } | ClientMsg::Speaking { .. } | ClientMsg::Dm { .. } => self.brain.on_client(&m),
                 ClientMsg::Hello { .. } | ClientMsg::Wake { .. } | ClientMsg::Utterance { .. } => {}
             }
         }
@@ -249,6 +252,7 @@ impl Host {
         if tokio::time::timeout(Duration::from_secs(10), discord).await.is_err() {
             self.log("[discord] did not stop within 10 s");
         }
+        router.brain.messenger.clear(); // no messenger or waiter outlives the brain
         for t in tasks {
             t.abort();
         }

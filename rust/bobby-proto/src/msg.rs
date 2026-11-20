@@ -101,6 +101,9 @@ pub enum ClientMsg {
     /// Bobby's voice started (`user`: the person the reply is for, see `Say::to_user`) or ended (`None`).
     /// The brain needs it to let that person interrupt with a plain "stop".
     Speaking { user: Option<String> },
+    /// A direct message someone wrote to Bobby. `reply_to`: the id of Bobby's message it answers (Discord "reply"),
+    /// which is how the messenger tells an answer from an unrelated DM.
+    Dm { user: String, text: String, reply_to: Option<String> },
 }
 
 // ---------- Brain -> client ----------
@@ -234,6 +237,9 @@ pub enum Cap {
     /// Delete all Bobby's own messages of the channel.
     Clean { channel: Option<String> },
     MemberName { id: String },
+    /// Direct message to one member (the messenger when they are not in voice). Their written answers come back
+    /// as `ClientMsg::Dm`. Answers `{"message_id": "<id>"}`, the id a reply will carry in `reply_to`.
+    Dm { user: String, text: String },
     // Music (Bobby's own player, Discord only)
     /// `add: false` plays now, `add: true` queues (starts if nothing plays).
     MusicPlay { item: MusicItem, add: bool },
@@ -268,7 +274,7 @@ impl Cap {
         use Cap::*;
         match self {
             Mute { .. } | Deafen { .. } | Move { .. } | Disconnect { .. } | Join { .. } | Leave => CapKind::DiscordVoice,
-            Post { .. } | Ping { .. } | EditLast { .. } | DeleteLast { .. } | Clean { .. } | MemberName { .. } => CapKind::DiscordText,
+            Post { .. } | Ping { .. } | EditLast { .. } | DeleteLast { .. } | Clean { .. } | MemberName { .. } | Dm { .. } => CapKind::DiscordText,
             MusicPlay { .. } | MusicStop | MusicSkip | MusicReplay | MusicPause | MusicResume | MusicVolume { .. } | MusicNow | MusicQueue => CapKind::Music,
             PcMedia { .. } | PcNow => CapKind::PcMedia,
             PcVolume { .. } => CapKind::PcVolume,

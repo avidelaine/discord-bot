@@ -1,3 +1,3 @@
-C:/Users/alexa/Desktop/Personal Projects/discord-bot/_training/collected/2026-11-16/181949_771_pc_0.951.wav
-C:/Users/alexa/Desktop/Personal Projects/discord-bot/_training/collected/2026-11-16/221532_587_pc_forced.wav
-C:/Users/alexa/Desktop/Personal Projects/discord-bot/_training/collected/2026-11-16/182505_740_pc_0.903.wav
+_training/collected/2026-11-16/181949_771_pc_0.951.wav
+_training/collected/2026-11-16/221532_587_pc_forced.wav
+_training/collected/2026-11-16/182505_740_pc_0.903.wav

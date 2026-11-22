@@ -333,7 +333,8 @@ impl Bridge {
             collect(&self.cfg.root, &audio, score, Some(&tr.text), "pc");
         }
         let ms = t.elapsed().as_millis();
-        self.log(&format!("[local] {ms} ms  {:.1} s  {}  {:?}", audio.len() as f64 / 16000.0, tr.lang, tr.text));
+        let wake_ms = ms.saturating_sub(tr.ms as u128); // what came before Whisper: the wake word scan
+        self.log(&format!("[local] {ms} ms (wake {wake_ms}, whisper {})  {:.1} s  {}  {:?}", tr.ms, audio.len() as f64 / 16000.0, tr.lang, tr.text));
         if tr.text.is_empty() {
             return;
         }

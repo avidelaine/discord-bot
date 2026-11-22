@@ -10,8 +10,10 @@ while ((Get-Date) -lt $end) {
   # per-process dedicated GPU memory: Windows counter (nvidia-smi says N/A per process under WDDM)
   (Get-Counter '\GPU Process Memory(*)\Dedicated Usage' -ErrorAction SilentlyContinue).CounterSamples | ForEach-Object {
     if ($_.InstanceName -match 'pid_(\d+)_') { $k = [int]$Matches[1]; $vram[$k] = [int]($vram[$k] + $_.CookedValue / 1MB) } }
+  $cmd = @{}; Get-CimInstance Win32_Process -Filter "Name='python.exe'" | ForEach-Object { $cmd[[int]$_.ProcessId] = $_.CommandLine }
   foreach ($p in Get-Process -Name $names -ErrorAction SilentlyContinue) {
-    if ($p.Name -eq 'python' -and $p.Path -notmatch 'discord-bot') { continue }  # only Bobby's voice service
+    # only Bobby's voice service (the venv's python.exe is a launcher: the real interpreter lives outside the repo)
+    if ($p.Name -eq 'python' -and $cmd[$p.Id] -notmatch 'voice[\/]server\.py') { continue }
     $v = if ($vram.ContainsKey($p.Id)) { $vram[$p.Id] } else { 0 }
     '{0},{1},{2},{3:F0},{4:F0},{5}' -f $ts, $p.Name, $p.Id, $p.TotalProcessorTime.TotalMilliseconds, ($p.WorkingSet64 / 1MB), $v | Add-Content $Out
   }

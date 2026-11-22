@@ -538,6 +538,7 @@ dependencies = [
  "bobby-proto",
  "chrono",
  "futures-util",
+ "hound",
  "nvml-wrapper",
  "reqwest 0.12.28",
  "rusqlite",

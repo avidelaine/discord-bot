@@ -10,6 +10,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 bobby-proto = { workspace = true }
 tauri = { version = "2", features = ["tray-icon"] }
+hound = "3.5"
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
 axum = "0.8"

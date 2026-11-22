@@ -30,6 +30,13 @@ fn startup_load(unloaded: &AtomicBool, load: impl FnOnce()) -> bool {
     go
 }
 
+/// `timeout(d, f)` run to completion from a plain thread (the mic's sentence threads). The timer must be built
+/// inside the runtime: `block_on(tokio::time::timeout(..))` builds it outside and panics "no reactor running",
+/// which aborted the 0.2.0 app on the first PC sentence that reached Whisper.
+fn block_on_timeout<F: std::future::Future>(d: Duration, f: F) -> Result<F::Output, tokio::time::error::Elapsed> {
+    tauri::async_runtime::block_on(async move { tokio::time::timeout(d, f).await })
+}
+
 /// The Rust brain's ear on the PC: (text, lang, wake score, whisper ms) -> whether Bobby now waits for the next
 /// sentence without "Bobby". Unset: sentences go to the Node bot (`BOT_URL/local`).
 pub type Hook = Arc<dyn Fn(String, String, Option<f32>, u32) -> bool + Send + Sync>;
@@ -234,14 +241,14 @@ impl Bridge {
                 return self.log(&format!("[local] wake model failed to load, local mode not started: {e}"));
             }
         };
-        let (me, mut gate) = (self.clone(), Gate::new());
+        let (me, mut gate, replay_wake) = (self.clone(), Gate::new(), wake.clone());
         let started = mic::start(move |block| {
             if me.speaker.is_speaking() {
                 return gate.reset(); // Bobby talks: ignore the mic (no echo of its own voice)
             }
             if let Some(audio) = gate.feed(block) {
                 let (me, wake) = (me.clone(), wake.clone());
-                std::thread::spawn(move || me.sentence(audio, wake.as_deref()));
+                std::thread::spawn(move || me.sentence(audio, wake.as_deref(), true));
             }
         });
         let _mic = match started {
@@ -252,6 +259,9 @@ impl Bridge {
             }
         };
         self.log("[local] listening on the PC microphone");
+        if let Ok(list) = std::env::var("BOBBY_REPLAY") {
+            self.replay(list, replay_wake);
+        }
         while self.enabled.load(Ordering::SeqCst) {
             if _mic.failed() {
                 // the bot's periodic /local/on resync restarts the listener
@@ -263,14 +273,48 @@ impl Bridge {
         self.log("[local] stopped listening on the PC microphone");
     }
 
-    fn sentence(&self, audio: Vec<f32>, wake: Option<&Mutex<Wake>>) {
+    /// `BOBBY_REPLAY`: a text file, one 16 kHz mono WAV per line, played in a loop every 20 s into `sentence`, as if the
+    /// microphone had heard it: same kind of thread, same path (wake word, Whisper, brain, voice). For soak tests and
+    /// timing runs with nobody at the PC. Started once per process; skipped while local mode is off.
+    fn replay(self: &Arc<Self>, list: String, wake: Option<Arc<Mutex<Wake>>>) {
+        static STARTED: AtomicBool = AtomicBool::new(false);
+        if STARTED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let paths: Vec<String> = std::fs::read_to_string(&list).unwrap_or_default().lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect();
+        if paths.is_empty() {
+            return self.log(&format!("[replay] nothing to play in {list}"));
+        }
+        let me = self.clone();
+        std::thread::spawn(move || {
+            for p in paths.iter().cycle() {
+                std::thread::sleep(Duration::from_secs(20));
+                if !me.enabled.load(Ordering::SeqCst) {
+                    continue;
+                }
+                match hound::WavReader::open(p) {
+                    Ok(r) => {
+                        let audio: Vec<f32> = r.into_samples::<i16>().map_while(Result::ok).map(|s| f32::from(s) / 32768.0).collect();
+                        me.log(&format!("[replay] {p}"));
+                        me.sentence(audio, wake.as_deref(), false);
+                    }
+                    Err(e) => me.log(&format!("[replay] {p}: {e}")),
+                }
+            }
+        });
+    }
+
+    /// `keep`: save the clip for wake-word training (never for replayed files: they are already clips).
+    fn sentence(&self, audio: Vec<f32>, wake: Option<&Mutex<Wake>>, keep: bool) {
         let t = Instant::now();
         let mut score = None;
         if let Some(w) = wake {
             if Instant::now() >= *self.force_until.lock().unwrap_or_else(|e| e.into_inner()) {
                 let s = w.lock().unwrap_or_else(|e| e.into_inner()).score(&audio);
                 if s < self.cfg.models.wake_threshold {
-                    collect(&self.cfg.root, &audio, Some(s), None, "pc");
+                    if keep {
+                        collect(&self.cfg.root, &audio, Some(s), None, "pc");
+                    }
                     return; // not for Bobby: never transcribed
                 }
                 score = Some(s);
@@ -280,12 +324,14 @@ impl Bridge {
         let Some(stt) = self.stt.get() else {
             return self.log("[local] speech engine still loading, sentence dropped");
         };
-        let tr = match tauri::async_runtime::block_on(tokio::time::timeout(Duration::from_secs(60), stt.transcribe(&audio, LOCAL_HOTWORDS))) {
+        let tr = match block_on_timeout(Duration::from_secs(60), stt.transcribe(&audio, LOCAL_HOTWORDS)) {
             Ok(Ok(tr)) => tr,
             Ok(Err(e)) => return self.log(&format!("[local] transcription failed: {e}")),
             Err(_) => return self.log("[local] transcription timed out after 60 s, sentence dropped"),
         };
-        collect(&self.cfg.root, &audio, score, Some(&tr.text), "pc");
+        if keep {
+            collect(&self.cfg.root, &audio, score, Some(&tr.text), "pc");
+        }
         let ms = t.elapsed().as_millis();
         self.log(&format!("[local] {ms} ms  {:.1} s  {}  {:?}", audio.len() as f64 / 16000.0, tr.lang, tr.text));
         if tr.text.is_empty() {
@@ -426,6 +472,17 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
+
+    /// Regression (0.2.0 crash): from a plain thread, outside any runtime, like a mic sentence thread.
+    #[test]
+    fn timeout_from_a_plain_thread_does_not_panic() {
+        let t = std::thread::spawn(|| {
+            let done = block_on_timeout(Duration::from_secs(5), async { 7 });
+            let stuck = block_on_timeout(Duration::from_millis(20), std::future::pending::<()>());
+            (done.ok(), stuck.is_err())
+        });
+        assert_eq!(t.join().expect("no panic"), (Some(7), true));
+    }
 
     #[test]
     fn startup_load_is_skipped_once_a_deep_sleep_unloaded_whisper() {

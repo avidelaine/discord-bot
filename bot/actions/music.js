@@ -87,6 +87,7 @@ module.exports = {
     [/^(?:skip(?: (?:this|the) (?:song|track|music))?|next(?: song| track)?|suivante?|passe|saute|(?:musique|morceau|titre|chanson|piste) suivante?|(?:passe|saute) (?:cette |la )?(?:musique|chanson|piste|titre|morceau)|prochaine (?:musique|chanson))$/, () => act('music_skip')],
     [/^(?:stop|arrête|arrete)$/, () => [{ type: 'music_stop', text: '', quiet: true }]], // stops the music if any, else silence; never leaves
     [/^(?:(?:stop|arrête|arrete|coupe)(?: la| le| the)? (?:musique|music|radio))$/, () => act('music_stop')],
+    [/^(?:(?:passe|mets-toi|va|entre|bascule) en )?(?:deep sleep|veille profonde)$|^(?:dors|va dormir|endors-toi|go to sleep)$/, () => act('deep_sleep')], // Bobby's own sleep, never the PC's
     [/^(?:rejoue|replay|recommence)(?: (?:ça|ce son|cette musique|le morceau|this|it|the song|this song))?$|^(?:joue|play) (?:ça|it|this|that)(?: again| encore)$/, () => act('music_replay')],
     [UP, () => act('music_volume', 'up')],
     [DOWN, () => act('music_volume', 'down')],
@@ -108,6 +109,15 @@ module.exports = {
         (r, s) => (r.started ? playing.fr(s) : `J'ajoute ${r.label} à la file, position ${r.position}.`),
         (r, s) => (r.started ? playing.en(s) : `Added ${r.label} to the queue, position ${r.position}.`),
       ),
+    },
+    // Deep Sleep (Whisper unloaded, LLM stopped until "Bobby") lives in the Rust brain's sleep machine: on this line
+    // Bobby says so plainly instead of mistaking it for the PC's sleep.
+    deep_sleep: {
+      role: 'admin', run: async () => ({}),
+      say: {
+        fr: () => "Le deep sleep ne marche qu'avec mon cerveau Rust. Sur cette configuration, je reste éveillé.",
+        en: () => 'Deep sleep only works with my Rust brain. On this setup I stay awake.',
+      },
     },
     music_pause: simple('Pause.', 'Paused.', (p) => p.pause()),
     music_resume: simple('Je reprends.', 'Resuming.', (p) => p.resume()),

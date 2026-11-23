@@ -500,6 +500,20 @@ impl Player {
     }
 }
 
+/// The song that seeds a style's endless mix; None when the search found only mixes and streams.
+fn style_seed(entries: Vec<Entry>) -> Option<Entry> {
+    entries.into_iter().find(song)
+}
+
+async fn radio_track(style: &str) -> Result<Resolved, String> {
+    let mut stations = radio(style).await?;
+    if stations.is_empty() {
+        return Err(format!("no radio found for \"{style}\""));
+    }
+    let first = stations.remove(0);
+    Ok(Resolved { kind: "radio", id: String::new(), title: first.station.clone(), url: first.url, station: Some(first.station), alts: stations, live: true, duration: None, endless: None, seed: None })
+}
+
 /// Item -> track with a stream URL. Style: a real song of that style seeds the endless mix.
 async fn resolve(src: Src) -> Result<Resolved, String> {
     let item = match src {
@@ -507,19 +521,12 @@ async fn resolve(src: Src) -> Result<Resolved, String> {
         Src::Item(i) => i,
     };
     let (query, endless, seed) = match item {
-        MusicItem::Style { style } => {
-            let seed = listing(&format!("ytsearch15:{style}"), 15).await?.into_iter().find(song);
-            let seed = seed.ok_or_else(|| format!("nothing found on YouTube for \"{style}\""))?;
-            (watch(&seed.id), Some(Endless::Similar), Some(style))
-        }
-        MusicItem::Radio { style } => {
-            let mut stations = radio(&style).await?;
-            if stations.is_empty() {
-                return Err(format!("no radio found for \"{style}\""));
-            }
-            let first = stations.remove(0);
-            return Ok(Resolved { kind: "radio", id: String::new(), title: first.station.clone(), url: first.url, station: Some(first.station), alts: stations, live: true, duration: None, endless: None, seed: None });
-        }
+        MusicItem::Style { style } => match style_seed(listing(&format!("ytsearch15:{style}"), 15).await?) {
+            Some(seed) => (watch(&seed.id), Some(Endless::Similar), Some(style)),
+            // "chill", "lofi": YouTube only has hour-long mixes and live streams, so a radio of that style plays instead
+            None => return radio_track(&style).await,
+        },
+        MusicItem::Radio { style } => return radio_track(&style).await,
         MusicItem::Youtube { query, endless, seed } => (query, endless, seed),
     };
     let t = youtube(&query).await?;
@@ -575,6 +582,15 @@ mod tests {
     fn song_is_a_normal_track() {
         let e = |d| Entry { id: "a".into(), title: "t".into(), channel: "c".into(), duration: d };
         assert!(song(&e(Some(200.0))) && !song(&e(Some(7200.0))) && !song(&e(Some(30.0))) && !song(&e(None)));
+    }
+
+    /// Regression (2026-11-23, "musique chill": "nothing found on YouTube"): a style whose search returns only
+    /// mixes and live streams has no seed song, so `resolve` plays the style's radio instead.
+    #[test]
+    fn style_with_only_mixes_has_no_seed() {
+        let e = |id: &str, d| Entry { id: id.into(), title: "t".into(), channel: "c".into(), duration: d };
+        assert!(style_seed(vec![e("mix", Some(3600.0)), e("live", None), e("short", Some(20.0))]).is_none());
+        assert_eq!(style_seed(vec![e("mix", Some(3600.0)), e("song", Some(210.0))]).map(|s| s.id), Some("song".into()));
     }
 
     #[test]

@@ -11,6 +11,7 @@ const { XFADE } = require('./mixer');
 const watch = (id) => `https://www.youtube.com/watch?v=${id}`;
 const norm = (t = '') => t.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const song = (e) => e.duration >= 60 && e.duration <= 600; // a song: not a 2 h mix, a live set or a podcast
+const styleSeed = (entries) => entries.find(song) || null; // null: only mixes for that style, play its radio
 // "Judas (Hardstyle)" and "JUDAS (HARDSTYLE)" are the same song for the "already played" check
 const key = (title) => norm(title).replace(/\(.*?\)|\[.*?\]|official|video|clip|lyrics?|audio|hd|4k/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
 // Seconds played if a non-live track ended more than 5 s before its known duration, else null (bytes: s16le 48 kHz stereo).
@@ -43,9 +44,9 @@ class Player extends EventEmitter {
     const id = ++this.token;
     try { // the old track keeps playing while the new one is looked up
       if (item.kind === 'style') { // "joue du hardstyle": a real song of that style seeds the endless mix
-        const seed = (await listing(`ytsearch15:${item.style}`, 15)).find(song);
-        if (!seed) throw new Error(`nothing found on YouTube for "${item.style}"`);
-        item = { kind: 'youtube', query: watch(seed.id), endless: 'similar', seed: item.style };
+        const seed = styleSeed(await listing(`ytsearch15:${item.style}`, 15));
+        // "chill", "lofi": YouTube only has hour-long mixes and live streams, so a radio of that style plays instead
+        item = seed ? { kind: 'youtube', query: watch(seed.id), endless: 'similar', seed: item.style } : { kind: 'radio', style: item.style };
       }
       if (item.kind === 'radio') {
         const [first, ...alts] = await radio(item.style);
@@ -174,4 +175,4 @@ class Player extends EventEmitter {
   volumeDown(step = 10) { return this.setVolume(this.vol - step); }
 }
 
-module.exports = { Player, endedEarly };
+module.exports = { Player, endedEarly, styleSeed };

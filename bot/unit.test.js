@@ -141,6 +141,23 @@ for (const [phrase, type, text] of PC_CASES) {
   const a = quick(phrase);
   assert(a && a.length === 1 && a[0].type === type && a[0].text === text, `PC shortcut: "${phrase}" -> ${JSON.stringify(a)}`);
 }
+// 2026-11-23 (real use): "passe en deep sleep" is Bobby's own sleep, never the PC's (which still confirms).
+for (const phrase of ['passe en deep sleep.', 'passe en deep sleep', 'dors', 'mets-toi en veille profonde']) {
+  const a = quick(phrase);
+  assert(a && a.length === 1 && a[0].type === 'deep_sleep', `deep sleep: "${phrase}" -> ${JSON.stringify(a)}`);
+}
+assert.strictEqual(quick('mets le PC en veille')[0].type, 'pc_sleep');
+assert.strictEqual(needsConfirm(plan('mets le PC en veille'), 'super'), true);
+assert.strictEqual(needsConfirm([{ type: 'deep_sleep' }], 'super'), false);
+// "musique chill" is a style; with only hour-long mixes on YouTube, there is no seed song and its radio plays instead
+{
+  const [c] = quick("est-ce que tu peux jouer de la musique chill s'il te plaît");
+  assert.deepStrictEqual([c.type, c.text, c.kind], ['music_play', 'chill', 'style']);
+  const { styleSeed } = require('./music/player');
+  assert.strictEqual(styleSeed([{ id: 'mix', duration: 3600 }, { id: 'live', duration: null }]), null);
+  assert.strictEqual(styleSeed([{ id: 'mix', duration: 3600 }, { id: 'song', duration: 210 }]).id, 'song');
+}
+console.log('deep sleep and chill: ok');
 // Bobby's own Discord player will own these; the PC shortcuts must not take them.
 for (const phrase of ['pause', 'skip', 'suivant', 'volume 50', 'monte le son', 'lance de la musique', 'play despacito', 'ouvre un truc inconnu xyz']) {
   assert(!quick(phrase)?.some((s) => s.type.startsWith('pc_')), `not a PC shortcut: "${phrase}"`);

@@ -119,7 +119,7 @@ pub fn module() -> Module {
             r##"- pc_volume : volume de Windows (le PC, pas Discord), "text" vaut up, down, mute, unmute ou un nombre de 0 à 100"##,
             r##"- pc_launch : lancer le jeu ou l'application nommé dans "text" (Valorant, Steam, Epic, Claude, ChatGPT...)"##,
             r##"- pc_close : fermer le jeu ou l'application nommé dans "text" ("ferme Apex", "quitte Spotify")"##,
-            r##"- pc_lock / pc_sleep / pc_shutdown : verrouiller, mettre en veille ou éteindre le PC"##,
+            r##"- pc_lock / pc_sleep / pc_shutdown : verrouiller, mettre en veille ou éteindre le PC. "deep sleep", "dors", "veille profonde" sans le mot PC parlent de Bobby lui-même : jamais pc_sleep"##,
             r##"- pc_gpu : température, charge et mémoire de la carte graphique (GPU) du PC, en français ou en anglais ("graphics card")"##,
         ],
         rules: vec![

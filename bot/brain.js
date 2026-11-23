@@ -64,7 +64,7 @@ const SCHEMA = {
       items: {
         type: 'object',
         properties: {
-          type: { enum: Object.keys(ACTIONS) },
+          type: { enum: Object.keys(ACTIONS).filter((k) => k !== 'deep_sleep') }, // deep_sleep: shortcut only, like the Rust brain
           who: { type: 'array', items: { type: 'string' } },
           except: { type: 'array', items: { type: 'string' } },
           channel: { type: 'string' },

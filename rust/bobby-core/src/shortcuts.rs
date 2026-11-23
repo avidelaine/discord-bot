@@ -253,6 +253,12 @@ mod tests {
             ("can you mute Prime Ilias please?", Some("mute:Prime Ilias")),
             ("Mute Bobby", None),
             ("quelle heure est-il ?", Some("time:")),
+            // 2026-11-23 (real use): "passe en deep sleep" was taken for the PC's sleep; "musique chill" is a style
+            ("passe en deep sleep.", Some("deep_sleep:")),
+            ("dors", Some("deep_sleep:")),
+            ("mets-toi en veille profonde", Some("deep_sleep:")),
+            ("mets le PC en veille", Some("pc_sleep:")),
+            ("est-ce que tu peux jouer de la musique chill s'il te plaît ?", Some("music_play:")),
             ("il est quelle heure ?", Some("time:")),
             ("est-ce que tu peux me lister les features qu'on t'a déjà implémentées ?", Some("help:")),
             ("qu'est-ce que tu sais faire", Some("help:")),

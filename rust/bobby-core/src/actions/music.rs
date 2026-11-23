@@ -189,7 +189,7 @@ pub fn module() -> Module {
             q(re(r"^(?:stop|arrête|arrete)$"), |_| vec![json!({ "type": "music_stop", "text": "", "quiet": true })]), // stops the music if any, else silence; never leaves
             q(re(r"^(?:(?:stop|arrête|arrete|coupe)(?: la| le| the)? (?:musique|music|radio))$"), |_| act("music_stop", "", None)),
             q(re(r"^(?:rejoue|replay|recommence)(?: (?:ça|ce son|cette musique|le morceau|this|it|the song|this song))?$|^(?:joue|play) (?:ça|it|this|that)(?: again| encore)$"), |_| act("music_replay", "", None)),
-            q(re(r"^(?:deep sleep|dors|va dormir|veille profonde|go to sleep)$"), |_| act("deep_sleep", "", None)),
+            q(re(r"^(?:(?:passe|mets-toi|va|entre|bascule) en )?(?:deep sleep|veille profonde)$|^(?:dors|va dormir|endors-toi|go to sleep)$"), |_| act("deep_sleep", "", None)), // Bobby's own sleep, never the PC's
             q(VOICE_UP.clone(), |_| act("voice_volume", "up", None)),
             q(VOICE_DOWN.clone(), |_| act("voice_volume", "down", None)),
             q(VOICE_SET.clone(), |m| act("voice_volume", group(m, 1), None)),

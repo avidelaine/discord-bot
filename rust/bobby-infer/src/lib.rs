@@ -258,6 +258,9 @@ pub fn wake_heard(who: Option<String>) {
     }
 }
 
+/// A TTS engine shared between the PC and the Discord client, empty while it loads (one copy of the voices in RAM).
+pub type TtsSlot = std::sync::Arc<std::sync::OnceLock<Tts>>;
+
 /// Text-to-speech by address.
 pub enum Tts {
     Http(HttpTts),

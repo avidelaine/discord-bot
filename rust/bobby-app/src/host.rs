@@ -418,6 +418,7 @@ impl Host {
             dc.voice_url = if local(stt) && local(tts) { "local".into() } else if local(stt) { tts.clone() } else { stt.clone() };
             dc.models_dir = self.cfg.models_dir();
             dc.shared_stt = local(&dc.voice_url).then(|| self.bridge.stt_slot());
+            dc.shared_tts = local(&dc.voice_url).then(|| self.bridge.tts_slot());
             let (to_client, from_brain) = mpsc::unbounded_channel();
             let (to_brain, from_client) = mpsc::unbounded_channel();
             *lock(&router.discord) = Some(to_client);

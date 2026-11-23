@@ -31,3 +31,35 @@ voice\.venv\Scripts\python.exe -I bench\replay_node.py bench\bench-clips.txt 6 >
 
 python bench\summary.py rust-load.csv
 ```
+
+## Results (2026-11-23, RTX 4060 8 GB, nobody at the PC)
+
+Rust = app 0.2.1 in all-Rust mode. Node = app with the Node bot and the Python voice service. Same LLM
+(`llama-server`, Qwen3-4B, identical on both lines). 18 replayed sentences per line.
+
+### Resources (all Bobby processes; CPU % of one core; MB, average with max in brackets)
+
+| | Rust idle | Node idle | Rust under replay | Node under replay |
+|---|---|---|---|---|
+| CPU | 1.7 % | 1.4 % | 10.2 % | 11.2 % |
+| RAM | 4290 | 3791 | 4611 (4975) | 4677 (4975) |
+| GPU memory | 4306 | 4288 | 4380 (4506) | 4374 (4506) |
+| RAM without llama-server | 1475 (`bobby-app`) | 975 (app 59 + node 77 + python 839) | 1596 | 1552 |
+| GPU memory without llama-server | 1125 | 1107 | 1192 (1317) | 1187 (1317) |
+
+### Response times (ms, median with max in brackets)
+
+| Stage | Rust | Node |
+|---|---|---|
+| Wake word scan | 36 (42) | 82 (88) |
+| Whisper | 477 (751) | 496 (1227) |
+| Shortcut question, heard to answer ready ("quelle heure") | 548 (785) | 583 (1313) |
+| LLM stage ("qui discorde") | 1050 (2842) | 1118 (2787) |
+| LLM question, heard to answer ready | 2188 (3317) | 2098 (3332) |
+| Voice, first audio (warm) | 23, in process | 34, over HTTP |
+
+Reading: response times are on par. Rust is ahead on the wake word (2.3x) and steadier on Whisper (no
+1.2 s outlier), and the LLM dominates every LLM question on both lines. Rust's idle RAM is 500 MB higher: the
+Discord client loads a second copy of the Piper voices (242 MB of models) next to the PC's, and a second wake word
+model. Sharing them is the next change. The LLM path's end-to-end numbers mix in a small action step
+(n = 2 or 3), so their 90 ms gap is noise.

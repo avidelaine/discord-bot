@@ -451,7 +451,9 @@ function resolve(actions, ctx) {
   });
 }
 
-const needsConfirm = (plan) => plan.some((s) => ACTIONS[s.type].confirm) || plan.reduce((n, s) => n + (s.targets?.length || 0), 0) >= 3;
+// The super admin kicks from voice without the "Tu confirmes ?" (Alexandre's call); a plan touching 3+ people always confirms.
+const SUPER_NO_CONFIRM = new Set(['disconnect']);
+const needsConfirm = (plan, role) => plan.some((s) => ACTIONS[s.type].confirm && !(role === 'super' && SUPER_NO_CONFIRM.has(s.type))) || plan.reduce((n, s) => n + (s.targets?.length || 0), 0) >= 3;
 
 // Highest role the plan needs; undo needs the role of what it undoes.
 // One undo per person: "annule" only ever undoes your own last action.
@@ -749,7 +751,7 @@ async function hear({ text, lang = 'fr', score = null, member, guild, tEnd, sttM
     }
     // "es-tu capable de supprimer tes messages ?" answers and offers, never runs; "appelle-moi" offers a mention.
     if (decide(out, plan) === 'offer') return offer(plan, plan.some((s) => s.offer === 'call') ? L.call : `${out?.say || L.canDo} ${L.wantMe}`, w);
-    if (needsConfirm(plan)) {
+    if (needsConfirm(plan, role)) {
       pending.set(member.id, { until: Date.now() + 10000, plan, w });
       rec.outcome = 'confirm_asked';
       return say(`${describe(plan, lang)} ${L.confirm}`);
@@ -811,4 +813,4 @@ async function intent(query, ctx, lang = 'fr', history = []) {
   return { via: 'llm', ...out, written: Boolean(w || out.ecrit), decision };
 }
 
-module.exports = { STOP, writing, hear, intent, guard, noteGuard, aboutBobby, remember, conversation, reload, report, decide, unsure, journal, expecting, hotwords, context, understand, resolve, quick, cancels, confirms, pick, sim, describe, run, needed, roleTable, SYSTEM };
+module.exports = { STOP, writing, hear, intent, guard, noteGuard, aboutBobby, remember, conversation, reload, report, decide, unsure, journal, expecting, hotwords, context, understand, resolve, quick, cancels, confirms, pick, sim, describe, run, needed, needsConfirm, roleTable, SYSTEM };

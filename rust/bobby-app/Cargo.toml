@@ -1,6 +1,6 @@
 [package]
 name = "bobby-app"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Bobby's desktop control app: supervisor, metrics, journal, tray"
 
@@ -10,6 +10,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 bobby-proto = { workspace = true }
 tauri = { version = "2", features = ["tray-icon"] }
+hound = "3.5"
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
 axum = "0.8"

@@ -64,11 +64,28 @@ fn open_window(app: &AppHandle) {
         .build();
 }
 
+/// The release profile aborts on panic and the app has no console: stderr goes through a pipe to the log thread,
+/// which the abort kills before it writes. Write the panic (with its backtrace) to the log file directly, first.
+/// Own file handle, no lock: the panic may come from inside `Supervisor::log`.
+fn log_panics(path: std::path::PathBuf) {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        let thread = std::thread::current().name().unwrap_or("unnamed").to_string();
+        let bt = std::backtrace::Backtrace::force_capture();
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = writeln!(f, "\n{} [panic] thread '{thread}' {info}\n{bt}", chrono::Local::now().format("%H:%M:%S"));
+        }
+        default(info);
+    }));
+}
+
 fn main() {
     let cfg = config::load();
     let logs = cfg.logs();
     let _ = std::fs::create_dir_all(&logs);
-    let (bus, _) = tokio::sync::broadcast::channel(512);
+    log_panics(logs.join("bobby.log"));
+    let (bus, _)= tokio::sync::broadcast::channel(512);
     let sup = Supervisor::new(&cfg, bus.clone());
     let hidden = std::env::args().any(|a| a == "--hidden");
 

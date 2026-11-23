@@ -19,6 +19,8 @@ pub struct Config {
     pub models_dir: PathBuf,
     /// Whisper already loaded by the host (the app shares its PC one): used instead of loading a second copy in VRAM.
     pub shared_stt: Option<std::sync::Arc<bobby_infer::SttSlot>>,
+    /// Piper already loaded (or loading) by the host: used instead of a second copy of the voices in RAM.
+    pub shared_tts: Option<bobby_infer::TtsSlot>,
 }
 
 // Custom Debug: a stray `{:?}` in a log must never leak the token.
@@ -65,6 +67,7 @@ impl Config {
                 .unwrap_or_default(),
             models_dir: get("MODELS_DIR").filter(|v| !v.is_empty()).map_or_else(|| env_dir.join("models"), PathBuf::from),
             shared_stt: None,
+            shared_tts: None,
         })
     }
 

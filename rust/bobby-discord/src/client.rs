@@ -358,7 +358,7 @@ pub async fn run_until(
         .map_err(|e| format!("discord client: {e}"))?;
     if bobby_infer::is_local(&cfg.voice_url) {
         // Models load in the background so the gateway starts at once; callers tolerate "not loaded yet".
-        tokio::spawn(load_local_engines(cfg.models_dir.clone(), cfg.shared_stt.clone()));
+        tokio::spawn(load_local_engines(cfg.models_dir.clone(), cfg.shared_stt.clone(), cfg.shared_tts.clone()));
     }
     let (mix_tx, mix_rx) = tokio::sync::mpsc::unbounded_channel();
     let mixer = Arc::new(Mutex::new(Mixer::new(mix_tx)));
@@ -394,7 +394,7 @@ pub async fn run_until(
 
 /// Loads Whisper, the wake word and Piper in process (slow: once, off the async threads). A failure is
 /// logged once and leaves the engine unset, which behaves like an unreachable voice service.
-async fn load_local_engines(models: std::path::PathBuf, shared: Option<Arc<bobby_infer::SttSlot>>) {
+async fn load_local_engines(models: std::path::PathBuf, shared: Option<Arc<bobby_infer::SttSlot>>, shared_tts: Option<bobby_infer::TtsSlot>) {
     use bobby_infer::listen::{wake_threshold, Listener};
     if receive::LOCAL_LISTENER.get().is_some() {
         return; // a restarted client in the same process keeps the engines it loaded
@@ -407,7 +407,10 @@ async fn load_local_engines(models: std::path::PathBuf, shared: Option<Arc<bobby
         };
         let root = models.parent().map(|p| p.to_path_buf());
         let listener = Listener::new(stt, Some(&models.join("wakeword")), wake_threshold(), root);
-        let tts = bobby_infer::Tts::from_addr("local", &models).map_err(|e| format!("tts: {e}"))?;
+        let tts = match shared_tts {
+            Some(slot) => slot,
+            None => Arc::new(OnceLock::from(bobby_infer::Tts::from_addr("local", &models).map_err(|e| format!("tts: {e}"))?)),
+        };
         Ok::<_, String>((listener, tts))
     })
     .await

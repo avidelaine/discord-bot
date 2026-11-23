@@ -133,13 +133,14 @@ fn loud(pcm: Vec<i16>) -> Vec<i16> {
     collect(decode_wav(normalize(&wav)))
 }
 
-/// The in-process Piper engine (`VOICE_URL=local`), loaded once by `client::run`.
-pub static LOCAL_TTS: std::sync::OnceLock<bobby_infer::Tts> = std::sync::OnceLock::new();
+/// The in-process Piper engine (`VOICE_URL=local`), set once by `client::run`: the host's slot when it shares one
+/// (empty while the host still loads it), else a copy loaded by the client.
+pub static LOCAL_TTS: std::sync::OnceLock<bobby_infer::TtsSlot> = std::sync::OnceLock::new();
 
 async fn fetch_tts(voice_url: &str, lang: &str, voice: &str, text: &str) -> Result<Vec<i16>, String> {
     let t0 = std::time::Instant::now();
     if bobby_infer::is_local(voice_url) {
-        let tts = LOCAL_TTS.get().ok_or("local tts not loaded")?;
+        let tts = LOCAL_TTS.get().and_then(|s| s.get()).ok_or("local tts not loaded")?;
         let wav = tokio::time::timeout(Duration::from_secs(20), bobby_proto::infer::Speak::speak(tts, text, lang, voice))
             .await
             .map_err(|_| "local tts timed out".to_string())?

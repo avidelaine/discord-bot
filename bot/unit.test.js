@@ -8,7 +8,7 @@ const fs = require('fs');
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'bobby-test-')); // never touch the real data/
 process.env.JOURNAL_FILE = path.join(process.env.DATA_DIR, 'conversations.jsonl'); // never the real journal
 process.env.BOBBY_PC_DRY = '1'; // PC actions only log: no sleep, lock, launch or volume change during tests
-const { resolve, quick, cancels, pick, sim, describe, run, needed } = require('./brain');
+const { resolve, quick, cancels, pick, sim, describe, run, needed, needsConfirm } = require('./brain');
 const roles = require('./roles');
 const { load, save } = require('./store');
 const ask = require('./actions/ask');
@@ -110,6 +110,11 @@ const plan = (sentence) => resolve(quick(sentence), ctx);
 assert.strictEqual(needed(plan('mute Zyklon')), 'admin');
 assert.strictEqual(needed(plan('quelle heure est-il')), 'prime');
 assert.strictEqual(needed(plan('passe Marie admin')), 'super');
+// Kick from voice: the super admin acts at once, an admin confirms; 3 people or more always confirm.
+assert.strictEqual(needsConfirm(plan('kick Zyklon'), 'super'), false);
+assert.strictEqual(needsConfirm(plan('kick Zyklon'), 'admin'), true);
+assert.strictEqual(needsConfirm([{ type: 'disconnect', targets: [{}, {}, {}] }], 'super'), true);
+assert.strictEqual(needsConfirm(plan('éteins le PC'), 'super'), true); // other confirmations are unchanged
 assert(roles.allowed('prime', needed(plan('quelle heure est-il'))));
 assert(!roles.allowed('prime', needed(plan('mute Zyklon'))));
 assert(!roles.allowed('admin', needed(plan('passe Marie admin'))));

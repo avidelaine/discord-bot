@@ -790,7 +790,7 @@ impl<L: Understand + Sync> Brain<L> {
             self.offer(r, &plan, &line, w);
             return Ok(());
         }
-        if needs_confirm(&plan) {
+        if needs_confirm(&plan, role) {
             self.set_pending(user, 10000, Some(plan.clone()), w);
             set(r, "outcome", json!("confirm_asked"));
             let line = format!("{} {}", self.describe(&plan, lang), l.confirm);
@@ -863,6 +863,7 @@ mod tests {
     use bobby_proto::msg::{BrainMsg, Cap, Channel, Member};
 
     const ADMIN: &str = "261531632589078528"; // the default super admin
+    const PLAIN_ADMIN: &str = "397478613559148545"; // an admin, not super (the `ADMINS` default)
 
     fn member(id: &str, name: &str, chan: &str) -> Member {
         Member { id: id.into(), name: name.into(), username: format!("{}_u", name.to_lowercase()), global_name: None, channel: Some(chan.into()), roles: vec![], bot: false }
@@ -978,22 +979,42 @@ mod tests {
     #[tokio::test]
     async fn confirm_accepted_and_refused() {
         let r = rig(vec![], ok);
-        r.hear("Bobby, kick Kévin", ADMIN).await;
+        r.hear("Bobby, kick Kévin", PLAIN_ADMIN).await;
         assert_eq!(r.last()["outcome"], "confirm_asked");
         assert_eq!(r.said(), ["Je déconnecte Kévin. Tu confirmes ?"]);
         assert!(caps(&r.sent).is_empty());
-        r.hear("Oui", ADMIN).await;
+        r.hear("Oui", PLAIN_ADMIN).await;
         assert_eq!(caps(&r.sent), vec![Cap::Disconnect { users: vec!["kev".into()] }]);
         let j = r.last();
         assert_eq!(j["outcome"], "confirmed");
         assert_eq!(j["confirm"], true);
         // refused
         let r = rig(vec![], ok);
-        r.hear("Bobby, kick Kévin", ADMIN).await;
-        r.hear("non", ADMIN).await;
+        r.hear("Bobby, kick Kévin", PLAIN_ADMIN).await;
+        r.hear("non", PLAIN_ADMIN).await;
         assert!(caps(&r.sent).is_empty());
         assert_eq!(r.last()["outcome"], "cancelled");
         assert_eq!(r.said().last().unwrap(), "D'accord, j'annule.");
+    }
+
+    /// Alexandre's call: the super admin kicks from voice at once; an admin still gets "Tu confirmes ?" (above).
+    #[tokio::test]
+    async fn super_admin_kicks_without_confirmation() {
+        let r = rig(vec![], ok);
+        r.hear("Bobby, kick Kévin", ADMIN).await;
+        assert_eq!(caps(&r.sent), vec![Cap::Disconnect { users: vec!["kev".into()] }]);
+        assert_eq!(r.last()["outcome"], "done");
+        assert!(r.said().iter().all(|s| !s.contains("confirmes")), "{:?}", r.said());
+        assert!(!r.brain.expecting(ADMIN)); // no confirmation window left open
+    }
+
+    /// A plan touching 3 people or more still confirms, even for the super admin.
+    #[tokio::test]
+    async fn super_admin_still_confirms_a_group_kick() {
+        let r = rig(vec![json!({"actions": [{"type": "disconnect", "who": ["Kévin", "Zyklon", "Passant"]}], "say": ""})], ok);
+        r.hear("Bobby, kick Kévin, Zyklon et Passant", ADMIN).await;
+        assert_eq!(r.last()["outcome"], "confirm_asked", "{:?}", r.last());
+        assert!(caps(&r.sent).is_empty());
     }
 
     #[tokio::test]

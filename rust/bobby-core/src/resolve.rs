@@ -163,8 +163,13 @@ pub fn resolve(raw_actions: &[Value], ctx: &Ctx, store: &Store) -> Result<Vec<St
         .collect()
 }
 
-pub fn needs_confirm(plan: &[Step]) -> bool {
-    plan.iter().any(|s| actions::def(&s.kind).is_some_and(|d| d.confirm)) || plan.iter().map(|s| s.targets.as_ref().map_or(0, Vec::len)).sum::<usize>() >= 3
+/// Actions the super admin runs without the "Tu confirmes ?" (Alexandre's call: a kick from voice is his to make
+/// at once). Everyone else still confirms; a plan touching 3 people or more always confirms, whoever asks.
+const SUPER_NO_CONFIRM: [&str; 1] = ["disconnect"];
+
+pub fn needs_confirm(plan: &[Step], role: Role) -> bool {
+    let asks = |s: &Step| actions::def(&s.kind).is_some_and(|d| d.confirm) && !(role == Role::Super && SUPER_NO_CONFIRM.contains(&s.kind.as_str()));
+    plan.iter().any(asks) || plan.iter().map(|s| s.targets.as_ref().map_or(0, Vec::len)).sum::<usize>() >= 3
 }
 
 /// Highest role the plan needs; undo needs the role of what it undoes (`undo_role`, from the undo registry).
@@ -243,7 +248,7 @@ mod tests {
         }
         for (t, phrase) in [("pc_lock", "verrouille le PC"), ("pc_sleep", "mets le PC en veille"), ("pc_shutdown", "éteins le PC")] {
             assert!(crate::actions::def(t).unwrap().confirm, "{t} needs confirm");
-            assert!(needs_confirm(&plan(phrase)));
+            assert!(needs_confirm(&plan(phrase), Role::Super));
         }
         for t in ["pc_media", "pc_volume", "pc_launch", "pc_gpu"] {
             assert!(!crate::actions::def(t).unwrap().confirm);
